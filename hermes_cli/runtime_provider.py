@@ -88,6 +88,36 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
     return _loopback_hostname(base_url_hostname(bu))
 
 
+def run_api_key_helper(command: str) -> str:
+    """Run an api_key_helper command and return its stdout as the API key.
+
+    Uses stdin=DEVNULL because some helpers (e.g. coding-cli-helper.exe)
+    hang when stdin is a pipe or non-console handle.
+    """
+    import subprocess, shlex
+    try:
+        if isinstance(command, str) and not command.startswith("["):
+            args = shlex.split(command, posix=False)
+        else:
+            args = command
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+        key = result.stdout.strip()
+        if key:
+            logger.debug("api_key_helper produced a key (len=%d)", len(key))
+            return key
+        if result.stderr:
+            logger.warning("api_key_helper stderr: %s", result.stderr[:200])
+    except Exception as e:
+        logger.warning("api_key_helper failed: %s", e)
+    return ""
+
+
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     """Auto-detect api_mode from the resolved base URL.
 
@@ -514,7 +544,7 @@ def _resolve_runtime_from_pool_entry(
     if provider == "lmstudio":
         base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
 
-    return {
+    result = {
         "provider": provider,
         "api_mode": api_mode,
         "base_url": base_url,
@@ -523,6 +553,9 @@ def _resolve_runtime_from_pool_entry(
         "credential_pool": pool,
         "requested_provider": requested_provider,
     }
+    if getattr(entry, "headers", None):
+        result["default_headers"] = dict(entry.headers)
+    return result
 
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
@@ -640,9 +673,14 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 continue
             # Match exact name or normalized name
             name_norm = _normalize_custom_provider_name(ep_name)
-            # Resolve the API key from the env var name stored in key_env
+            # Resolve the API key: api_key_helper > key_env > inline api_key
+            helper_cmd = str(entry.get("api_key_helper", "") or "").strip()
             key_env = str(entry.get("key_env", "") or "").strip()
-            resolved_api_key = _getenv(key_env, "").strip() if key_env else ""
+            resolved_api_key = ""
+            if helper_cmd:
+                resolved_api_key = run_api_key_helper(helper_cmd)
+            if not resolved_api_key and key_env:
+                resolved_api_key = _getenv(key_env, "").strip()
             # Fall back to inline api_key when key_env is absent or unresolvable
             if not resolved_api_key:
                 resolved_api_key = str(entry.get("api_key", "") or "").strip()
@@ -655,7 +693,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "name": entry.get("name", ep_name),
                         "base_url": base_url.strip(),
                         "api_key": resolved_api_key,
-                        "model": entry.get("default_model", ""),
+                        "model": entry.get("default_model") or entry.get("model", ""),
                     }
                     extra_body = entry.get("extra_body")
                     if isinstance(extra_body, dict):
@@ -671,6 +709,8 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     if api_mode:
                         result["api_mode"] = api_mode
                     _lift_max_output_tokens(entry, result)
+                    if isinstance(entry.get("default_headers"), dict):
+                        result["default_headers"] = entry["default_headers"]
                     return result
             # Also check the 'name' field if present
             display_name = entry.get("name", "")
@@ -684,7 +724,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "name": display_name,
                             "base_url": base_url.strip(),
                             "api_key": resolved_api_key,
-                            "model": entry.get("default_model", ""),
+                            "model": entry.get("default_model") or entry.get("model", ""),
                         }
                         extra_body = entry.get("extra_body")
                         if isinstance(extra_body, dict):
@@ -693,6 +733,8 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         if api_mode:
                             result["api_mode"] = api_mode
                         _lift_max_output_tokens(entry, result)
+                        if isinstance(entry.get("default_headers"), dict):
+                            result["default_headers"] = entry["default_headers"]
                         return result
 
     # Fall back to custom_providers: list (legacy format)
@@ -975,8 +1017,13 @@ def _resolve_named_custom_runtime(
 
     _cp_is_openai_url   = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
     _cp_is_openrouter   = base_url_host_matches(base_url, "openrouter.ai")
+    # api_key_helper takes priority — runs a command to get a fresh token
+    helper_cmd = str(custom_provider.get("api_key_helper", "") or "").strip()
+    helper_key = run_api_key_helper(helper_cmd) if helper_cmd else ""
+
     api_key_candidates = [
         (explicit_api_key or "").strip(),
+        helper_key,
         str(custom_provider.get("api_key", "") or "").strip(),
         _getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
         # Gate provider env keys on their authoritative hosts — sending
@@ -1007,6 +1054,24 @@ def _resolve_named_custom_runtime(
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = request_overrides
+    # Propagate default_headers for custom endpoints (e.g. MTK AIDE Gateway).
+    # ${_API_KEY} → resolved api_key (from helper/env/inline).
+    # ${OTHER} → os.getenv(OTHER) if set, else keep literal.
+    raw_headers = custom_provider.get("default_headers")
+    if raw_headers and isinstance(raw_headers, dict):
+        import re as _re
+        resolved_headers = {}
+        for k, v in raw_headers.items():
+            def _expand(m, _key=api_key):
+                var = m.group(1)
+                if var == "_API_KEY":
+                    return _key if _key else m.group(0)
+                env_val = os.getenv(var, "").strip()
+                if env_val:
+                    return env_val
+                return m.group(0)
+            resolved_headers[str(k)] = _re.sub(r"\$\{(\w+)\}", _expand, str(v))
+        result["default_headers"] = resolved_headers
     return result
 
 

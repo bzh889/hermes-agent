@@ -153,6 +153,7 @@ class PooledCredential:
     agent_key_expires_at: Optional[str] = None
     request_count: int = 0
     extra: Dict[str, Any] = None  # type: ignore[assignment]
+    headers: Optional[Dict[str, str]] = None
 
     def __post_init__(self):
         if self.extra is None:
