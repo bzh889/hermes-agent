@@ -435,6 +435,22 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
+    "aide": ProviderConfig(
+        id="aide",
+        name="MTK AIDE Gateway",
+        auth_type="api_key",
+        inference_base_url="https://mlop-azure-gateway.mediatek.inc/v1",
+        api_key_env_vars=("AIDE_API_KEY",),
+        base_url_env_var="AIDE_BASE_URL",
+    ),
+    "aide-io": ProviderConfig(
+        id="aide-io",
+        name="MTK AIDE Gateway (IO)",
+        auth_type="api_key",
+        inference_base_url="https://mlop-azure-gateway-io.mediatek.inc/v1",
+        api_key_env_vars=("AIDE_IO_API_KEY",),
+        base_url_env_var="AIDE_IO_BASE_URL",
+    ),
 }
 
 # Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
@@ -1062,7 +1078,7 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     try:
-        raw = json.loads(auth_file.read_text())
+        raw = json.loads(auth_file.read_text(encoding="utf-8"))
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
@@ -3776,7 +3792,7 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     if not auth_path.is_file():
         return None
     try:
-        payload = json.loads(auth_path.read_text())
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
         tokens = payload.get("tokens")
         if not isinstance(tokens, dict):
             return None
