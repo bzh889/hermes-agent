@@ -93,28 +93,36 @@ def run_api_key_helper(command: str) -> str:
 
     Uses stdin=DEVNULL because some helpers (e.g. coding-cli-helper.exe)
     hang when stdin is a pipe or non-console handle.
+    Retries once on timeout since CCH can be slow under concurrent calls.
     """
     import subprocess, shlex
-    try:
-        if isinstance(command, str) and not command.startswith("["):
-            args = shlex.split(command, posix=False)
-        else:
-            args = command
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            stdin=subprocess.DEVNULL,
-        )
-        key = result.stdout.strip()
-        if key:
-            logger.debug("api_key_helper produced a key (len=%d)", len(key))
-            return key
-        if result.stderr:
-            logger.warning("api_key_helper stderr: %s", result.stderr[:200])
-    except Exception as e:
-        logger.warning("api_key_helper failed: %s", e)
+    if isinstance(command, str) and not command.startswith("["):
+        args = shlex.split(command, posix=False)
+    else:
+        args = command
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                stdin=subprocess.DEVNULL,
+            )
+            key = result.stdout.strip()
+            if key:
+                logger.debug("api_key_helper produced a key (len=%d)", len(key))
+                return key
+            if result.stderr:
+                logger.warning("api_key_helper stderr: %s", result.stderr[:200])
+        except subprocess.TimeoutExpired:
+            if attempt == 0:
+                logger.debug("api_key_helper timed out, retrying...")
+                continue
+            logger.warning("api_key_helper timed out after retry")
+        except Exception as e:
+            logger.warning("api_key_helper failed: %s", e)
+            break
     return ""
 
 
@@ -646,7 +654,20 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     # is exempt from the shadow check — it is not a built-in to defer to.
     if requested_norm == "auto":
         return None
-    if requested_norm != "custom" and not requested_norm.startswith("custom:"):
+    config = load_config()
+
+    # If the user explicitly defined this provider in config.yaml providers:
+    # dict, treat it as a custom provider even if it shadows a built-in.
+    # This lets providers like "aide" use api_key_helper/default_headers
+    # from config while still being registered in PROVIDER_REGISTRY.
+    user_providers = config.get("providers")
+    has_user_override = (
+        isinstance(user_providers, dict)
+        and requested_norm in user_providers
+        and isinstance(user_providers.get(requested_norm), dict)
+    )
+
+    if requested_norm != "custom" and not requested_norm.startswith("custom:") and not has_user_override:
         try:
             canonical = auth_mod.resolve_provider(requested_norm)
         except AuthError:
@@ -662,8 +683,6 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # ``test_named_custom_provider_does_not_shadow_builtin_provider``.
             if (canonical or "").strip().lower() == requested_norm:
                 return None
-
-    config = load_config()
     
     # First check providers: dict (new-style user-defined providers)
     providers = config.get("providers")

@@ -1365,7 +1365,7 @@ def _read_nous_auth() -> Optional[dict]:
     try:
         if not _AUTH_JSON_PATH.is_file():
             return None
-        data = json.loads(_AUTH_JSON_PATH.read_text())
+        data = json.loads(_AUTH_JSON_PATH.read_text(encoding="utf-8"))
         if data.get("active_provider") != "nous":
             return None
         provider = data.get("providers", {}).get("nous", {})
@@ -4232,6 +4232,12 @@ def resolve_provider_client(
                     raw_base_for_wrap = custom_base
                 _clean_base2, _dq2 = _extract_url_query_params(openai_base)
                 _extra2 = {"default_query": _dq2} if _dq2 else {}
+                # MTK AIDE: seed the named provider's own default_headers (e.g.
+                # api-key) so auxiliary calls (title/compression/vision) carry
+                # them too; global model.default_headers then merge on top.
+                _cust_headers2 = custom_entry.get("default_headers")
+                if isinstance(_cust_headers2, dict) and _cust_headers2:
+                    _extra2["default_headers"] = dict(_cust_headers2)
                 _headers2 = _apply_user_default_headers(_extra2.get("default_headers"))
                 if _headers2:
                     _extra2["default_headers"] = _headers2

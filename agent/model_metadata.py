@@ -20,6 +20,7 @@ import yaml
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname
 
 from hermes_constants import OPENROUTER_MODELS_URL
+from agent.credential_pool import _load_config_safe
 
 logger = logging.getLogger(__name__)
 
@@ -1994,6 +1995,31 @@ def get_model_context_length(
                     )
                     return length
             return DEFAULT_FALLBACK_CONTEXT
+
+    # 3b. AIDE gateway — use /llm/v3/models metadata
+    if provider in ("aide", "aide-io") or "mlop-azure-gateway" in (base_url or ""):
+        try:
+            from hermes_cli.aide_models import get_aide_context_length, fetch_aide_models, merge_aide_models
+            if api_key and base_url:
+                user_id = ""
+                cfg = _load_config_safe()
+                if cfg:
+                    providers_cfg = cfg.get("providers", {})
+                    for pname in ("aide", "aide-io"):
+                        p = providers_cfg.get(pname, {})
+                        hdrs = p.get("default_headers", {})
+                        if hdrs.get("x-user-id"):
+                            user_id = hdrs["x-user-id"]
+                            break
+                if user_id:
+                    v1_data, v3_data = fetch_aide_models(base_url, api_key, user_id)
+                    aide_models = merge_aide_models(v1_data, v3_data)
+                    ctx = get_aide_context_length(model, aide_models)
+                    if ctx:
+                        save_context_length(model, base_url, ctx)
+                        return ctx
+        except Exception:
+            logger.debug("AIDE context length lookup failed", exc_info=True)
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (

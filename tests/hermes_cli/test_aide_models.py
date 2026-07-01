@@ -96,3 +96,47 @@ def test_format_groups_by_owner():
     assert "In-House" in output
     assert "aws/anthropic.claude-sonnet-4-6" in output
     assert "mtk/deepseek-v32" in output
+
+
+def test_aide_context_length_inhouse():
+    models = merge_aide_models(V1_MODELS_RESPONSE, V3_MODELS_RESPONSE)
+    from hermes_cli.aide_models import get_aide_context_length
+    length = get_aide_context_length("mtk/deepseek-v32", models)
+    assert length == 163840
+
+
+def test_aide_context_length_commercial_returns_none():
+    models = merge_aide_models(V1_MODELS_RESPONSE, V3_MODELS_RESPONSE)
+    from hermes_cli.aide_models import get_aide_context_length
+    length = get_aide_context_length("aws/anthropic.claude-sonnet-4-6", models)
+    assert length is None
+
+
+def test_aide_context_length_alias():
+    models = merge_aide_models(V1_MODELS_RESPONSE, V3_MODELS_RESPONSE)
+    from hermes_cli.aide_models import get_aide_context_length
+    length = get_aide_context_length("deepseek", models)
+    assert length == 163840
+
+
+import socket
+from unittest.mock import patch
+from hermes_cli.aide_models import detect_aide_environment
+
+
+@patch("hermes_cli.aide_models.shutil.which", return_value=None)
+@patch("hermes_cli.aide_models.Path.home")
+@patch("hermes_cli.aide_models.socket.getaddrinfo", side_effect=socket.gaierror)
+def test_detect_aide_no_cch_no_network(mock_dns, mock_home, mock_which, tmp_path):
+    mock_home.return_value = tmp_path
+    result = detect_aide_environment()
+    assert result["cch_path"] is None
+    assert result["gateway_reachable"] is False
+
+
+@patch("hermes_cli.aide_models.shutil.which", return_value="/usr/bin/coding-cli-helper.exe")
+@patch("hermes_cli.aide_models.socket.getaddrinfo", return_value=[(2, 1, 6, '', ('10.0.0.1', 443))])
+def test_detect_aide_with_cch(mock_dns, mock_which):
+    result = detect_aide_environment()
+    assert result["cch_path"] == "/usr/bin/coding-cli-helper.exe"
+    assert result["gateway_reachable"] is True

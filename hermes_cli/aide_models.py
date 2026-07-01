@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
+import socket
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -140,3 +145,58 @@ def format_aide_model_list(
             lines.append("  ".join(parts))
 
     return "\n".join(lines)
+
+
+def get_aide_context_length(
+    model_name: str, models: List[AideModel]
+) -> Optional[int]:
+    resolved = resolve_aide_alias(model_name, models)
+    if resolved is None:
+        return None
+    for m in models:
+        if m.id == resolved:
+            return m.max_model_len
+    return None
+
+
+def detect_aide_environment() -> dict:
+    """Auto-detect MTK AIDE environment (CCH, user_id, network).
+
+    Returns:
+        dict with keys:
+            - cch_path: Path to coding-cli-helper.exe if found, else None
+            - user_id: User ID from ~/.cchelper/state.json if exists, else None
+            - gateway_reachable: True if AIDE gateway DNS resolves, else False
+    """
+    result = {"cch_path": None, "user_id": None, "gateway_reachable": False}
+
+    # Check for CCH in PATH
+    cch = shutil.which("coding-cli-helper.exe") or shutil.which("coding-cli-helper")
+    if not cch:
+        # Check ~/.cchelper directory
+        cchelper_dir = Path.home() / ".cchelper"
+        for candidate in (cchelper_dir / "coding-cli-helper.exe", cchelper_dir / "coding-cli-helper"):
+            if candidate.exists():
+                cch = str(candidate)
+                break
+    result["cch_path"] = cch
+
+    # Extract user_id from state.json
+    state_file = Path.home() / ".cchelper" / "state.json"
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            uid = state.get("quota_cache", {}).get("user_id")
+            if uid:
+                result["user_id"] = uid
+        except Exception:
+            pass
+
+    # Check gateway DNS reachability
+    try:
+        socket.getaddrinfo("mlop-azure-gateway.mediatek.inc", 443, socket.AF_INET, socket.SOCK_STREAM)
+        result["gateway_reachable"] = True
+    except socket.gaierror:
+        pass
+
+    return result
