@@ -165,6 +165,7 @@ class Platform(Enum):
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
     RELAY = "relay"  # generic relay adapter fronted by the connector (EXPERIMENTAL)
+    TEAMS_MTK = "teams_mtk"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -1903,6 +1904,14 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    # Microsoft Teams (MTK SSO via teams skill token cache)
+    teams_mtk_conv = os.getenv("MTK_TEAMS_CONVERSATION_ID")
+    if teams_mtk_conv:
+        if Platform.TEAMS_MTK not in config.platforms:
+            config.platforms[Platform.TEAMS_MTK] = PlatformConfig()
+        config.platforms[Platform.TEAMS_MTK].enabled = True
+        config.platforms[Platform.TEAMS_MTK].extra["conversation_id"] = teams_mtk_conv
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

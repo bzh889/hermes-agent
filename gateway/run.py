@@ -8033,6 +8033,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
                 return None
             return YuanbaoAdapter(config)
+        elif platform == Platform.TEAMS_MTK:
+            from gateway.platforms.teams_mtk import TeamsMTKAdapter, check_teams_mtk_requirements
+            if not check_teams_mtk_requirements():
+                logger.warning(
+                    "TeamsMTK: MTK_TEAMS_CONVERSATION_ID not set or "
+                    "~/.teams-tokens/token_cache.json missing — skipping"
+                )
+                return None
+            return TeamsMTKAdapter(config)
 
         return None
 
