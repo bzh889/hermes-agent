@@ -3,16 +3,13 @@
 AIDE speaks the **Azure OpenAI** convention for non-chat capabilities:
 ``{endpoint}/openai/deployments/{deployment}/images/generations?api-version=``.
 The OpenAI SDK's :class:`openai.AzureOpenAI` client builds exactly that path,
-so this provider is a thin wrapper — all the heavy lifting (image save,
-response shaping) is reused from :mod:`agent.image_gen_provider`.
+so this provider is a thin wrapper — image save + response shaping are reused
+from :mod:`agent.image_gen_provider`, and the endpoint/auth from the shared
+:mod:`agent.aide_gateway` helper (reuses ``providers.aide``: CCH
+``api_key_helper`` + the mandatory ``X-User-Id`` header — same credential path
+as chat).
 
-Auth reuses the already-configured ``providers.aide`` entry from
-``config.yaml`` (the same one the chat provider uses): the CCH
-``api_key_helper`` supplies a fresh JWT, and ``default_headers.x-user-id``
-supplies the mandatory ``X-User-Id`` cost-allocation header. Nothing new to
-configure — if ``hermes`` chat already talks to AIDE, image gen does too.
-
-Deployments (from the gateway model catalog, ``type: image``):
+Deployments (gateway catalog, ``type: image``):
 
     gpt-image-2   b64 output, high fidelity  (default)
     Dalle3        URL output, fast
@@ -29,9 +26,9 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+from agent.aide_gateway import azure_client, has_auth
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
@@ -44,7 +41,6 @@ from agent.image_gen_provider import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENDPOINT = "https://mlop-azure-gateway.mediatek.inc"
 # Azure api-version for the image endpoint. Overridable via config
 # (image_gen.aide.api_version) or AIDE_IMAGE_API_VERSION env.
 DEFAULT_API_VERSION = "2024-05-01-preview"
@@ -54,40 +50,16 @@ _MODELS: Dict[str, Dict[str, Any]] = {
         "display": "GPT Image 2 (AIDE)",
         "speed": "~40s",
         "strengths": "High fidelity, strong prompt adherence",
-        "response": "b64",
-        # gpt-image-2 supported sizes
         "sizes": {"landscape": "1536x1024", "square": "1024x1024", "portrait": "1024x1536"},
     },
     "Dalle3": {
         "display": "DALL·E 3 (AIDE)",
         "speed": "~15s",
         "strengths": "Fast, creative compositions",
-        "response": "url",
-        # Dalle3 supported sizes
         "sizes": {"landscape": "1792x1024", "square": "1024x1024", "portrait": "1024x1792"},
     },
 }
-
 DEFAULT_MODEL = "gpt-image-2"
-
-
-# ---------------------------------------------------------------------------
-# Config / connection
-# ---------------------------------------------------------------------------
-
-
-def _aide_provider_config() -> Dict[str, Any]:
-    """Read the ``providers.aide`` entry from config.yaml (shared with chat)."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        provs = cfg.get("providers") if isinstance(cfg, dict) else None
-        aide = provs.get("aide") if isinstance(provs, dict) else None
-        return aide if isinstance(aide, dict) else {}
-    except Exception as exc:
-        logger.debug("Could not load providers.aide config: %s", exc)
-        return {}
 
 
 def _image_gen_config() -> Dict[str, Any]:
@@ -99,48 +71,6 @@ def _image_gen_config() -> Dict[str, Any]:
         return section if isinstance(section, dict) else {}
     except Exception:
         return {}
-
-
-def _resolve_connection() -> Tuple[str, str, str, str]:
-    """Return ``(azure_endpoint, api_key, user_id, api_version)`` for AIDE.
-
-    Endpoint is the gateway root (any trailing ``/v1`` is stripped — the
-    Azure SDK appends ``/openai/deployments/...`` itself). Token comes from
-    the ``providers.aide`` ``api_key_helper`` (CCH), falling back to the
-    ``AIDE_API_KEY`` env or an inline ``api_key``.
-    """
-    prov = _aide_provider_config()
-
-    base = str(
-        prov.get("api") or prov.get("base_url") or prov.get("url") or DEFAULT_ENDPOINT
-    ).strip()
-    base = re.sub(r"/v1/?$", "", base).rstrip("/") or DEFAULT_ENDPOINT
-
-    headers = prov.get("default_headers") if isinstance(prov.get("default_headers"), dict) else {}
-    user_id = str(
-        headers.get("x-user-id") or headers.get("X-User-Id") or os.environ.get("AIDE_USER_ID", "")
-    ).strip()
-
-    token = ""
-    helper = str(prov.get("api_key_helper") or "").strip()
-    if helper:
-        try:
-            from hermes_cli.runtime_provider import run_api_key_helper
-
-            token = run_api_key_helper(helper) or ""
-        except Exception as exc:
-            logger.debug("AIDE api_key_helper failed: %s", exc)
-    if not token:
-        token = os.environ.get("AIDE_API_KEY", "").strip() or str(prov.get("api_key") or "").strip()
-
-    img_cfg = _image_gen_config().get("aide") if isinstance(_image_gen_config().get("aide"), dict) else {}
-    api_version = str(
-        (img_cfg or {}).get("api_version")
-        or os.environ.get("AIDE_IMAGE_API_VERSION")
-        or DEFAULT_API_VERSION
-    ).strip()
-
-    return base, token, user_id, api_version
 
 
 def _resolve_model() -> str:
@@ -158,9 +88,14 @@ def _resolve_model() -> str:
     return DEFAULT_MODEL
 
 
-# ---------------------------------------------------------------------------
-# Provider
-# ---------------------------------------------------------------------------
+def _api_version() -> str:
+    cfg = _image_gen_config()
+    aide_cfg = cfg.get("aide") if isinstance(cfg.get("aide"), dict) else {}
+    return str(
+        (aide_cfg or {}).get("api_version")
+        or os.environ.get("AIDE_IMAGE_API_VERSION")
+        or DEFAULT_API_VERSION
+    ).strip()
 
 
 class AideImageGenProvider(ImageGenProvider):
@@ -179,14 +114,7 @@ class AideImageGenProvider(ImageGenProvider):
             import openai  # noqa: F401
         except ImportError:
             return False
-        # Available when a token can be sourced (helper cmd, env, or inline).
-        prov = _aide_provider_config()
-        has_auth = bool(
-            str(prov.get("api_key_helper") or "").strip()
-            or os.environ.get("AIDE_API_KEY", "").strip()
-            or str(prov.get("api_key") or "").strip()
-        )
-        return has_auth
+        return has_auth()
 
     def list_models(self) -> List[Dict[str, Any]]:
         return [
@@ -236,44 +164,16 @@ class AideImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        try:
-            import openai
-        except ImportError:
-            return error_response(
-                error="The 'openai' package is required for the AIDE image backend",
-                error_type="dependency_missing",
-                provider="aide",
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
-
-        endpoint, token, user_id, api_version = _resolve_connection()
-        if not token:
-            return error_response(
-                error="No AIDE token available — set providers.aide.api_key_helper (CCH) "
-                "or AIDE_API_KEY. Run: hermes setup",
-                error_type="auth_error",
-                provider="aide",
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
-
         model_id = _resolve_model()
         meta = _MODELS[model_id]
         size = meta["sizes"].get(aspect, meta["sizes"]["square"])
 
-        default_headers = {"X-User-Id": user_id} if user_id else None
         try:
-            client = openai.AzureOpenAI(
-                azure_endpoint=endpoint,
-                api_key=token,
-                api_version=api_version,
-                default_headers=default_headers,
-            )
-        except Exception as exc:
+            client = azure_client(_api_version())
+        except RuntimeError as exc:
             return error_response(
-                error=f"Could not initialize AIDE (Azure OpenAI) client: {exc}",
-                error_type="config_error",
+                error=str(exc),
+                error_type="auth_error",
                 provider="aide",
                 model=model_id,
                 prompt=prompt,
@@ -283,12 +183,7 @@ class AideImageGenProvider(ImageGenProvider):
         # AIDE / gpt-image-2 return b64 and reject `response_format` as unknown;
         # don't send it. `model` is the Azure deployment name.
         try:
-            response = client.images.generate(
-                model=model_id,
-                prompt=prompt,
-                size=size,
-                n=1,
-            )
+            response = client.images.generate(model=model_id, prompt=prompt, size=size, n=1)
         except Exception as exc:
             logger.debug("AIDE image generation failed", exc_info=True)
             return error_response(
@@ -364,11 +259,6 @@ class AideImageGenProvider(ImageGenProvider):
             modality="text",
             extra=extra,
         )
-
-
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
 
 
 def register(ctx) -> None:

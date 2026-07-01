@@ -1,0 +1,5 @@
+name: aide
+version: 1.0.0
+description: "MTK AIDE Gateway speech-to-text (Azure OpenAI convention: aide-whisper / gpt-4o-transcribe) via the internal gateway. Auth reuses providers.aide (CCH api_key_helper + X-User-Id)."
+author: MTK
+kind: backend
