@@ -120,6 +120,184 @@ hermes doctor       # Diagnose any issues
 
 ---
 
+## MTK Internal Network Setup (AIDE Gateway)
+
+For MediaTek employees on the corporate network, Hermes works with the AIDE (GAISF) gateway — no external LLM access needed. The gateway provides 87+ models including Claude, GPT, Gemini, and 20+ in-house models.
+
+### Windows Setup
+
+```powershell
+# Clone and set up the venv
+git clone <repo-url> hermes-agent
+cd hermes-agent
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -e ".[all,dev]"
+
+# Run the setup wizard (auto-detects CCH and AIDE gateway)
+python -m hermes_cli.main setup
+
+# Start chatting
+python cli.py
+```
+
+Common commands on Windows (use `python -m hermes_cli.main` instead of `hermes`):
+
+```powershell
+python -m hermes_cli.main setup          # full setup wizard
+python -m hermes_cli.main model          # switch model/provider
+python -m hermes_cli.main models aide    # browse AIDE models
+python -m hermes_cli.main tools          # configure tools
+python -m hermes_cli.main auth list      # show credential pool
+python cli.py                            # interactive chat
+```
+
+> **Tip:** Create an alias in your PowerShell profile (`$PROFILE`) for convenience:
+> ```powershell
+> function hermes { python -m hermes_cli.main @args }
+> ```
+
+### Quick Setup (Linux/macOS/WSL)
+
+```bash
+hermes setup    # auto-detects CCH and AIDE gateway, offers guided setup
+```
+
+The wizard auto-detects `coding-cli-helper.exe` (CCH) and the AIDE gateway. Select **MTK AIDE Gateway** when prompted.
+
+### Manual Setup
+
+If you prefer manual configuration, add this to `~/.hermes/config.yaml`:
+
+```yaml
+model:
+  provider: aide
+  default: aws/anthropic.claude-sonnet-4-6    # or any AIDE model
+
+providers:
+  aide:
+    name: MTK AIDE Gateway
+    api: https://mlop-azure-gateway.mediatek.inc/v1
+    api_key_helper: coding-cli-helper.exe key  # auto-refreshes token via CCH
+    default_headers:
+      x-user-id: MTK12265                     # replace with your employee ID
+    transport: openai_chat
+```
+
+### Choosing Models
+
+All 87+ AIDE models work with Hermes. Pick based on the task:
+
+**Main chat model** — use the best model you have quota for:
+
+| Model | Speed | Quality | Best For |
+|-------|-------|---------|----------|
+| `aws/anthropic.claude-sonnet-4-6` | Medium | High | General coding, analysis |
+| `aws/anthropic.claude-opus-4-7` | Slow | Highest | Complex reasoning |
+| `azure/aide-gpt-4.1` | Medium | High | General tasks |
+| `google/gemini-2.5-pro` | Medium | High | Long context tasks |
+| `mtk/deepseek-v32` | Medium | Good | Cost-free alternative |
+| `mtk/qwen3-coder-480b-a35b-instruct` | Medium | Good | Code-focused tasks |
+
+**Auxiliary models** — use fast, cheap models. Auxiliary tasks (compression, title generation, etc.) are short and don't need the best model:
+
+| Model | Speed | Notes |
+|-------|-------|-------|
+| `azure/aide-gpt-4.1-nano` | 0.5s | Fastest commercial option |
+| `azure/aide-gpt-4.1-mini` | 0.6s | Good balance |
+| `aws/anthropic.claude-haiku-4-5-20251001-v1:0` | 1.0s | Fast Claude |
+| `mtk/gemma4-31b-it` | 0.1s | Fastest in-house |
+| `mtk/qwen3-30b-a3b-instruct-2507` | 0.5s | Reliable in-house |
+| `mtk/deepseek-v32` | 0.2s | Fast in-house |
+
+**Vision model** — must support image input:
+
+| Model | Notes |
+|-------|-------|
+| `mtk/qwen3-vl-235b-a22b-instruct-fp8` | Best in-house vision |
+| `mtk/qwen3-vl-30b-a3b-instruct` | Lighter, faster |
+
+**Avoid for auxiliary tasks** (reasoning-only models that may return empty content on short prompts): `mtk/glm-5`, `mtk/gpt-oss-120b`
+
+### Recommended Config
+
+```yaml
+auxiliary:
+  vision:
+    provider: aide
+    model: mtk/qwen3-vl-235b-a22b-instruct-fp8
+  compression:
+    provider: aide
+    model: azure/aide-gpt-4.1-nano              # or mtk/qwen3-30b-a3b-instruct-2507
+  web_extract:
+    provider: aide
+    model: azure/aide-gpt-4.1-mini
+  session_search:
+    provider: aide
+    model: azure/aide-gpt-4.1-nano
+  title_generation:
+    provider: aide
+    model: azure/aide-gpt-4.1-nano
+  flush_memories:
+    provider: aide
+    model: azure/aide-gpt-4.1-nano
+  approval:
+    provider: aide
+    model: azure/aide-gpt-4.1-nano
+  skills_hub:
+    provider: aide
+    model: azure/aide-gpt-4.1-mini
+  mcp:
+    provider: aide
+    model: azure/aide-gpt-4.1-mini
+```
+
+### Tools Configuration
+
+| Tool | Recommended Setting | Notes |
+|------|-------------------|-------|
+| TTS | `edge` (default) | Local Edge TTS, no API needed |
+| Web Search | `firecrawl` or `mtk_sinequa` | Firecrawl needs API key; Sinequa is internal |
+| Image Gen | `nano_banana` | Uses AIDE gateway token |
+| Browser | `local` | Local Playwright, no API needed |
+
+### Browse Available Models
+
+```bash
+hermes models aide              # list all chat models
+hermes models aide --available  # only currently available models
+```
+
+### Authentication Options
+
+| Method | Config | When to Use |
+|--------|--------|-------------|
+| CCH auto-token | `api_key_helper: coding-cli-helper.exe key` | Default for most users |
+| Static API key | `api_key: <your-key>` or `key_env: AIDE_API_KEY` | Applied via AIDE web portal |
+
+### Multi-Identity Quota Distribution (Advanced)
+
+Add multiple credentials to distribute across quota limits:
+
+```bash
+hermes auth add aide --api-key-helper "coding-cli-helper.exe key" \
+  --headers '{"x-user-id": "MTK12265"}'
+
+hermes auth add aide --api-key "sk-aide-xxx" \
+  --headers '{"x-user-id": "MTK99999"}'
+```
+
+Configure rotation strategy in `config.yaml`:
+
+```yaml
+credential_pool_strategies:
+  aide: fill_first    # use first credential until quota hit, then rotate
+```
+
+---
+
+---
+
 ## Skip the API-key collection — Nous Portal
 
 Hermes works with whatever provider you want — that's not changing. But if you'd rather not collect five separate API keys for the model, web search, image generation, TTS, and a cloud browser, **[Nous Portal](https://portal.nousresearch.com)** covers all of them under one subscription:
