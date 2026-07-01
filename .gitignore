@@ -143,3 +143,13 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# --- MTK local environment (never commit) ---
+# PyInstaller onefile runtime-extraction dirs from bundled MTK tools (e.g.
+# RdCrHelper.exe). They land in the repo root when such a tool is launched from
+# here; transient extractions, not source.
+_MEI*/
+# Stray syslog dumps written to the repo root by local tooling.
+syslog.txt
+# MTK AIDE gateway JWT token file — contains a live credential.
+config.ini
