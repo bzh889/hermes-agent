@@ -2099,7 +2099,16 @@ class AIAgent:
         """
         if not error_msg:
             return "Unknown error"
-            
+
+        # AIDE gateway specific error messages
+        base_url = getattr(self, "base_url", "") or ""
+        if "mlop-azure-gateway" in base_url:
+            if "Invalid Azure OpenAI model format" in error_msg:
+                return "Model name format error — in-house models need mtk/ prefix (e.g. mtk/deepseek-v32)"
+            lower_msg = error_msg.lower()
+            if any(s in lower_msg for s in ("unauthorized", "forbidden", "invalid token", "token is malformed")):
+                return "AIDE token invalid or expired. Run: hermes setup aide"
+
         # Remove HTML content (common with CloudFlare and gateway error pages)
         if error_msg.strip().startswith('<!DOCTYPE html') or '<html' in error_msg:
             return "Service temporarily unavailable (HTML error page returned)"
