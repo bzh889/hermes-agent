@@ -54,7 +54,13 @@ def _validate_bundle_path(label: str, value: str, *, require_substantial: bool =
         ctx = ssl.create_default_context(cafile=str(path))
     except Exception as exc:
         raise _ssl_err(f"{label} CA bundle at {value} cannot be loaded: {exc}") from exc
-    if not ctx.get_ca_certs():
+    try:
+        certs = ctx.get_ca_certs()
+    except NotImplementedError:
+        # truststore-backed contexts don't implement get_ca_certs();
+        # if we loaded without error, certs are present.
+        certs = None
+    if certs is not None and not certs:
         raise _ssl_err(f"{label} CA bundle at {value} did not load any certificates")
 
 
