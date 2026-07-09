@@ -304,6 +304,22 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         _rm = os.getenv("TEAMS_MTK_REQUIRE_MENTION", "true").lower()
         self.require_mention = _rm in ("true", "1", "yes", "on")
 
+        # Reply throttle: minimum seconds between consecutive sends to the
+        # same conversation. 0 = disabled. Read from
+        # gateway.teams_mtk.reply_throttle_seconds in config.yaml.
+        try:
+            from hermes_cli.config import load_config_readonly
+            _cfg_throttle = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("reply_throttle_seconds", 0)
+            )
+            self._reply_throttle_seconds: float = float(_cfg_throttle)
+        except Exception:
+            self._reply_throttle_seconds: float = 0.0
+        self._last_reply_at: Dict[str, float] = {}
+
         # Model picker state — when a picker is active, short numeric replies
         # are intercepted and routed to the on_model_selected callback.
         # Keyed by conversation id so multiple conversations can each have
@@ -436,6 +452,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         _skip_footer_extract = bool(metadata and metadata.get("skip_footer_extract"))
         try:
+            # Reply throttle: wait if this conversation was answered too
+            # recently (prevents rapid-fire flooding).
+            await self._maybe_throttle(chat_id)
+
             import re, requests
             from requests.adapters import HTTPAdapter
             self._auth._inject_truststore()
@@ -629,6 +649,30 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     # (429 body: "API calls quota exceeded! 3Per05Secs"). Back off just past
     # that window before the single retry.
     _RATE_LIMIT_BACKOFF_S = 5.5
+
+    async def _maybe_throttle(self, chat_id: str):
+        """If reply_throttle_seconds > 0 and this conv was answered recently,
+        sleep for the remaining window so we don't flood the channel.
+
+        Per-conv tracking: a reply to conv A doesn't delay conv B.
+        """
+        if self._reply_throttle_seconds <= 0:
+            return
+        import time
+        now = time.monotonic()
+        last = self._last_reply_at.get(chat_id)
+        if last is not None:
+            elapsed = now - last
+            remaining = self._reply_throttle_seconds - elapsed
+            if remaining > 0:
+                logger.info(
+                    "TeamsMTK: throttling conv=%s — %.1fs since last reply, waiting %.1fs",
+                    chat_id[:30], elapsed, remaining,
+                )
+                await asyncio.sleep(remaining)
+        # Record the *intended* send time (before the actual POST) so
+        # the next call measures from this point.
+        self._last_reply_at[chat_id] = time.monotonic()
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> "SendResult":
         """Edit a previously sent message (optional — used for progress streaming).

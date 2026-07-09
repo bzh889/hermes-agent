@@ -2812,6 +2812,10 @@ DEFAULT_CONFIG = {
             #                              per-sender toolset restrictions,
             #                              unioned with the group-level list.
             "groups": {},
+            # Minimum seconds between consecutive replies to the same
+            # conversation. Prevents flooding when the agent fires
+            # multiple rapid sends within one turn. 0 = disabled.
+            "reply_throttle_seconds": 0,
         },
     },
 
