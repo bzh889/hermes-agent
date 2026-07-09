@@ -1374,7 +1374,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         _media_types.append(_akind)
                         # First attachment determines the overall message_type
                         if _i == 0:
-                            _dominant_type = MessageType.PHOTO if _akind == "image" else MessageType.FILE
+                            _dominant_type = MessageType.PHOTO if _akind == "image" else MessageType.DOCUMENT
                     else:
                         logger.warning("TeamsMTK: skipping failed attachment %d/%d", _i + 1, len(_att_urls))
 
