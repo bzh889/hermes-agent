@@ -106,7 +106,21 @@ class _TeamsAuth:
                 "Authenticate first: python ~/.claude/skills/teams/auth_run.py"
             )
         with open(self.TOKEN_CACHE, encoding="utf-8") as f:
-            return json.load(f)
+            raw = f.read()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Corrupted cache (e.g. partial write from another process).
+            # Try to recover the first valid JSON object.
+            try:
+                decoder = json.JSONDecoder()
+                obj, _ = decoder.raw_decode(raw)
+                return obj
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"Teams token cache is corrupted: {self.TOKEN_CACHE}. "
+                    "Re-authenticate: python ~/.claude/skills/teams/auth_run.py"
+                )
 
     def _save(self, tokens: dict) -> None:
         self.TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
