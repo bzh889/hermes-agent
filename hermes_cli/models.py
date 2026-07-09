@@ -3443,12 +3443,13 @@ def probe_api_models(
     base_url: Optional[str],
     timeout: float = 5.0,
     api_mode: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Probe a ``/models`` endpoint with light URL heuristics.
 
     For ``anthropic_messages`` mode, uses ``x-api-key`` and
     ``anthropic-version`` headers (Anthropic's native auth) instead of
-    ``Authorization: Bearer``.  The response shape (``data[].id``) is
+    ``Authorization: ***  The response shape (``data[].id``) is
     identical, so the same parser works for both.
     """
     normalized = (base_url or "").strip().rstrip("/")
@@ -3483,12 +3484,28 @@ def probe_api_models(
     tried: list[str] = []
     headers: dict[str, str] = {"User-Agent": _HERMES_USER_AGENT}
     if api_key and api_mode == "anthropic_messages":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
+        # Anthropic OAuth tokens (sk-ant-oat*, subscription/enterprise) authenticate
+        # with Authorization: Bearer + the oauth beta header — NOT x-api-key (which
+        # returns 401 "invalid x-api-key" for OAuth tokens). Regular Console API keys
+        # (sk-ant-api*) keep using x-api-key.
+        try:
+            from agent.anthropic_adapter import _is_oauth_token as _is_oat
+            _use_bearer = _is_oat(api_key)
+        except Exception:
+            _use_bearer = False
+        if _use_bearer:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["anthropic-version"] = "2023-06-01"
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+        else:
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
     elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     if normalized.startswith(COPILOT_BASE_URL):
         headers.update(copilot_default_headers())
+    if isinstance(extra_headers, dict):
+        headers.update(extra_headers)
 
     for candidate_base, is_fallback in candidates:
         url = candidate_base.rstrip("/") + "/models"
@@ -3521,13 +3538,15 @@ def fetch_api_models(
     base_url: Optional[str],
     timeout: float = 5.0,
     api_mode: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint.
 
     Returns a list of model ID strings, or ``None`` if the endpoint could not
     be reached (network error, timeout, auth failure, etc.).
     """
-    return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode).get("models")
+    return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode,
+                            extra_headers=extra_headers).get("models")
 
 
 # ---------------------------------------------------------------------------
@@ -3670,6 +3689,7 @@ def validate_requested_model(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     api_mode: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
 ) -> dict[str, Any]:
     """
     Validate a ``/model`` value for the active provider.
@@ -3765,9 +3785,9 @@ def validate_requested_model(
     if normalized == "custom" or normalized.startswith("custom:"):
         # Try probing with correct auth for the api_mode.
         if api_mode == "anthropic_messages":
-            probe = probe_api_models(api_key, base_url, api_mode=api_mode)
+            probe = probe_api_models(api_key, base_url, api_mode=api_mode, extra_headers=extra_headers)
         else:
-            probe = probe_api_models(api_key, base_url)
+            probe = probe_api_models(api_key, base_url, extra_headers=extra_headers)
         api_models = probe.get("models")
         if api_models is not None:
             if requested_for_lookup in set(api_models):
@@ -3998,7 +4018,7 @@ def validate_requested_model(
     # Anthropic Messages API: many proxies don't implement /v1/models.
     # Try probing with correct auth; if it fails, accept with a warning.
     if api_mode == "anthropic_messages":
-        api_models = fetch_api_models(api_key, base_url, api_mode=api_mode)
+        api_models = fetch_api_models(api_key, base_url, api_mode=api_mode, extra_headers=extra_headers)
         if api_models is not None:
             if requested_for_lookup in set(api_models):
                 return {
@@ -4031,7 +4051,7 @@ def validate_requested_model(
         }
 
     # Probe the live API to check if the model actually exists
-    api_models = fetch_api_models(api_key, base_url)
+    api_models = fetch_api_models(api_key, base_url, extra_headers=extra_headers)
 
     if api_models is not None:
         # Gemini's OpenAI-compat /v1beta/openai/models endpoint returns IDs

@@ -942,7 +942,17 @@ class SessionStore:
                 # row is None        -> not in DB (legacy / pre-SQLite) — keep
                 # end_reason is None  -> session alive — keep
                 # end_reason not None -> session ended — prune
+                #   EXCEPT: resume_pending=True sessions must survive pruning
+                #   so the gateway can auto-continue them on restart (#54920).
                 if row is not None and row.get("end_reason") is not None:
+                    if entry.resume_pending:
+                        logger.info(
+                            "gateway.session: keeping resume_pending session %r -> %s "
+                            "(end_reason=%r, resume_reason=%r)",
+                            key, entry.session_id, row["end_reason"],
+                            entry.resume_reason,
+                        )
+                        continue
                     logger.warning(
                         "gateway.session: pruning stale sessions.json entry "
                         "%r -> %s (end_reason=%r); left by a crashed gateway",

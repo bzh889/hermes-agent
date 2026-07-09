@@ -300,6 +300,7 @@ from hermes_cli.subcommands.tools import build_tools_parser
 from hermes_cli.subcommands.insights import build_insights_parser
 from hermes_cli.subcommands.skills import build_skills_parser
 from hermes_cli.subcommands.pairing import build_pairing_parser
+from hermes_cli.subcommands.teams_mtk import build_teams_mtk_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
@@ -12381,6 +12382,15 @@ def cmd_pairing(args):
     pairing_command(args)
 
 
+def cmd_teams_mtk_group(args):
+    from hermes_cli.teams_mtk_groups import teams_mtk_groups_command
+
+    if getattr(args, "teams_mtk_action", None) != "group":
+        print("Usage: hermes teams-mtk group {add|list|set|remove}")
+        return
+    teams_mtk_groups_command(args)
+
+
 def cmd_plugins(args):
     from hermes_cli.plugins_cmd import plugins_command
 
@@ -12749,6 +12759,11 @@ def main():
     # pairing command  (parser built in hermes_cli/subcommands/pairing.py)
     # =========================================================================
     build_pairing_parser(subparsers, cmd_pairing=cmd_pairing)
+
+    # =========================================================================
+    # teams-mtk command  (parser built in hermes_cli/subcommands/teams_mtk.py)
+    # =========================================================================
+    build_teams_mtk_parser(subparsers, cmd_teams_mtk_group=cmd_teams_mtk_group)
 
     # =========================================================================
     # skills command  (parser built in hermes_cli/subcommands/skills.py)

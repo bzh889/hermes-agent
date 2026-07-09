@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import OPENROUTER_BASE_URL
+from utils import base_url_host_matches
 from hermes_cli.config import load_env
 from agent.secret_scope import get_secret as _get_secret
 from agent.credential_persistence import (
@@ -607,7 +608,10 @@ class CredentialPool:
         writes the new pair to ~/.claude/.credentials.json. The pool entry's
         refresh token becomes stale. This method detects that and syncs.
         """
-        if self.provider != "anthropic" or entry.source != "claude_code":
+        _is_anthropic_ep = self.provider == "anthropic" or base_url_host_matches(
+            entry.base_url or "", "api.anthropic.com"
+        )
+        if not _is_anthropic_ep or entry.source != "claude_code":
             return entry
         try:
             from agent.anthropic_adapter import read_claude_code_credentials
@@ -966,7 +970,14 @@ class CredentialPool:
             return None
 
         try:
-            if self.provider == "anthropic":
+            if self.provider == "anthropic" or base_url_host_matches(
+                entry.base_url or "", "api.anthropic.com"
+            ):
+                # Any pool entry whose endpoint is Anthropic + carries a refresh
+                # token is refreshable, regardless of its provider slug. This lets
+                # multiple named Anthropic accounts (e.g. providers.anthropic-1 /
+                # anthropic-2, each a distinct OAuth login) auto-refresh, not just
+                # the canonical "anthropic" slug or "custom:*" endpoints.
                 from agent.anthropic_adapter import refresh_anthropic_oauth_pure
 
                 refreshed = refresh_anthropic_oauth_pure(
@@ -1044,7 +1055,10 @@ class CredentialPool:
             # For anthropic claude_code entries: the refresh token may have been
             # consumed by another process. Check if ~/.claude/.credentials.json
             # has a newer token pair and retry once.
-            if self.provider == "anthropic" and entry.source == "claude_code":
+            if (self.provider == "anthropic" or (
+                self.provider.startswith(CUSTOM_POOL_PREFIX)
+                and base_url_host_matches(entry.base_url or "", "api.anthropic.com")
+            )) and entry.source == "claude_code":
                 synced = self._sync_anthropic_entry_from_credentials_file(entry)
                 if synced.refresh_token != entry.refresh_token:
                     logger.debug("Retrying refresh with synced token from credentials file")
@@ -1313,7 +1327,10 @@ class CredentialPool:
     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
         if entry.auth_type != AUTH_TYPE_OAUTH:
             return False
-        if self.provider == "anthropic":
+        if self.provider == "anthropic" or base_url_host_matches(entry.base_url or "", "api.anthropic.com"):
+            # Match by endpoint, not just the literal "anthropic" slug, so named
+            # accounts (providers.anthropic-1 / anthropic-2) also get their expired
+            # OAuth tokens auto-refreshed instead of being handed out stale (→ 401).
             if entry.expires_at_ms is None:
                 return False
             return int(entry.expires_at_ms) <= int(time.time() * 1000) + 120_000
@@ -1353,8 +1370,16 @@ class CredentialPool:
             # For anthropic claude_code entries, sync from the credentials file
             # before any status/refresh checks. This picks up tokens refreshed
             # by other processes (Claude Code CLI, other Hermes profiles).
-            if (self.provider == "anthropic" and entry.source == "claude_code"
-                    and entry.last_status in {STATUS_EXHAUSTED, STATUS_DEAD}):
+            # Always re-sync claude_code-sourced Anthropic entries from
+            # ~/.claude/.credentials.json (not only when EXHAUSTED/DEAD). The
+            # Claude Code CLI owns this shared account's single-use refresh token
+            # and keeps the file fresh; reading it every enumeration keeps a named
+            # account that shares that login (e.g. anthropic-2 = the CLI's own
+            # account) from silently going stale when the CLI rotates the token.
+            if entry.source == "claude_code" and (
+                self.provider == "anthropic"
+                or base_url_host_matches(entry.base_url or "", "api.anthropic.com")
+            ):
                 synced = self._sync_anthropic_entry_from_credentials_file(entry)
                 if synced is not entry:
                     entry = synced

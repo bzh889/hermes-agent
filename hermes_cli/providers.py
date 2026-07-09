@@ -665,7 +665,8 @@ def resolve_custom_provider(
             first_valid = (display_name, api_url, tuple(env_vars))
 
         slug = custom_provider_slug(display_name)
-        if requested not in {display_name.lower(), slug}:
+        provider_key = (entry.get("provider_key") or "").strip().lower()
+        if requested not in {display_name.lower(), slug, provider_key, f"custom:{provider_key}"}:
             continue
 
         return ProviderDef(

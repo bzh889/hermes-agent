@@ -196,6 +196,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # OpenRouter-prefixed models resolve via OpenRouter live API or models.dev.
     "claude-fable-5": 1000000,
     "claude-fable": 1000000,
+    "claude-sonnet-5": 1000000,
     "claude-opus-4-8": 1000000,
     "claude-opus-4.8": 1000000,
     "claude-opus-4-7": 1000000,
@@ -1949,7 +1950,17 @@ def get_model_context_length(
     # /models endpoint may report a provider-imposed limit (e.g. Copilot
     # returns 128k) instead of the model's full context (400k).  models.dev
     # has the correct per-provider values and is checked at step 5+.
-    if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url):
+    # AIDE gateway also skips this — _is_known_provider_base_url() doesn't
+    # recognise mlop-azure-gateway.mediatek.inc, so without this exclusion
+    # every AIDE model would fall through this branch's generic
+    # DEFAULT_CONTEXT_LENGTHS substring match (step 3b's early-return
+    # `if default_model in model_lower` at line ~1991) and never reach
+    # step 3b below, which is the ONLY path that queries AIDE's /llm/v3/models
+    # for the authoritative max_model_len (e.g. MTK qwen3-6-35b-a3b is
+    # 262,144 there but the generic "qwen" catch-all in DEFAULT_CONTEXT_LENGTHS
+    # is 131,072 — silently wrong and stuck since step 2 returns first).
+    is_aide_endpoint = provider in ("aide", "aide-io") or "mlop-azure-gateway" in (base_url or "")
+    if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url) and not is_aide_endpoint:
         context_length = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
         if context_length is not None:
             return context_length

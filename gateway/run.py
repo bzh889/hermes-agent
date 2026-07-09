@@ -1780,6 +1780,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
         "max_tokens": max_tokens,
+        "default_headers": runtime.get("default_headers"),
     }
 
 
@@ -2729,6 +2730,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
         self._session_model_overrides: Dict[str, Dict[str, str]] = {}
+        # Restore persisted overrides from previous gateway run so each session
+        # keeps its model choice across restarts (mtk-integration isolation).
+        self._session_model_overrides.update(self._load_session_model_overrides())
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -3622,6 +3626,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
             "max_tokens": runtime_kwargs.get("max_tokens"),
+            "default_headers": runtime_kwargs.get("default_headers"),
         }
         route = {
             "model": model,
@@ -4108,6 +4113,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.debug("goal continuation: active-state recheck failed: %s", exc)
             return False
+
+    # ------------------------------------------------------------------
+    # Session model override persistence (survives gateway restart).
+    # ------------------------------------------------------------------
+
+    _SESSION_MODEL_OVERRIDES_FILE = "session_model_overrides.json"
+
+    @classmethod
+    def _session_model_overrides_path(cls) -> Path:
+        return get_hermes_home() / cls._SESSION_MODEL_OVERRIDES_FILE
+
+    def _load_session_model_overrides(self) -> Dict[str, Dict[str, str]]:
+        """Load per-session model overrides from disk (best-effort)."""
+        try:
+            path = self._session_model_overrides_path()
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as exc:
+            logger.debug("could not load session model overrides: %s", exc)
+        return {}
+
+    def _save_session_model_overrides(self) -> None:
+        """Persist per-session model overrides to disk (best-effort)."""
+        if not self._session_model_overrides:
+            # Clean up stale file when no overrides remain.
+            try:
+                path = self._session_model_overrides_path()
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+            return
+        try:
+            path = self._session_model_overrides_path()
+            atomic_json_write(path, self._session_model_overrides)
+        except Exception as exc:
+            logger.debug("could not save session model overrides: %s", exc)
 
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
         try:
@@ -6640,12 +6685,68 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Drain any recovered process watchers (from crash recovery checkpoint)
         try:
             from tools.process_registry import process_registry
+            # --- File-based watcher injection for external processes ---
+            # This lets processes started outside the gateway (e.g. from CLI)
+            # register for interval_report progress updates by writing a JSON
+            # file to ~/.hermes/.process_watchers.json.
+            # Each entry may include "pid", "command", "started_at" to register
+            # a detached ProcessSession if the session_id is not already tracked.
+            watcher_file = get_hermes_home() / ".process_watchers.json"
+            if watcher_file.exists():
+                try:
+                    import json as _json
+                    from gateway.status import _pid_exists as _is_host_pid_alive
+                    file_watchers = _json.loads(watcher_file.read_text())
+                    if isinstance(file_watchers, list):
+                        for _fw in file_watchers:
+                            _fw_sid = _fw.get("session_id", "")
+                            if _fw_sid and not process_registry.get(_fw_sid):
+                                # Register a detached session so the watcher can track it
+                                _fw_pid = _fw.get("pid")
+                                _fw_cmd = _fw.get("command", "external-process")
+                                _started = _fw.get("started_at", time.time())
+                                if _fw_pid and _is_host_pid_alive(_fw_pid):
+                                    from tools.process_registry import ProcessSession
+                                    _detached = ProcessSession(
+                                        id=_fw_sid,
+                                        command=_fw_cmd,
+                                        pid=_fw_pid,
+                                        detached=True,
+                                        started_at=_started,
+                                        cwd=_fw.get("cwd"),
+                                        interval_report=_fw.get("interval_report", 0),
+                                        notify_on_complete=_fw.get("notify_on_complete", False),
+                                        progress_file=_fw.get("progress_file", ""),
+                                        watcher_platform=_fw.get("platform", ""),
+                                        watcher_chat_id=_fw.get("chat_id", ""),
+                                        watcher_user_id=_fw.get("user_id", ""),
+                                        watcher_user_name=_fw.get("user_name", ""),
+                                        watcher_thread_id=_fw.get("thread_id"),
+                                        watcher_message_id=_fw.get("message_id"),
+                                    )
+                                    process_registry._running[_fw_sid] = _detached
+                                    logger.info(
+                                        "Registered detached session %s for external PID %d",
+                                        _fw_sid, _fw_pid,
+                                    )
+                                else:
+                                    logger.info(
+                                        "Skipping watcher for %s: PID %s not alive",
+                                        _fw_sid, _fw_pid,
+                                    )
+                        process_registry.pending_watchers.extend(file_watchers)
+                        watcher_file.unlink()  # consume
+                        logger.info("Injected %d watchers from %s", len(file_watchers), watcher_file)
+                except Exception as e:
+                    logger.warning("Failed to read watcher file %s: %s", watcher_file, e)
+
             # Detach the current batch atomically: reassigning to a fresh list
             # takes ownership of exactly the watchers present now, so any watcher
             # appended concurrently during the yield below isn't silently dropped
             # by a clear() on the shared list.
             watchers = process_registry.pending_watchers
             process_registry.pending_watchers = []
+            logger.info("_register_pending_watchers: draining %d watchers from pending_watchers", len(watchers))
             # Process in batches of 100 with event-loop yield points to avoid
             # O(n^2) event-loop blocking when recovering thousands of watchers.
             for i, watcher in enumerate(watchers):
@@ -6653,6 +6754,81 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("Resumed watcher for recovered process %s", watcher.get("session_id"))
                 if i % 100 == 99:
                     await asyncio.sleep(0)
+            # --- Startup debrief: notify sessions about recovered background work ---
+            if watchers:
+                # Group watchers by session_key to send one debrief per session
+                _by_session = {}
+                for w in watchers:
+                    sk = w.get("session_key", "")
+                    if sk not in _by_session:
+                        _by_session[sk] = []
+                    _by_session[sk].append(w)
+                for _sk, _ws in _by_session.items():
+                    _parts = [f"[System] Gateway restarted. {len(_ws)} background process(es) resumed:"]
+                    for _w in _ws:
+                        _sid = _w.get("session_id", "?")
+                        _cmd = _w.get("command", "")
+                        _cmd_short = _cmd if len(_cmd) <= 80 else _cmd[:77] + "..."
+                        _pf = _w.get("progress_file", "")
+                        _prog = ""
+                        if _pf:
+                            try:
+                                with open(_pf, "r") as _f:
+                                    _prog = _f.read().strip()
+                            except Exception:
+                                pass
+                        _line = f"- {_sid}: {_cmd_short}"
+                        if _prog:
+                            _line += f" | Progress: {_prog}"
+                        _parts.append(_line)
+                    _parts.append(
+                        "Give a COMPREHENSIVE Weave status debrief with this structure:\n"
+                        "Weave 完整狀態 Debrief\n"
+                        "資料總覽\n"
+                        "項目 | 數量\n"
+                        "Raw 來源總數 | (find from progress/vault files)\n"
+                        "Vault 已處理頁面 | (find from progress/vault files)\n"
+                        "舊批次狀態 | Stage 1/2 完成數\n"
+                        "今天進度\n"
+                        "Process | 最後位置\n"
+                        "To fill in numbers: use read_file / search_files on the PKB vault and progress files. "
+                        "Check D:/01_Job/Tool/Personal Knowledge Base/ for vault index and progress logs. "
+                        "Look for files like progress_*.log, .vault_stats, or checkpoint files. "
+                        "Count [OK]/[SKIP]/[FAIL] tags in process output for real accuracy. "
+                        "Do NOT just give a generic ✅/🔄/⚠️/📋 table — give ABSOLUTE numbers and IDENTIFY what the process is. "
+                        "Do NOT reply 👍 or 👌."
+                    )
+                    _debrief_text = "\n".join(_parts)
+                    # Parse session_key to build synthetic event
+                    _platform = _sk.split(":")[2] if len(_sk.split(":")) > 2 else ""
+                    _chat_id = ":".join(_sk.split(":")[3:]) if len(_sk.split(":")) > 3 else ""
+                    _platform_name = _platform
+                    _user_id = _ws[0].get("user_id", "")
+                    _user_name = _ws[0].get("user_name", "")
+                    _thread_id = _ws[0].get("thread_id", None)
+                    _source = self._build_process_event_source({
+                        "session_id": "startup_debrief",
+                        "session_key": _sk,
+                        "platform": _platform_name,
+                        "chat_id": _chat_id,
+                        "thread_id": _thread_id,
+                        "user_id": _user_id,
+                        "user_name": _user_name,
+                    })
+                    if _source:
+                        from gateway.platforms.base import MessageEvent, MessageType
+                        _event = MessageEvent(
+                            text=_debrief_text,
+                            message_type=MessageType.TEXT,
+                            source=_source,
+                            internal=True,
+                            message_id="startup_debrief",
+                        )
+                        try:
+                            await self._handle_message(_event)
+                            logger.info("Startup debrief sent for session %s (%d processes)", _sk, len(_ws))
+                        except Exception as e:
+                            logger.error("Startup debrief send error for %s: %s", _sk, e)
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
@@ -7554,6 +7730,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await self._cleanup_agent_resources_off_loop(
                         _agent, context="shutdown idle-cache"
                     )
+
+            # Persist per-session model overrides before adapters disconnect
+            # so they survive the gateway restart (mtk-integration isolation).
+            self._save_session_model_overrides()
 
             for platform, adapter in list(self.adapters.items()):
                 await self._bounded_adapter_teardown(adapter, platform)
@@ -10794,10 +10974,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                # Use requested_provider (raw config name like "aide-ds901472")
+                # not the normalized class ("custom") for the footer.
+                _footer_provider = agent_result.get("provider")
+                if _footer_provider == "custom":
+                    _cfg = _load_gateway_config() or {}
+                    _footer_provider = (_cfg.get("model") or {}).get("provider") or _footer_provider
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
                     model=agent_result.get("model"),
+                    provider=_footer_provider,
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
@@ -12313,6 +12500,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
+            disabled_toolsets = self._merge_teams_mtk_group_disabled_toolsets(
+                source, disabled_toolsets
+            )
 
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
@@ -14353,6 +14543,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         session_id = watcher["session_id"]
         interval = watcher["check_interval"]
+        logger.info("_run_process_watcher started for session_id=%s interval=%s interval_report=%s", session_id, interval, watcher.get("interval_report", 0))
         session_key = watcher.get("session_key", "")
         platform_name = watcher.get("platform", "")
         chat_id = watcher.get("chat_id", "")
@@ -14361,10 +14552,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user_name = watcher.get("user_name", "")
         message_id = str(watcher.get("message_id") or "").strip() or None
         agent_notify = watcher.get("notify_on_complete", False)
+        interval_report = watcher.get("interval_report", 0)
         notify_mode = self._load_background_notifications_mode()
 
-        logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
-                      session_id, interval, notify_mode, agent_notify)
+        logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s, interval_report=%s)",
+                      session_id, interval, notify_mode, agent_notify, interval_report)
 
         if notify_mode == "off" and not agent_notify:
             # Still wait for the process to exit so we can log it, but don't
@@ -14378,16 +14570,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         last_output_len = 0
+        last_report_at = 0.0  # wallclock timestamp of last interval_report injection
         while True:
             await asyncio.sleep(interval)
 
             session = process_registry.get(session_id)
             if session is None:
+                logger.warning("_run_process_watcher: session %s is None — watcher ending", session_id)
                 break
 
             current_output_len = len(session.output_buffer)
             has_new_output = current_output_len > last_output_len
+            # For detached sessions (no pipe), treat "process still alive" as
+            # having new output — interval_report still fires on uptime progress.
+            if session.detached and not session.exited:
+                has_new_output = True
             last_output_len = current_output_len
+            logger.debug("_run_process_watcher tick: session=%s detached=%s exited=%s has_new_output=%s output_len=%d",
+                         session_id, session.detached, session.exited, has_new_output, current_output_len)
 
             if session.exited:
                 # --- Agent-triggered completion: inject synthetic message ---
@@ -14496,6 +14696,276 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
                 break
+
+            # --- interval_report: periodic progress injection for agent_notify watchers ---
+            # When agent_notify=True and interval_report > 0, inject a progress
+            # summary into the agent conversation every interval_report seconds.
+            # This gives the user real-time feedback on long-running batch jobs
+            # instead of a single notification only when the process ends.
+            if agent_notify and interval_report > 0 and has_new_output:
+                now = time.time()
+                if last_report_at <= 0.0 or now - last_report_at >= interval_report:
+                    last_report_at = now
+                    from tools.ansi_strip import strip_ansi
+                    from tools.process_registry import format_uptime_short
+                    _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
+                    _uptime = format_uptime_short(int(now - session.started_at)) if session.started_at else "?"
+
+                    # For detached sessions with no output_buffer, try reading progress_file
+                    if not _raw:
+                        _pf_path = None
+                        # 1) Explicit progress_file on the session
+                        if session.progress_file:
+                            _pf_path = Path(session.progress_file)
+                        # 2) Convention: ~/.hermes/progress_{session_id}.log
+                        if not _pf_path or not _pf_path.exists():
+                            _conv = Path.home() / ".hermes" / f"progress_{session_id}.log"
+                            if _conv.exists():
+                                _pf_path = _conv
+                        # 3) Convention: ~/.hermes/progress_{pid}.log
+                        if (not _pf_path or not _pf_path.exists()) and session.pid:
+                            _conv_pid = Path.home() / ".hermes" / f"progress_{session.pid}.log"
+                            if _conv_pid.exists():
+                                _pf_path = _conv_pid
+                        if _pf_path and _pf_path.exists():
+                            try:
+                                # Read last 10KB — plenty for structured summary parsing
+                                _raw = _pf_path.read_text(errors="replace")[-10240:]
+                            except Exception:
+                                pass
+
+                    # --- Structured progress summary ---
+                    # Instead of raw tail, extract meaningful signals from output:
+                    # 1) Counter progress: lines like [3/100] or 3/100
+                    # 2) Stage detection: [Stage N] markers, or infer from command
+                    # 3) Tag counts: [OK]/[SKIP]/[FAIL]/[WARN]/[ERROR] in recent lines
+                    # 4) Command (what job is running)
+                    # 5) Checkpoint file enrichment (graph_ingest_state.json)
+                    _recent_lines = _raw.split("\n")[-50:] if _raw else []
+                    _tag_counts = {}
+                    _latest_counter = None  # e.g. (3, 100)
+                    _latest_stage = None
+                    _last_ok_line = None
+                    for _line in _recent_lines:
+                        _line_s = _line.strip()
+                        if not _line_s:
+                            continue
+                        # Stage detection: [Stage N] or [Stage N done]
+                        import re as _re
+                        _stage_m = _re.search(r"\[Stage\s+(\d+(?:\.\d+)?)(?:\s+done)?\]", _line_s)
+                        if _stage_m:
+                            _latest_stage = _stage_m.group(1)
+                        # Counter: [3/100] or [ 3 / 100 ] or (3/100)
+                        _cnt_m = _re.search(r"[\[(]\s*(\d+)\s*/\s*(\d+)\s*[\])]", _line_s)
+                        if _cnt_m:
+                            _latest_counter = (int(_cnt_m.group(1)), int(_cnt_m.group(2)))
+                        # Tag counts
+                        for _tag in ("OK", "SKIP", "FAIL", "WARN", "ERROR", "ENRICH", "✅", "❌"):
+                            if f"[{_tag}]" in _line_s:
+                                _tag_counts[_tag] = _tag_counts.get(_tag, 0) + 1
+                        if "[OK]" in _line_s:
+                            _last_ok_line = _line_s[:120]
+
+                    # Infer stage from command if no [Stage N] found
+                    _proc_cmd = getattr(session, "command", "") or ""
+                    if _latest_stage is None and _proc_cmd:
+                        # Common patterns: scripts.process → weave, pytest → test run, etc.
+                        import re as _re2
+                        if "scripts.process" in _proc_cmd or "scripts.process" in _proc_cmd:
+                            # Extract --source flag
+                            _src_m = _re2.search(r"--source\s+(\S+)", _proc_cmd)
+                            _source = _src_m.group(1) if _src_m else "weave"
+                            _latest_stage = _source  # e.g. "onenote", "wiki"
+                        elif "pytest" in _proc_cmd:
+                            _latest_stage = "test"
+                        elif "pip" in _proc_cmd or "uv" in _proc_cmd:
+                            _latest_stage = "install"
+                        elif "git" in _proc_cmd:
+                            _latest_stage = "git"
+
+                    # Try to enrich from checkpoint file (graph_ingest_state.json)
+                    _ckpt_errors = 0
+                    _ckpt_pending_images = 0
+                    _ckpt_done_pages = 0
+                    _ckpt_total_pages = 0
+                    if session.cwd:
+                        _ckpt_path = Path(session.cwd) / "data" / "graph_ingest_state.json"
+                        if _ckpt_path.exists():
+                            try:
+                                _ckpt_data = json.loads(_ckpt_path.read_text(errors="replace"))
+                                _ckpt_errors = len(_ckpt_data.get("errors", []))
+                                _ckpt_pending_images = len(_ckpt_data.get("pending_images", {}))
+                                _ckpt_done_pages = len(_ckpt_data.get("done_pages", []))
+                                _ckpt_pending_pages = len(_ckpt_data.get("pending_pages", []))
+                                _ckpt_total_pages = _ckpt_done_pages + _ckpt_pending_pages
+                                # If counter from output is stale, use checkpoint
+                                if _ckpt_total_pages > 0 and (not _latest_counter or _latest_counter[1] < _ckpt_total_pages):
+                                    # Weave keeps running past checkpoint — output counter is live
+                                    pass
+                            except Exception as _ckpt_err:
+                                logger.debug("Checkpoint read failed: %s", _ckpt_err)
+                    # Build structured progress card (user-specified format):
+                    # ✅ 已完成 / 🔄 進行中 / ⚠️ 待解 / 📋 行動
+                    # Each section must have concrete details — no "持續 ▉" filler.
+                    _ok_count = 0
+                    _skip_count = 0
+                    _enrich_count = 0
+                    if _tag_counts:
+                        _ok_count = _tag_counts.get("✅", 0) + _tag_counts.get("OK", 0)
+                        _skip_count = _tag_counts.get("SKIP", 0)
+                        _enrich_count = _tag_counts.get("ENRICH", 0)
+                    # Collect last few OK/SKIP/FAIL lines for detail
+                    _detail_lines = []
+                    for _dl in reversed(_recent_lines[-20:]):
+                        _dl_s = _dl.strip()
+                        if not _dl_s:
+                            continue
+                        if any(f"[{t}]" in _dl_s for t in ("OK", "SKIP", "FAIL", "ERROR", "ENRICH")):
+                            _detail_lines.append(_dl_s[:120])
+                        if len(_detail_lines) >= 3:
+                            break
+                    _detail_lines.reverse()
+                    # Also collect any WARN/Error lines specifically
+                    _error_lines = []
+                    for _el in reversed(_recent_lines[-30:]):
+                        _el_s = _el.strip()
+                        if not _el_s:
+                            continue
+                        if any(f"[{t}]" in _el_s for t in ("ERROR", "FAIL", "WARN")):
+                            _error_lines.append(_el_s[:120])
+                        if len(_error_lines) >= 3:
+                            break
+                    _error_lines.reverse()
+
+                    # ✅ 已完成 — concrete numbers + latest items
+                    _prog_done = ""
+                    if _latest_counter:
+                        _pct = _latest_counter[0] * 100 / max(_latest_counter[1], 1)
+                        _done_parts = [f"{_latest_counter[0]:,}/{_latest_counter[1]:,}（{_pct:.1f}%）"]
+                        if _ok_count:
+                            _done_parts.append(f"{_ok_count} ok")
+                        if _skip_count:
+                            _done_parts.append(f"{_skip_count} skip")
+                        _prog_done = f"✅ 已完成：{'，'.join(_done_parts)}"
+                    elif _enrich_count:
+                        # Stage 4 (ENRICH) has no [X/Y] counter, only [ENRICH] tags
+                        _prog_done = f"✅ 已完成：{_enrich_count} enriched"
+                    elif _ok_count:
+                        _prog_done = f"✅ 已完成：{_ok_count} processed"
+                    if _detail_lines and _prog_done:
+                        _prog_done += "\n  最新：" + "；".join(_detail_lines)
+
+                    # 🔄 進行中 — stage + rate + last item being processed
+                    _prog_running = "🔄 進行中："
+                    _running_parts = []
+                    if _latest_stage:
+                        _running_parts.append(f"Stage {_latest_stage}")
+                    if (_ok_count > 0 or _enrich_count > 0) and interval_report:
+                        _active_count = max(_ok_count, _enrich_count)
+                        _rate = _active_count * 60 // max(interval_report, 1)
+                        if _rate > 0:
+                            _running_parts.append(f"rate ~{_rate}/min")
+                    _uptime_str = _uptime
+                    if _uptime_str and _uptime_str != "?":
+                        _running_parts.append(f"uptime {_uptime_str}")
+                    if not _running_parts:
+                        _running_parts.append("running")
+                    _prog_running += "，".join(_running_parts)
+                    # Show what's currently being processed (last line)
+                    if _last_ok_line:
+                        _prog_running += f"\n  最近處理：{_last_ok_line[:100]}"
+
+                    # ⚠️ 待解 — include checkpoint errors + pending images
+                    _err_count = _tag_counts.get("ERROR", 0) + _tag_counts.get("FAIL", 0)
+                    _warn_count = _tag_counts.get("WARN", 0)
+                    # Merge checkpoint error count if available (e.g. OneNote COM errors)
+                    if _ckpt_errors > 0 and _err_count == 0:
+                        _err_count = _ckpt_errors
+                    if _err_count == 0 and _warn_count == 0 and _ckpt_pending_images == 0:
+                        _prog_errors = "⚠️ 待解：無"
+                    else:
+                        _issue_parts = []
+                        if _err_count:
+                            _issue_parts.append(f"{_err_count} errors")
+                        if _warn_count:
+                            _issue_parts.append(f"{_warn_count} warnings")
+                        if _ckpt_pending_images > 0:
+                            _issue_parts.append(f"{_ckpt_pending_images} pending images")
+                        _prog_errors = f"⚠️ 待解：{'，'.join(_issue_parts)}"
+                        if _error_lines:
+                            _prog_errors += "\n  " + "；".join(_error_lines)
+
+                    # 📋 行動 — infer from state instead of "持續 ▉"
+                    _prog_action = "📋 行動："
+                    if _err_count > 0:
+                        _prog_action += f"排查 {_err_count} 個 error"
+                    elif _latest_counter:
+                        _remaining = _latest_counter[1] - _latest_counter[0]
+                        if _remaining > 0 and _ok_count > 0 and interval_report:
+                            _rate = _ok_count * 60 // max(interval_report, 1)
+                            if _rate > 0:
+                                _eta_min = _remaining // _rate
+                                _prog_action += f"預估剩餘 ~{_eta_min} 分鐘（{_remaining:,} pages）"
+                            else:
+                                _prog_action += f"剩餘 {_remaining:,} pages"
+                        else:
+                            _prog_action += f"剩餘 {_remaining:,} pages"
+                    else:
+                        _prog_action += "等待完成"
+
+                    _parts = [_prog_done, _prog_running, _prog_errors, _prog_action]
+                    _summary = "\n".join(p for p in _parts if p)
+                    # Send progress card directly to the platform adapter
+                    # instead of injecting into the agent conversation.  This
+                    # avoids the agent replying with a low-signal 👍/👌 and
+                    # keeps the progress report visible to the user.
+                    # Append runtime footer (model · provider) so Teams card
+                    # shows the same metadata as regular agent replies.
+                    try:
+                        from gateway.runtime_footer import build_footer_line as _bfl_prog
+                        _prog_cfg = _load_gateway_config() or {}
+                        _prog_model = (self._session_model_overrides.get(session_key) or {}).get("model") \
+                                      or (self._last_resolved_model.get(session_key) or self._last_resolved_model.get("*")) \
+                                      or (_prog_cfg.get("model") or {}).get("default") or ""
+                        _prog_provider = (self._session_model_overrides.get(session_key) or {}).get("provider") \
+                                         or (_prog_cfg.get("model") or {}).get("provider") or ""
+                        _prog_footer = _bfl_prog(
+                            user_config=_prog_cfg,
+                            platform_key=_platform_config_key(platform_name),
+                            model=_prog_model,
+                            provider=_prog_provider,
+                            context_tokens=0,
+                            context_length=None,
+                            cwd="",
+                        )
+                        logger.info(
+                            "Interval footer debug: model=%r provider=%r footer=%r",
+                            _prog_model, _prog_provider, _prog_footer,
+                        )
+                        if _prog_footer:
+                            _summary = _summary + "\n\n" + _prog_footer
+                    except Exception:
+                        pass
+                    _prog_card = _summary
+                    adapter = None
+                    for p, a in self.adapters.items():
+                        if p.value == platform_name:
+                            adapter = a
+                            break
+                    if adapter and chat_id:
+                        try:
+                            send_meta = {"thread_id": thread_id} if thread_id else {}
+                            await adapter.send(
+                                chat_id,
+                                _prog_card,
+                                metadata=send_meta,
+                            )
+                            logger.info(
+                                "Process %s progress report (interval=%ss) — sent card for session %s",
+                                session_id, interval_report, session_key,
+                            )
+                        except Exception as e:
+                            logger.error("Interval report card delivery error: %s", e)
 
             elif has_new_output and notify_mode == "all" and not agent_notify:
                 # New output available -- deliver status update (only in "all" mode)
@@ -14714,7 +15184,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
-        for key in ("provider", "api_key", "base_url", "api_mode"):
+        for key in ("provider", "api_key", "base_url", "api_mode", "default_headers"):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
@@ -15649,6 +16119,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+        disabled_toolsets = self._merge_teams_mtk_group_disabled_toolsets(
+            source, disabled_toolsets
+        )
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
@@ -17543,6 +18016,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
+                "provider": getattr(_agent, "provider", None) if _agent else None,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),

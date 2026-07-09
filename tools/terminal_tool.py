@@ -1999,6 +1999,7 @@ def terminal_tool(
     pty: bool = False,
     notify_on_complete: bool = False,
     watch_patterns: Optional[List[str]] = None,
+    interval_report: int = 0,
 ) -> str:
     """
     Execute a command in the configured terminal environment.
@@ -2014,6 +2015,7 @@ def terminal_tool(
         pty: If True, use pseudo-terminal for interactive CLI tools (local backend only)
         notify_on_complete: If True and background=True, you'll be notified exactly once when the process exits. The right choice for almost every long task. MUTUALLY EXCLUSIVE with watch_patterns.
         watch_patterns: List of strings to watch for in background output. HARD rate limit: 1 notification per 15s per process. After 3 strike windows in a row, watch_patterns is disabled and the session is auto-promoted to notify_on_complete. Use ONLY for rare, one-shot mid-process signals on long-lived processes (server readiness, migration-done markers). NEVER use in loops/batch jobs — error patterns there will hit the strike limit and get disabled. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both.
+        interval_report: When >0 and background=True with notify_on_complete=True, inject a progress summary into the agent conversation every interval_report seconds while the process is still running. The summary includes the last ~500 chars of stdout. Minimum 30 seconds. Requires notify_on_complete=True.
 
     Returns:
         str: JSON string with output, exit_code, and error fields
@@ -2545,6 +2547,17 @@ def terminal_tool(
                     proc_session.notify_on_complete = True
                     result_data["notify_on_complete"] = True
 
+                    # Set interval_report on the session (clamp to >=30s)
+                    if interval_report > 0:
+                        _clamped = max(30, interval_report)
+                        proc_session.interval_report = _clamped
+                        result_data["interval_report"] = _clamped
+                        if _clamped != interval_report:
+                            result_data["interval_report_clamped"] = (
+                                f"interval_report clamped from {interval_report}s to {_clamped}s "
+                                f"(minimum 30s)"
+                            )
+
                     # In gateway mode, auto-register a fast watcher so the
                     # gateway can detect completion and trigger a new agent
                     # turn.  CLI mode uses the completion_queue directly.
@@ -2561,6 +2574,11 @@ def terminal_tool(
                             "thread_id": proc_session.watcher_thread_id,
                             "message_id": proc_session.watcher_message_id,
                             "notify_on_complete": True,
+                            "interval_report": proc_session.interval_report,
+                            "progress_file": proc_session.progress_file,
+                            "command": proc_session.command,
+                            "pid": proc_session.pid,
+                            "started_at": proc_session.started_at,
                         })
 
                 # Set watch patterns for output monitoring
@@ -2946,6 +2964,12 @@ TERMINAL_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Strings to watch for in background process output. HARD RATE LIMIT: at most 1 notification per 15 seconds per process — matches arriving inside the cooldown are dropped. After 3 consecutive 15-second windows with dropped matches, watch_patterns is automatically disabled for that process and promoted to notify_on_complete behavior (one notification on exit, no more mid-process spam). USE ONLY for truly rare, one-shot mid-process signals on LONG-LIVED processes that will never exit on their own — e.g. ['Application startup complete'] on a server so you know when to hit its endpoint, or ['migration done'] on a daemon. DO NOT use for: (1) end-of-run markers like 'DONE'/'PASS' — use notify_on_complete instead; (2) error patterns like 'ERROR'/'Traceback' in loops or multi-item batch jobs — they fire on every iteration and you'll hit the strike limit fast; (3) anything you'd ever combine with notify_on_complete. When in doubt, choose notify_on_complete. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both."
+            },
+            "interval_report": {
+                "type": "integer",
+                "description": "When >0 and background=True with notify_on_complete=True, inject a progress summary into the agent conversation every N seconds while the process is still running. The summary includes the last ~500 chars of stdout and the process uptime. Minimum 30 seconds (clamped automatically). Requires notify_on_complete=True. Use for long-running batch jobs where the user wants periodic progress updates, not just a single notification at the end.",
+                "minimum": 30,
+                "default": 0
             }
         },
         "required": ["command"]
@@ -2964,6 +2988,7 @@ def _handle_terminal(args, **kw):
         pty=args.get("pty", False),
         notify_on_complete=args.get("notify_on_complete", False),
         watch_patterns=args.get("watch_patterns"),
+        interval_report=args.get("interval_report", 0),
     )
 
 

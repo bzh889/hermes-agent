@@ -475,6 +475,7 @@ class AIAgent:
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
+        default_headers: Dict[str, str] = None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 20,
         checkpoint_max_total_size_mb: int = 500,
@@ -550,6 +551,7 @@ class AIAgent:
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
+            default_headers=default_headers,
             checkpoints_enabled=checkpoints_enabled,
             checkpoint_max_snapshots=checkpoint_max_snapshots,
             checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
@@ -4174,13 +4176,16 @@ class AIAgent:
     def _try_refresh_anthropic_client_credentials(self) -> bool:
         if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
             return False
-        # Only refresh credentials for the native Anthropic provider.
+        # Only refresh credentials for native Anthropic endpoints (api.anthropic.com).
         # Other anthropic_messages providers (MiniMax, Alibaba, etc.) use their own keys.
-        if self.provider != "anthropic":
+        # Custom providers like "anthropic-2" with base_url at api.anthropic.com also qualify.
+        _base = getattr(self, "_anthropic_base_url", "") or ""
+        if _base and not base_url_host_matches(_base, "api.anthropic.com"):
+            return False
+        if not _base and self.provider != "anthropic":
             return False
         # Azure endpoints use static API keys — OAuth token rotation doesn't apply.
         # Refreshing would pick up ~/.claude/.credentials.json OAuth token and break auth.
-        _base = getattr(self, "_anthropic_base_url", "") or ""
         if "azure.com" in _base:
             return False
 
@@ -4215,11 +4220,15 @@ class AIAgent:
 
         self._anthropic_api_key = new_token
         # Update OAuth flag — token type may have changed (API key ↔ OAuth).
-        # Only treat as OAuth on native Anthropic; third-party endpoints using
-        # the Anthropic protocol must not trip OAuth paths (#1739 & third-party
-        # identity-injection guard).
+        # Only treat as OAuth on native Anthropic endpoints (api.anthropic.com);
+        # third-party endpoints using the Anthropic protocol must not trip
+        # OAuth paths (#1739 & third-party identity-injection guard).
+        # Custom providers like "anthropic-2" with base_url at api.anthropic.com also qualify.
         from agent.anthropic_adapter import _is_oauth_token
-        self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
+        _base = getattr(self, "_anthropic_base_url", "") or ""
+        # When base_url is known: check host.  When unknown: fall back to provider name.
+        _is_native = base_url_host_matches(_base, "api.anthropic.com") if _base else self.provider == "anthropic"
+        self._is_anthropic_oauth = _is_oauth_token(new_token) if _is_native else False
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
@@ -4315,7 +4324,8 @@ class AIAgent:
                 runtime_key, runtime_base,
                 timeout=get_provider_request_timeout(self.provider, self.model),
             )
-            self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
+            _is_native = base_url_host_matches(runtime_base or "", "api.anthropic.com") if runtime_base else self.provider == "anthropic"
+            self._is_anthropic_oauth = _is_oauth_token(runtime_key) if _is_native else False
             self.api_key = runtime_key
             self.base_url = runtime_base
             return
@@ -4583,10 +4593,28 @@ class AIAgent:
         announce a fallback that will never be attempted (the user has no
         fallback chain configured).  Mirrors the early-return guard in
         ``try_activate_fallback`` (#35314, #17446).
+
+        Platform/provider policy:
+        - Gateway (any platform except "tui"/"cli"): always allow fallback.
+        - TUI/CLI: only allow fallback when the current provider starts
+          with ``aide`` (MTK AIDE gateways that degrade gracefully on quota
+          exhaustion).  Non-AIDE providers in a local session should fail
+          fast rather than silently degrading to a different backend.
         """
         chain = getattr(self, "_fallback_chain", None) or []
         index = getattr(self, "_fallback_index", 0)
-        return index < len(chain)
+        if index >= len(chain):
+            return False
+        # ── Policy gate ──
+        platform = (getattr(self, "platform", "") or "").strip().lower()
+        if platform not in ("tui", "cli"):
+            # Gateway sessions: always allow fallback regardless of provider.
+            return True
+        provider = (getattr(self, "provider", "") or "").strip().lower()
+        if not provider.startswith("aide"):
+            # Non-AIDE TUI/CLI sessions: skip fallback entirely.
+            return False
+        return True
 
     # ── Per-turn primary restoration ─────────────────────────────────────
 

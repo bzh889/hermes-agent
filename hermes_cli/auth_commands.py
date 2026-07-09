@@ -31,6 +31,7 @@ import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
 from hermes_constants import OPENROUTER_BASE_URL
 from hermes_cli.secret_prompt import masked_secret_prompt
+from utils import base_url_host_matches
 
 
 # Providers that support OAuth login in addition to API keys.
@@ -221,7 +222,10 @@ def auth_add_command(args) -> None:
         print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
         return
 
-    if provider == "anthropic":
+    if provider == "anthropic" or (
+        provider.startswith(CUSTOM_POOL_PREFIX)
+        and base_url_host_matches(_provider_base_url(provider), "api.anthropic.com")
+    ):
         from agent import anthropic_adapter as anthropic_mod
 
         creds = anthropic_mod.run_hermes_oauth_login_pure()

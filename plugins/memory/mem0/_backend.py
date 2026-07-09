@@ -91,7 +91,18 @@ class PlatformBackend(Mem0Backend):
 
 
 class OSSBackend(Mem0Backend):
-    """Wraps mem0.Memory for self-hosted (OSS) mode."""
+    """Wraps mem0.Memory for self-hosted (OSS) mode.
+
+    Uses a process-level singleton keyed on the vector-store path so that
+    multiple sessions (or AIAgent instances) inside the same gateway process
+    share one ``mem0.Memory`` instead of each opening their own QdrantClient.
+    Qdrant embedded storage holds a file lock; a second client on the same
+    path raises ``Storage folder … is already accessed by another instance``.
+    """
+
+    # Process-level cache: {expanded_vs_path: Memory}
+    _shared_memory: dict[str, Any] = {}
+    _shared_config: dict[str, dict] = {}
 
     def __init__(self, oss_config: dict):
         import os
@@ -103,6 +114,9 @@ class OSSBackend(Mem0Backend):
         if "path" in vs_config:
             vs_config["path"] = os.path.expanduser(vs_config["path"])
 
+        # Cache key = expanded vector-store path (the Qdrant lock boundary)
+        cache_key = vs_config.get("path") or vs_config.get("url", "")
+
         embedder_config = oss_config.get("embedder", {}).get("config", {})
         dims = embedder_config.get("embedding_dims")
         if not dims:
@@ -111,9 +125,11 @@ class OSSBackend(Mem0Backend):
             dims = KNOWN_DIMS.get(model)
         if dims:
             vs_config["embedding_model_dims"] = dims
-            self._recreate_collection_if_dims_changed(
-                vector_store.get("provider", "qdrant"), vs_config, dims,
-            )
+            # Only recreate if we are the FIRST backend for this key.
+            if cache_key not in self._shared_memory:
+                self._recreate_collection_if_dims_changed(
+                    vector_store.get("provider", "qdrant"), vs_config, dims,
+                )
 
         vector_store["config"] = vs_config
 
@@ -123,7 +139,70 @@ class OSSBackend(Mem0Backend):
             "embedder": oss_config["embedder"],
             "version": "v1.1",
         }
-        self._memory = Memory.from_config(config)
+
+        # Return cached Memory if available and config matches.
+        if cache_key and cache_key in self._shared_memory:
+            self._memory = self._shared_memory[cache_key]
+            self._reuse = True
+            return
+
+        # ── Patch portalocker so multiple processes can share embedded Qdrant ──
+        # Qdrant embedded uses portalocker.LockFlags.EXCLUSIVE | NON_BLOCKING
+        # to enforce single-process access. On Windows with Hermes (gateway +
+        # TUI + CLI = multiple processes), this fails. We replace the lock
+        # with a cooperative shared lock, which is safe for SQLite + pickle
+        # because Hermes processes use the same mem0 Memory API (no raw writes).
+        self._orig_portalocker_lock = None
+        if "path" in vs_config and os.path.exists(vs_config["path"]):
+            try:
+                import portalocker
+                if not getattr(portalocker, "_hermes_patched", False):
+                    _orig_lock = portalocker.lock
+                    self._orig_portalocker_lock = _orig_lock
+
+                    def _shared_lock(file, flags, *args, **kwargs):
+                        import portalocker as _pl
+                        # If caller wants EXCLUSIVE | NON_BLOCKING, downgrade to SHARED.
+                        # This lets multiple processes hold the file simultaneously.
+                        excl_nb = (_pl.LockFlags.EXCLUSIVE | _pl.LockFlags.NON_BLOCKING)
+                        if (flags & excl_nb) == excl_nb:
+                            flags = _pl.LockFlags.SHARED | _pl.LockFlags.NON_BLOCKING
+                        return _orig_lock(file, flags, *args, **kwargs)
+
+                    portalocker.lock = _shared_lock
+                    portalocker._hermes_patched = True
+            except ImportError:
+                pass
+
+        try:
+            self._memory = Memory.from_config(config)
+            self._reuse = False
+            if cache_key:
+                self._shared_memory[cache_key] = self._memory
+                self._shared_config[cache_key] = config
+        except RuntimeError as exc:
+            err = str(exc)
+            if "already accessed" not in err:
+                raise
+            # Qdrant embedded file-lock conflict — another process owns the storage.
+            # Try connecting to a local Qdrant server instead (url-based access
+            # does not acquire the portalocker file lock).
+            vs_fallback_url = os.environ.get("QDRANT_URL", "http://127.0.0.1:6333")
+            import logging
+            logger = logging.getLogger("plugins.memory.mem0")
+            logger.warning(
+                "Qdrant embedded lock conflict (%s). "
+                "Falling back to Qdrant server at %s — "
+                "start one with: python ~/.hermes/scripts/qdrant-server-wrapper.py",
+                err.split(".")[0], vs_fallback_url,
+            )
+            # Rewrite vector_store config to use url= instead of path=
+            vs_config.pop("path", None)
+            vs_config["url"] = vs_fallback_url
+            vector_store["config"] = vs_config
+            config["vector_store"] = vector_store
+            self._memory = Memory.from_config(config)
+            self._reuse = False
 
     @staticmethod
     def _recreate_collection_if_dims_changed(provider: str, vs_config: dict, expected_dims: int) -> None:
@@ -224,6 +303,10 @@ class OSSBackend(Mem0Backend):
         return {"result": "Memory deleted.", "memory_id": memory_id}
 
     def close(self):
+        # Reused backends must not close the shared Memory — the last
+        # owner will clean up via atexit or process teardown.
+        if getattr(self, "_reuse", False):
+            return
         try:
             telemetry = getattr(self._memory, "telemetry", None)
             if telemetry and hasattr(telemetry, "posthog"):
@@ -239,5 +322,11 @@ class OSSBackend(Mem0Backend):
             client = getattr(vs, "client", None)
             if client and hasattr(client, "close"):
                 client.close()
+            # Purge from shared cache so a future backend can recreate.
+            for key, mem in list(self._shared_memory.items()):
+                if mem is self._memory:
+                    del self._shared_memory[key]
+                    self._shared_config.pop(key, None)
+                    break
         except Exception:
             pass

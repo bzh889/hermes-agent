@@ -39,9 +39,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Activate venv ───────────────────────────────────────────────────────────
 VENV=""
+_ACTIVATE=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
+  # POSIX (Linux/macOS): bin/activate   Windows (MSYS/Git Bash): Scripts/activate
   if [ -f "$candidate/bin/activate" ]; then
     VENV="$candidate"
+    _ACTIVATE="$candidate/bin/activate"
+    break
+  elif [ -f "$candidate/Scripts/activate" ]; then
+    VENV="$candidate"
+    _ACTIVATE="$candidate/Scripts/activate"
     break
   fi
 done
@@ -51,7 +58,14 @@ if [ -z "$VENV" ]; then
   exit 1
 fi
 
-PYTHON="$VENV/bin/python"
+# Determine python binary: POSIX: bin/python, Windows: Scripts/python.exe
+if [ -f "$VENV/bin/python" ]; then
+  PYTHON="$VENV/bin/python"
+elif [ -f "$VENV/Scripts/python.exe" ]; then
+  PYTHON="$VENV/Scripts/python.exe"
+else
+  PYTHON="$VENV/bin/python"
+fi
 
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
@@ -74,9 +88,14 @@ cd "$REPO_ROOT"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  USERPROFILE="${USERPROFILE:-}" \
+  HOMEDRIVE="${HOMEDRIVE:-}" \
+  HOMEPATH="${HOMEPATH:-}" \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
+  PYTHONIOENCODING=utf-8 \
+  PYTHONUTF8=1 \
   PYTHONHASHSEED=0 \
   PYTHONDONTWRITEBYTECODE=1 \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \

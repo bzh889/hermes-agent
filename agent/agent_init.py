@@ -230,6 +230,7 @@ def init_agent(
     iteration_budget: "IterationBudget" = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
+    default_headers: Dict[str, str] = None,
     checkpoints_enabled: bool = False,
     checkpoint_max_snapshots: int = 20,
     checkpoint_max_total_size_mb: int = 500,
@@ -701,7 +702,17 @@ def init_agent(
             # that cause 401/403 on their endpoints.  Guards #1739 and
             # the third-party identity-injection bug.
             from agent.anthropic_adapter import _is_oauth_token as _is_oat
-            agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
+            from utils import base_url_host_matches as _bhm_anthropic
+            # OAuth treatment (Claude Code identity + system prompt) must apply to ANY
+            # real api.anthropic.com endpoint carrying an OAuth token — not just the
+            # literal "anthropic" slug. Named accounts (providers.anthropic-1 / -2) are
+            # OAuth too; without this they send OAuth requests missing the required
+            # "You are Claude Code" system prompt, Anthropic rejects them (429), and the
+            # agent silently falls back to another provider. Third-party
+            # anthropic-compatible proxies (MiniMax/Kimi/GLM) have a non-anthropic
+            # base_url, so they stay excluded and never get Claude-Code identity.
+            _is_real_anthropic_endpoint = _is_native_anthropic or _bhm_anthropic(base_url or "", "api.anthropic.com")
+            agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_real_anthropic_endpoint and isinstance(effective_key, str)) else False
             agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
             # No OpenAI client needed for Anthropic mode
             agent.client = None
@@ -814,6 +825,11 @@ def init_agent(
                 }
             else:
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
+            # Pre-seed default_headers from the runtime resolver (e.g. MTK AIDE
+            # x-user-id) when provided.  Host-specific logic below may overwrite
+            # this; per-provider config lookup in the elif branch merges on top.
+            if default_headers and "default_headers" not in client_kwargs:
+                client_kwargs["default_headers"] = dict(default_headers)
             if _provider_timeout is not None:
                 client_kwargs["timeout"] = _provider_timeout
             if agent.provider == "copilot-acp":
@@ -842,16 +858,50 @@ def init_agent(
                 from agent.auxiliary_client import _codex_cloudflare_headers
                 client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
             elif "default_headers" not in client_kwargs:
-                # Fall back to profile.default_headers for providers that
-                # declare custom headers (e.g. Kimi User-Agent on non-kimi.com
-                # endpoints).
+                # Custom providers in config.yaml can declare default_headers
+                # (e.g. x-user-id for MTK AIDE).  Check three sources:
+                # 1. providers: dict (most user-defined entries live here)
+                # 2. custom_providers: list (legacy path)
+                # 3. ProviderProfile.default_headers (built-in profiles)
+                _cp_headers = None
+                _prov_norm = (agent.provider or "").strip().lower()
+                # Strip "custom:" prefix for matching
+                _prov_slug = _prov_norm.split(":", 1)[1].strip() if ":" in _prov_norm else _prov_norm
+                # 1. providers: dict — look up by slug
                 try:
-                    from providers import get_provider_profile as _gpf
-                    _ph = _gpf(agent.provider)
-                    if _ph and _ph.default_headers:
-                        client_kwargs["default_headers"] = dict(_ph.default_headers)
+                    from hermes_cli.config import load_config as _lc
+                    _full_cfg = _lc()
+                    _up = _full_cfg.get("providers") or {}
+                    _uentry = _up.get(_prov_slug, {}) if isinstance(_up, dict) else {}
+                    if isinstance(_uentry, dict):
+                        _dh = _uentry.get("default_headers")
+                        if isinstance(_dh, dict) and _dh:
+                            _cp_headers = dict(_dh)
                 except Exception:
                     pass
+                # 2. custom_providers: list
+                if _cp_headers is None:
+                    for _cpe in getattr(agent, "_custom_providers", None) or []:
+                        _e_key = str(_cpe.get("provider_key", "") or "").strip().lower()
+                        _e_name = str(_cpe.get("name", "") or "").strip().lower()
+                        if _prov_slug and _prov_slug in (_e_key, _e_name):
+                            _cp_hdr = _cpe.get("default_headers")
+                            if isinstance(_cp_hdr, dict) and _cp_hdr:
+                                _cp_headers = dict(_cp_hdr)
+                            break
+                if _cp_headers:
+                    client_kwargs["default_headers"] = _cp_headers
+                else:
+                    # Fall back to profile.default_headers for providers that
+                    # declare custom headers (e.g. Kimi User-Agent on non-kimi.com
+                    # endpoints).
+                    try:
+                        from providers import get_provider_profile as _gpf
+                        _ph = _gpf(agent.provider)
+                        if _ph and _ph.default_headers:
+                            client_kwargs["default_headers"] = dict(_ph.default_headers)
+                    except Exception:
+                        pass
         else:
             # No explicit creds — use the centralized provider router
             from agent.auxiliary_client import resolve_provider_client

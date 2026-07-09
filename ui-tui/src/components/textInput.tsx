@@ -940,6 +940,7 @@ export function TextInput({
         eventRaw === '\x1bv' ||
         eventRaw === '\x1bV' ||
         eventRaw === '\x16' ||
+        (!isMac && k.meta && inp.toLowerCase() === 'v') ||
         (isMac && isActionMod(k) && inp.toLowerCase() === 'v')
       ) {
         flushKeyBurst()

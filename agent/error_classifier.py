@@ -116,6 +116,15 @@ _BILLING_PATTERNS = [
     "balance_depleted",
     "model_not_supported_on_free_tier",
     "not available on the free tier",
+    # MTK AIDE gateway wraps daily-quota exhaustion as HTTP 500 (not the
+    # standard 402/429) — e.g. {"error":"upstream error: [ds901472] your
+    # daily quota is exhausted, please contact IT.AI.ADMIN@mediatek.com if
+    # you want more quota"}. Without this pattern the 500/502 branch in
+    # _classify_by_status falls through to the generic retryable
+    # server_error bucket (no should_fallback), so the retry loop hammers
+    # the same exhausted account 3x and then hard-aborts instead of
+    # advancing the fallback_providers chain.
+    "daily quota is exhausted",
 ]
 
 # Patterns that indicate rate limiting (transient, will resolve)
@@ -962,6 +971,20 @@ def _classify_by_status(
             return result_fn(
                 FailoverReason.format_error,
                 retryable=False,
+                should_fallback=True,
+            )
+        # Some gateways (notably MTK AIDE) wrap quota/billing exhaustion
+        # as HTTP 500 instead of the standard 402/429.  Concrete example:
+        #   {"error":"upstream error: [ds901472] your daily quota is exhausted …"}
+        # Without this check the 500 branch returns generic server_error
+        # (retryable, no should_fallback) which causes the retry loop to
+        # hammer the same depleted account 3× then hard-abort, ignoring
+        # the configured fallback_providers chain entirely.
+        if any(p in error_msg for p in _BILLING_PATTERNS):
+            return result_fn(
+                FailoverReason.billing,
+                retryable=False,
+                should_rotate_credential=True,
                 should_fallback=True,
             )
         return result_fn(FailoverReason.server_error, retryable=True)

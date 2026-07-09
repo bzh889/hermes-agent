@@ -1135,7 +1135,20 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     Uses the centralized provider router (resolve_provider_client) for
     auth resolution and client construction — no duplicated provider→key
     mappings.
+
+    Platform/provider policy (mirrors ``_has_pending_fallback``):
+    - Gateway (any platform except "tui"/"cli"): always allow fallback.
+    - TUI/CLI: only allow fallback when the current provider starts
+      with ``aide``. Non-AIDE local sessions should fail fast rather
+      than silently degrading to a different backend.
     """
+    # ── Policy gate: skip fallback entirely for non-AIDE TUI/CLI ──
+    _platform = (getattr(agent, "platform", "") or "").strip().lower()
+    if _platform in ("tui", "cli"):
+        _provider = (getattr(agent, "provider", "") or "").strip().lower()
+        if not _provider.startswith("aide"):
+            return False
+
     if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:
         # Only start cooldown when leaving the primary provider.  If we're
         # already on a fallback and chain-switching, the primary wasn't the
@@ -2314,8 +2327,90 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         sanitize_anthropic_kwargs(
             api_kwargs, log_prefix=getattr(agent, "log_prefix", "")
         )
+        # TEMP billing-debug capture: dump the exact api_kwargs of the real turn
+        # once, so it can be replayed offline with different OAuth tokens to find
+        # what routes Hermes to the $10 spend bucket vs Claude Code to the $1000
+        # pool. Gated on HERMES_CAP_KWARGS (path); no-op otherwise. REMOVE after.
+        import os as _os
+        _capf = _os.getenv("HERMES_CAP_KWARGS")
+        _cap_seq = None
+        if _capf:
+            try:
+                import json as _j
+                _msgs = api_kwargs.get("messages") or []
+                _in_chars = sum(len(_j.dumps(_m, default=str)) for _m in _msgs)
+                _in_chars += len(_j.dumps(api_kwargs.get("system"), default=str))
+                _snap = {
+                    "model": api_kwargs.get("model"),
+                    "max_tokens": api_kwargs.get("max_tokens"),
+                    "n_messages": len(_msgs),
+                    "input_chars": _in_chars,
+                    "n_tools": len(api_kwargs.get("tools") or []),
+                    "has_thinking": "thinking" in api_kwargs,
+                    "metadata_present": api_kwargs.get("metadata") is not None,
+                    "keys": sorted(api_kwargs.keys()),
+                }
+                # append one line per call so nothing is missed
+                with open(_capf + ".calls.jsonl", "a", encoding="utf-8") as _fh:
+                    _fh.write(_j.dumps(_snap, default=str) + "\n")
+                # keep the FULL payload of the biggest call seen (the real main turn)
+                _big = _os.path.join(_os.path.dirname(_capf) or ".", "cap_biggest.json")
+                _prev = 0
+                _mf = _big + ".maxchars"
+                if _os.path.exists(_mf):
+                    try: _prev = int(open(_mf).read().strip() or "0")
+                    except Exception: _prev = 0
+                if _in_chars > _prev:
+                    with open(_big, "w", encoding="utf-8") as _fh:
+                        _j.dump(api_kwargs, _fh, default=lambda o: f"<{type(o).__name__}>")
+                    with open(_mf, "w") as _fh:
+                        _fh.write(str(_in_chars))
+                _cap_seq = _snap
+                logger.warning("CAP: call n_msgs=%s in_chars=%s max_tokens=%s n_tools=%s",
+                               _snap["n_messages"], _in_chars, _snap["max_tokens"], _snap["n_tools"])
+                # IN-SITU max_tokens A/B: on the REAL request, shadow-send the
+                # SAME payload at smaller max_tokens using the SAME token, to
+                # prove whether the spend-precheck 429 is driven by max_tokens
+                # (the reserved hold). Gated on HERMES_MT_AB. Only worth firing
+                # on the big main turn (skip tiny calls). REMOVE after debug.
+                if _os.getenv("HERMES_MT_AB") and _in_chars > 20000:
+                    try:
+                        _tok = getattr(agent._anthropic_client, "auth_token", None) \
+                            or getattr(agent._anthropic_client, "api_key", None)
+                        from agent.anthropic_adapter import build_anthropic_client as _bac
+                        _burl = getattr(agent, "base_url", "https://api.anthropic.com")
+                        _real_mt = api_kwargs.get("max_tokens")
+                        _ab_line = [f"REAL_mt={_real_mt}"]
+                        for _mt in (32000, 8):
+                            _kw = dict(api_kwargs); _kw["max_tokens"] = _mt
+                            _kw.pop("betas", None)
+                            _c = _bac(api_key=_tok, base_url=_burl)
+                            try:
+                                with _c.messages.stream(**_kw) as _s:
+                                    for _ in _s.text_stream:
+                                        break
+                                _ab_line.append(f"mt{_mt}=200")
+                            except Exception as _abe:
+                                _st = getattr(getattr(_abe, "response", None), "status_code", "ERR")
+                                _ab_line.append(f"mt{_mt}={_st}")
+                        with open(_capf + ".ab.log", "a", encoding="utf-8") as _fh:
+                            _fh.write(" ".join(_ab_line) + "\n")
+                        logger.warning("CAP-AB: %s", " ".join(_ab_line))
+                    except Exception as _abx:
+                        logger.warning("CAP-AB failed: %s", _abx)
+            except Exception as _e:
+                logger.warning("CAP: dump failed: %s", _e)
         # Use the Anthropic SDK's streaming context manager
-        with agent._anthropic_client.messages.stream(**api_kwargs) as stream:
+        try:
+            _cap_ctx = agent._anthropic_client.messages.stream(**api_kwargs)
+        except Exception as _cap_e:
+            if _capf and _cap_seq is not None:
+                import json as _j2
+                _cap_seq["OUTCOME"] = f"{type(_cap_e).__name__}: {str(_cap_e)[:120]}"
+                with open(_capf + ".calls.jsonl", "a", encoding="utf-8") as _fh:
+                    _fh.write(_j2.dumps(_cap_seq, default=str) + "\n")
+            raise
+        with _cap_ctx as stream:
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers
             # immediately so they survive a stream that dies before the

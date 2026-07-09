@@ -53,6 +53,69 @@ class GatewayAuthorizationMixin:
             return False
         return bool(getattr(adapter, "authorization_is_upstream", False))
 
+    def _teams_mtk_group_is_whitelisted(self, chat_id: Optional[str]) -> bool:
+        """Whether *chat_id* is a whitelisted TeamsMTK group conversation.
+
+        Reads ``gateway.teams_mtk.groups`` from config.yaml (via
+        ``load_config_readonly()`` — read-only, no mutation). A conv_id key
+        present in that mapping means "every sender in this group is
+        authorized", independent of ``GATEWAY_ALLOWED_USERS``. Defaults to
+        ``False`` on missing chat_id or any config read failure (fail-closed,
+        matching the rest of this module's posture).
+        """
+        if not chat_id:
+            return False
+        try:
+            from hermes_cli.config import load_config_readonly
+            groups = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("groups", {})
+            )
+        except Exception:
+            return False
+        if not isinstance(groups, dict):
+            return False
+        return chat_id in groups
+
+    def _merge_teams_mtk_group_disabled_toolsets(
+        self, source: SessionSource, disabled_toolsets: Optional[list]
+    ) -> Optional[list]:
+        """Union *disabled_toolsets* with a TeamsMTK group's blocked_toolsets.
+
+        Reads ``gateway.teams_mtk.groups.<chat_id>.blocked_toolsets`` and
+        ``...per_user.<user_id>.blocked_toolsets`` and merges them into the
+        globally-configured ``disabled_toolsets`` (from ``agent.disabled_toolsets``
+        in config.yaml). No-op (returns *disabled_toolsets* unchanged) for
+        every platform other than TeamsMTK group conversations, and on any
+        config read failure (fail-open here is safe: it only means a
+        per-group restriction doesn't apply, not that authorization is
+        bypassed — see `_teams_mtk_group_is_whitelisted`).
+        """
+        if source.platform != Platform.TEAMS_MTK or source.chat_type != "group":
+            return disabled_toolsets
+        try:
+            from hermes_cli.config import load_config_readonly
+            groups = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("groups", {})
+            )
+            group_cfg = groups.get(source.chat_id) if isinstance(groups, dict) else None
+            if not isinstance(group_cfg, dict):
+                return disabled_toolsets
+            merged = set(disabled_toolsets or [])
+            merged |= set(group_cfg.get("blocked_toolsets") or [])
+            if source.user_id:
+                per_user = group_cfg.get("per_user") or {}
+                user_cfg = per_user.get(source.user_id) or {}
+                merged |= set(user_cfg.get("blocked_toolsets") or [])
+            return sorted(merged) if merged else None
+        except Exception:
+            return disabled_toolsets
+
     def _adapter_enforces_own_access_policy(self, platform: Optional[Platform]) -> bool:
         """Whether the adapter for *platform* gates access at intake itself.
 
@@ -244,6 +307,20 @@ class GatewayAuthorizationMixin:
         # tests) — defensive against accidental fail-open.
         if source.delivered_via_upstream_relay is True or self._adapter_authorization_is_upstream(
             source.platform
+        ):
+            return True
+
+        # TeamsMTK group whitelist: a conv_id listed under
+        # gateway.teams_mtk.groups in config.yaml authorizes every sender in
+        # that group conversation, so operators don't have to add each
+        # member's OID to GATEWAY_ALLOWED_USERS individually. DMs are
+        # unaffected and continue through the individual-allowlist path
+        # below. See gateway/platforms/teams_mtk.py and
+        # `hermes teams-mtk group add/list/set/remove`.
+        if (
+            source.platform == Platform.TEAMS_MTK
+            and source.chat_type == "group"
+            and self._teams_mtk_group_is_whitelisted(source.chat_id)
         ):
             return True
 

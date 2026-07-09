@@ -1,6 +1,6 @@
 """Gateway runtime-metadata footer.
 
-Renders a compact footer showing runtime state (model, context %, cwd) and
+Renders a compact footer showing runtime state (model, provider, context %, cwd) and
 appends it to the FINAL message of an agent turn when enabled.  Off by default
 to keep replies minimal.
 
@@ -9,7 +9,7 @@ Config (``~/.hermes/config.yaml``)::
     display:
       runtime_footer:
         enabled: true                       # off by default
-        fields: [model, context_pct, cwd]   # order shown; drop any to hide
+        fields: [model, provider, context_pct, cwd]   # order shown; drop any to hide
 
 Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
 Users can toggle the global setting with ``/footer on|off`` from both the CLI
@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable, Optional
 
-_DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
+_DEFAULT_FIELDS: tuple[str, ...] = ("model", "provider", "context_pct", "cwd")
 _SEP = " · "
 
 
@@ -37,13 +37,24 @@ def _home_relative_cwd(cwd: str) -> str:
     if not cwd:
         return ""
     try:
-        home = os.path.expanduser("~")
+        # On Windows, os.path.expanduser reads USERPROFILE/HOMEPATH, not HOME.
+        # Honour the HOME env var first so tests (and Unix users) get consistent
+        # behaviour; fall back to expanduser for the Windows default path.
+        home = os.environ.get("HOME") or os.path.expanduser("~")
         p = os.path.abspath(cwd)
-        if home and (p == home or p.startswith(home + os.sep)):
-            return "~" + p[len(home):]
+        home_abs = os.path.abspath(home)
+        if home_abs and (p == home_abs or p.startswith(home_abs + os.sep)):
+            return "~" + p[len(home_abs):]
         return p
     except Exception:
         return cwd
+
+
+def _provider_short(provider: Optional[str]) -> str:
+    """Return a short provider label (e.g. ``aide``, ``nous``, ``anthropic``)."""
+    if not provider:
+        return ""
+    return provider.strip().lower()
 
 
 def _model_short(model: Optional[str]) -> str:
@@ -91,6 +102,7 @@ def resolve_footer_config(
 def format_runtime_footer(
     *,
     model: Optional[str],
+    provider: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
@@ -107,6 +119,10 @@ def format_runtime_footer(
             m = _model_short(model)
             if m:
                 parts.append(m)
+        elif field == "provider":
+            p = _provider_short(provider)
+            if p:
+                parts.append(p)
         elif field == "context_pct":
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
@@ -127,6 +143,7 @@ def build_footer_line(
     user_config: dict[str, Any] | None,
     platform_key: str | None,
     model: Optional[str],
+    provider: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
@@ -142,6 +159,7 @@ def build_footer_line(
         return ""
     return format_runtime_footer(
         model=model,
+        provider=provider,
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,

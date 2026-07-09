@@ -815,10 +815,20 @@ def build_anthropic_client(
         # without Claude Code's fingerprint, requests get intermittent 500s.
         all_betas = common_betas + _OAUTH_ONLY_BETAS
         kwargs["auth_token"] = api_key
+        _cc_ver = _get_claude_code_version()
         kwargs["default_headers"] = {
             "anthropic-beta": ",".join(all_betas),
-            "user-agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+            "user-agent": f"claude-cli/{_cc_ver} (external, cli)",
             "x-app": "cli",
+            # Claude Code sends this billing-attribution header on every OAuth
+            # request; it routes usage to the Claude Code / enterprise billing
+            # path. Without it, OAuth requests are attributed to the account's
+            # personal API spend and can trip the low monthly spend cap
+            # ("This request would exceed your account's monthly spend limit")
+            # even when the org's usage pool has budget. Mirrors the header
+            # observed in `claude --debug` (attribution header
+            # x-anthropic-billing-header: cc_version=...; cc_entrypoint=...; cch=...).
+            "x-anthropic-billing-header": f"cc_version={_cc_ver}; cc_entrypoint=claude-code; cch=00000;",
         }
     else:
         # Regular API key → x-api-key header + common betas

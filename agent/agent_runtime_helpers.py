@@ -1598,6 +1598,50 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     return client
 
 
+def _resolve_switch_default_headers(agent, new_provider: str) -> dict:
+    """Look up default_headers for the provider being switched to.
+
+    Checks three sources (matching agent_init.py's resolver order):
+      1. providers: dict in config.yaml  (AIDE entries live here)
+      2. custom_providers: list in config.yaml
+      3. built-in ProviderProfile (rare, but covers registered profiles)
+
+    Returns an empty dict when no headers are declared.
+    """
+    _prov_norm = (new_provider or "").strip().lower()
+    if not _prov_norm:
+        return {}
+
+    # 1. providers: dict
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _up = _cfg.get("providers") or {}
+        _entry = _up.get(_prov_norm, {})
+        if isinstance(_entry, dict):
+            _dh = _entry.get("default_headers")
+            if isinstance(_dh, dict) and _dh:
+                return dict(_dh)
+    except Exception:
+        pass
+
+    # 2. custom_providers: list
+    try:
+        from hermes_cli.config import load_config, get_compatible_custom_providers
+        from hermes_cli.runtime_provider import _normalize_custom_provider_name
+        _cfg2 = load_config()
+        for _cp in (get_compatible_custom_providers(_cfg2) or []):
+            _cpn = _normalize_custom_provider_name(str(_cp.get("name", "")))
+            if _cpn == _prov_norm or _cpn == _prov_norm.replace("custom:", ""):
+                _dh2 = _cp.get("default_headers")
+                if isinstance(_dh2, dict) and _dh2:
+                    return dict(_dh2)
+    except Exception:
+        pass
+
+    return {}
+
+
 def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mode=''):
     """Switch the model/provider in-place for a live agent.
 
@@ -1768,7 +1812,9 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
                 effective_key, agent._anthropic_base_url,
                 timeout=get_provider_request_timeout(agent.provider, agent.model),
             )
-            agent._is_anthropic_oauth = _is_oauth_token(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
+            from utils import base_url_host_matches as _bhm_anthropic
+            _is_real_anthropic_endpoint = _is_native_anthropic or _bhm_anthropic(agent._anthropic_base_url or "", "api.anthropic.com")
+            agent._is_anthropic_oauth = _is_oauth_token(effective_key) if (_is_real_anthropic_endpoint and isinstance(effective_key, str)) else False
             agent.client = None
             agent._client_kwargs = {}
         else:
@@ -1781,6 +1827,14 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             _sm_timeout = get_provider_request_timeout(agent.provider, agent.model)
             if _sm_timeout is not None:
                 agent._client_kwargs["timeout"] = _sm_timeout
+            # Inject default_headers (e.g. x-user-id) from the provider config
+            # so custom/AIDE runtime clients carry identity headers through
+            # in-place model switches.  Without this, /model picker switches
+            # to providers: dict entries rebuild the client without headers
+            # and the gateway rejects requests from service accounts.
+            _sm_def_headers = _resolve_switch_default_headers(agent, new_provider)
+            if _sm_def_headers:
+                agent._client_kwargs["default_headers"] = dict(_sm_def_headers)
             agent.client = agent._create_openai_client(
                 dict(agent._client_kwargs),
                 reason="switch_model",
@@ -1891,14 +1945,46 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # primary silently re-activates the provider the user just rejected,
     # which is exactly what was reported during TUI v2 blitz testing
     # ("switched to anthropic, tui keeps trying openrouter").
+    #
+    # However, two providers may share a name prefix but point at
+    # different gateways (e.g. "aide" → mlop-azure-gateway and "aide-io"
+    # → mlop-azure-gateway-io).  Dropping entries solely on provider
+    # name would purge useful fallbacks whose base_url differs from both
+    # the old and new primary.  Only prune when the entry's (provider,
+    # base_url) identity matches one of the two primaries.
     old_norm = (old_provider or "").strip().lower()
     new_norm = (new_provider or "").strip().lower()
+    old_base = str(getattr(agent, "base_url", "") or "").rstrip("/").lower()
+    new_base = str(base_url or "").rstrip("/").lower()
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
     if old_norm and new_norm and old_norm != new_norm:
-        fallback_chain = [
-            entry for entry in fallback_chain
-            if (entry.get("provider") or "").strip().lower() not in {old_norm, new_norm}
-        ]
+        _prune_ids = set()
+        if old_norm:
+            _prune_ids.add((old_norm, old_base))
+        if new_norm:
+            _prune_ids.add((new_norm, new_base))
+        _pruned = []
+        for entry in fallback_chain:
+            _e_prov = (entry.get("provider") or "").strip().lower()
+            _e_base = (entry.get("base_url") or "").strip().rstrip("/").lower()
+            if (_e_prov, _e_base) in _prune_ids:
+                continue
+            # Also prune exact provider name match when entry has no
+            # explicit base_url (resolves from provider config) — the
+            # resolved base_url at fallback activation time would match
+            # the primary's, so this entry is effectively the same route.
+            # Exception: AIDE-family providers (aide, aide-io, aide-*)
+            # point at different gateways with independent quota pools.
+            # When the user switches between AIDE providers, keep AIDE
+            # fallback entries alive since they degrade gracefully.
+            _is_aide_switch = old_norm.startswith("aide") and new_norm.startswith("aide")
+            if not _e_base and _e_prov in {old_norm, new_norm}:
+                if _is_aide_switch and _e_prov.startswith("aide"):
+                    pass  # keep: different AIDE gateway, independent quota
+                else:
+                    continue
+            _pruned.append(entry)
+        fallback_chain = _pruned
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None
 

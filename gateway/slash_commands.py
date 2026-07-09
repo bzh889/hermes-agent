@@ -1134,7 +1134,7 @@ class GatewaySlashCommandsMixin:
             force_refresh,
             is_session,
         ) = parse_model_flags(raw_args)
-        persist_global = resolve_persist_behavior(is_global_flag, is_session)
+        persist_global = resolve_persist_behavior(is_global_flag, is_session, source="gateway")
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
@@ -1330,6 +1330,7 @@ class GatewaySlashCommandsMixin:
                             "api_key": result.api_key,
                             "base_url": result.base_url,
                             "api_mode": result.api_mode,
+                            "default_headers": result.default_headers,
                         }
 
                         # Evict cached agent so the next turn creates a fresh
@@ -1564,6 +1565,7 @@ class GatewaySlashCommandsMixin:
                 "api_key": result.api_key,
                 "base_url": result.base_url,
                 "api_mode": result.api_mode,
+                "default_headers": result.default_headers,
             }
 
             # Evict cached agent so the next turn creates a fresh agent from the
@@ -2747,9 +2749,10 @@ class GatewaySlashCommandsMixin:
             from gateway.runtime_footer import format_runtime_footer
             preview = format_runtime_footer(
                 model=_resolve_gateway_model(user_config) or None,
+                provider=user_config.get("model", {}).get("provider") or None,
                 context_tokens=0,
                 context_length=None,
-                fields=effective.get("fields") or ["model", "context_pct", "cwd"],
+                fields=effective.get("fields") or ["model", "provider", "context_pct", "cwd"],
             )
             if preview:
                 example = t("gateway.footer.example_line", preview=preview)

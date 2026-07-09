@@ -123,6 +123,12 @@ class CLIAgentSetupMixin:
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
+        # Preserve default_headers (e.g. x-user-id) from runtime resolution
+        # so they are available when constructing the AIAgent / OpenAI client.
+        # Without this, custom providers in the providers: dict are resolved
+        # with provider="custom" and the original key is lost — the subsequent
+        # agent_init.py header lookup fails to match aide-crlogai001 etc.
+        self._runtime_default_headers = runtime.get("default_headers")
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
@@ -339,6 +345,10 @@ class CLIAgentSetupMixin:
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
             }
+            # Carry through default_headers resolved by _ensure_runtime_credentials
+            # (e.g. x-user-id for MTK AIDE service accounts).
+            if not runtime.get("default_headers") and getattr(self, "_runtime_default_headers", None):
+                runtime["default_headers"] = self._runtime_default_headers
             effective_model = model_override or self.model
             self.agent = AIAgent(
                 model=effective_model,
@@ -349,6 +359,7 @@ class CLIAgentSetupMixin:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
+                default_headers=runtime.get("default_headers"),
                 max_tokens=self.max_tokens,
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,

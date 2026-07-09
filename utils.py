@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Union
@@ -86,7 +87,19 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     try:
         os.replace(tmp_str, real_path)
     except OSError as exc:
-        if exc.errno not in (errno.EXDEV, errno.EBUSY):
+        # On Windows, EDR/antivirus can transiently lock the destination
+        # file causing PermissionError (WinError 5). Retry once after a
+        # short delay before falling back to copy.
+        should_fallback = exc.errno in (errno.EXDEV, errno.EBUSY)
+        if sys.platform == "win32" and isinstance(exc, PermissionError):
+            import time
+            time.sleep(0.15)
+            try:
+                os.replace(tmp_str, real_path)
+                return real_path
+            except OSError:
+                should_fallback = True  # use copy fallback on Windows
+        if not should_fallback:
             raise
         logger.debug(
             "atomic_replace: %s -> %s failed with %s; falling back to copy",

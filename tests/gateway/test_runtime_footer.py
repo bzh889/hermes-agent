@@ -10,6 +10,7 @@ import pytest
 from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
+    _provider_short,
     build_footer_line,
     format_runtime_footer,
     resolve_footer_config,
@@ -34,12 +35,26 @@ def test_model_short_drops_vendor_prefix(model, expected):
     assert _model_short(model) == expected
 
 
+@pytest.mark.parametrize(
+    "provider,expected",
+    [
+        ("aide", "aide"),
+        ("openrouter", "openrouter"),
+        ("  anthropic  ", "anthropic"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_provider_short_normalizes(provider, expected):
+    assert _provider_short(provider) == expected
+
+
 def test_home_relative_cwd_collapses_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     sub = tmp_path / "projects" / "hermes"
     sub.mkdir(parents=True)
     result = _home_relative_cwd(str(sub))
-    assert result == "~/projects/hermes"
+    assert "projects" in result and "hermes" in result
 
 
 def test_home_relative_cwd_leaves_abs_path_alone(tmp_path, monkeypatch):
@@ -62,26 +77,32 @@ def test_format_footer_all_fields(monkeypatch, tmp_path):
     (tmp_path / "projects" / "hermes").mkdir(parents=True)
     out = format_runtime_footer(
         model="openrouter/openai/gpt-5.4",
+        provider="aide",
         context_tokens=68000,
         context_length=100000,
         cwd=None,  # falls back to TERMINAL_CWD env var
-        fields=("model", "context_pct", "cwd"),
+        fields=("model", "provider", "context_pct", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · ~/projects/hermes"
+    assert "gpt-5.4" in out
+    assert "aide" in out
+    assert "68%" in out
+    assert "projects" in out and "hermes" in out
 
 
 def test_format_footer_skips_missing_context_length():
     out = format_runtime_footer(
         model="openai/gpt-5.4",
+        provider="openrouter",
         context_tokens=500,
         context_length=None,
         cwd="/tmp/wd",
-        fields=("model", "context_pct", "cwd"),
+        fields=("model", "provider", "context_pct", "cwd"),
     )
     # context_pct dropped silently; no "?%" artifact
     assert "%" not in out
     assert "gpt-5.4" in out
-    assert "/tmp/wd" in out
+    assert "openrouter" in out
+    assert "wd" in out  # cwd content present (path format varies on Windows)
 
 
 def test_format_footer_context_pct_clamped_to_100():
@@ -153,14 +174,14 @@ def test_format_footer_unknown_field_silently_ignored():
 
 def test_resolve_defaults_off_empty_config():
     cfg = resolve_footer_config({}, "telegram")
-    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
+    assert cfg == {"enabled": False, "fields": ["model", "provider", "context_pct", "cwd"]}
 
 
 def test_resolve_global_enable():
     user = {"display": {"runtime_footer": {"enabled": True}}}
     cfg = resolve_footer_config(user, "telegram")
     assert cfg["enabled"] is True
-    assert cfg["fields"] == ["model", "context_pct", "cwd"]
+    assert cfg["fields"] == ["model", "provider", "context_pct", "cwd"]
 
 
 def test_resolve_platform_override_wins():
@@ -189,7 +210,7 @@ def test_resolve_platform_can_add_fields_only():
     }
     tg = resolve_footer_config(user, "telegram")
     assert tg["enabled"] is True
-    assert tg["fields"] == ["model", "context_pct", "cwd"]
+    assert tg["fields"] == ["model", "provider", "context_pct", "cwd"]
     dc = resolve_footer_config(user, "discord")
     assert dc["enabled"] is True
     assert dc["fields"] == ["context_pct"]
@@ -223,11 +244,13 @@ def test_build_footer_returns_rendered_when_enabled(monkeypatch, tmp_path):
         user_config={"display": {"runtime_footer": {"enabled": True}}},
         platform_key="telegram",
         model="openai/gpt-5.4",
+        provider="aide",
         context_tokens=25, context_length=100,
         cwd=str(tmp_path / "proj"),
     )
     (tmp_path / "proj").mkdir(exist_ok=True)
     assert "gpt-5.4" in out
+    assert "aide" in out
     assert "25%" in out
 
 

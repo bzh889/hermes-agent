@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from hermes_cli.providers import (
     ProviderDef,
@@ -293,6 +293,7 @@ class ModelSwitchResult:
     api_key: str = ""
     base_url: str = ""
     api_mode: str = ""
+    default_headers: Optional[Dict[str, str]] = None
     error_message: str = ""
     warning_message: str = ""
     provider_label: str = ""
@@ -365,34 +366,46 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
     return (model_input, explicit_provider, is_global, force_refresh, is_session)
 
 
-def resolve_persist_behavior(is_global: bool, is_session: bool) -> bool:
+def resolve_persist_behavior(is_global: bool, is_session: bool, *, source: str = "cli") -> bool:
     """Decide whether a ``/model`` switch should persist to ``config.yaml``.
 
     Resolution order:
 
     1. ``--session`` explicitly opts out → ``False`` (this session only).
     2. ``--global`` explicitly opts in → ``True``.
-    3. Otherwise defer to ``model.persist_switch_by_default`` in
-       ``config.yaml`` (defaults to ``True``, so a plain ``/model <name>``
-       survives across sessions — the behavior users expect).
+    3. In the **gateway** (``source="gateway"``), default is ``False``
+       so a model switch only affects the current session unless the user
+       explicitly passes ``--global``.  This prevents a model selection on
+       one platform (e.g. CLI) from polluting runtime resolution for all
+       other platforms sharing the same gateway process.
+    4. In the **CLI** (default ``source="cli"``), defer to
+       ``model.persist_switch_by_default`` in ``config.yaml``
+       (defaults to ``False`` — a plain ``/model <name>`` is session-only;
+       add ``--global`` to persist across sessions).
 
     The config read is defensive: on a fresh install ``model`` may be a
-    flat string rather than a dict, in which case the built-in default
-    (``True``) applies.
+    flat string rather than a dict, in which case the source-specific
+    built-in default applies.
     """
     if is_session:
         return False
     if is_global:
         return True
+    # Gateway default: session-only.  A /model on Telegram/Discord/etc
+    # must not silently rewrite model.provider in config.yaml, because
+    # that config is the single source of truth for *all* gateway sessions
+    # across all platforms.  Use --global to opt in.
+    if source == "gateway":
+        return False
     try:
         from hermes_cli.config import load_config
 
         model_cfg = load_config().get("model")
         if isinstance(model_cfg, dict):
-            return bool(model_cfg.get("persist_switch_by_default", True))
+            return bool(model_cfg.get("persist_switch_by_default", False))
     except Exception:
         pass
-    return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +743,12 @@ def _configured_provider_matches(
                     matches[slug] = hit
                     break
 
+    # Track which user-provider slugs already matched so we can skip
+    # their custom-provider mirror (custom:<name>) to avoid bogus
+    # "declared by multiple providers" errors when the same provider
+    # appears in both user_providers and custom_providers.
+    user_slugs_lower = {s.lower() for s in matches}
+
     if isinstance(custom_providers, list):
         for entry in custom_providers:
             if not isinstance(entry, dict):
@@ -739,6 +758,10 @@ def _configured_provider_matches(
                 continue
             slug = f"custom:{name}"
             if slug in matches:
+                continue
+            # Skip if this custom provider is the same entity as a
+            # user provider (providers.<slug> normalizes to name=<slug>).
+            if name.strip().lower() in user_slugs_lower:
                 continue
             for key in ("models", "model", "default_model"):
                 hit = _match(entry.get(key))
@@ -1218,6 +1241,33 @@ def switch_model(
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
 
+    # --- Resolve extra_headers from user_providers / custom_providers for API probing ---
+    _validation_extra_headers = None
+    # 1. user_providers: dict (providers: section in config.yaml) — most AIDE entries live here
+    if isinstance(user_providers, dict):
+        _uentry = user_providers.get(target_provider, {})
+        if not isinstance(_uentry, dict):
+            _uentry = {}
+        # Also try stripping "custom:" prefix for compatibility
+        if not _uentry and target_provider.startswith("custom:"):
+            _uentry = user_providers.get(target_provider.split(":", 1)[1], {})
+        _dh = _uentry.get("default_headers")
+        if isinstance(_dh, dict) and _dh:
+            _validation_extra_headers = dict(_dh)
+    # 2. custom_providers: list — fallback for entries only in the legacy list
+    if _validation_extra_headers is None and isinstance(custom_providers, list):
+        _cp_slug = target_provider.split(":", 1)[1].strip().lower() if ":" in target_provider else target_provider.strip().lower()
+        for _cpe in custom_providers:
+            if not isinstance(_cpe, dict):
+                continue
+            _e_key = str(_cpe.get("provider_key", "") or "").strip().lower()
+            _e_name = str(_cpe.get("name", "") or "").strip().lower()
+            if _cp_slug and _cp_slug in (_e_key, _e_name):
+                _dh = _cpe.get("default_headers")
+                if isinstance(_dh, dict) and _dh:
+                    _validation_extra_headers = dict(_dh)
+                break
+
     # --- Validate ---
     try:
         validation = validate_requested_model(
@@ -1226,6 +1276,7 @@ def switch_model(
             api_key=api_key,
             base_url=base_url,
             api_mode=api_mode or None,
+            extra_headers=_validation_extra_headers,
         )
     except Exception as e:
         validation = {
@@ -1332,6 +1383,25 @@ def switch_model(
     if hermes_warn:
         warnings.append(hermes_warn)
 
+    # --- Resolve default_headers for the target provider (expanded) ---
+    # Propagate the resolved default_headers (with ${_API_KEY} -> resolved
+    # api_key substitution) so that session model overrides carry them for
+    # custom endpoints like MTK AIDE Gateway that require x-user-id.
+    _resolved_default_headers = None
+    if isinstance(_validation_extra_headers, dict) and _validation_extra_headers:
+        _resolved_default_headers = {}
+        for _hk, _hv in _validation_extra_headers.items():
+            _expanded = str(_hv)
+            # Substitute ${_API_KEY} with the resolved api_key (mirrors
+            # _resolve_named_custom_runtime in runtime_provider.py).
+            _expanded = _expanded.replace("${_API_KEY}", api_key or "")
+            # Substitute ${OTHER} with os.getenv(OTHER) if set.
+            for _m in re.finditer(r"\$\{(\w+)\}", _expanded):
+                _env_val = os.getenv(_m.group(1), "").strip()
+                if _env_val:
+                    _expanded = _expanded.replace(_m.group(0), _env_val)
+            _resolved_default_headers[str(_hk)] = _expanded
+
     # --- Build result ---
     return ModelSwitchResult(
         success=True,
@@ -1341,6 +1411,7 @@ def switch_model(
         api_key=api_key,
         base_url=base_url,
         api_mode=api_mode,
+        default_headers=_resolved_default_headers,
         warning_message=" | ".join(warnings) if warnings else "",
         provider_label=provider_label,
         resolved_via_alias=resolved_alias,
@@ -1983,6 +2054,25 @@ def list_authenticated_providers(
             if not api_key:
                 key_env = str(ep_cfg.get("key_env", "") or "").strip()
                 api_key = os.environ.get(key_env, "").strip() if key_env else ""
+            _probe_api_mode = str(
+                ep_cfg.get("api_mode") or ep_cfg.get("transport") or ""
+            ).strip().lower()
+            # OAuth-backed Anthropic accounts keep their refreshable token in the
+            # credential pool (not config/env), so config carries no api_key. Resolve
+            # the pool token here so live /v1/models discovery can authenticate and
+            # the picker lists this account's models dynamically. Scoped to the
+            # anthropic host so it never touches other providers' discovery.
+            from utils import base_url_host_matches as _host_matches
+            if not api_key and _host_matches(api_url, "api.anthropic.com"):
+                try:
+                    from agent.credential_pool import load_pool as _load_pool
+                    _sel = _load_pool(ep_name).select()
+                    if _sel and getattr(_sel, "access_token", ""):
+                        api_key = _sel.access_token
+                        if not _probe_api_mode:
+                            _probe_api_mode = "anthropic_messages"
+                except Exception:
+                    pass
             discover = ep_cfg.get("discover_models", True)
             if isinstance(discover, str):
                 discover = discover.lower() not in {"false", "no", "0"}
@@ -1993,7 +2083,9 @@ def list_authenticated_providers(
             if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
-                    live_models = fetch_api_models(api_key, api_url)
+                    live_models = fetch_api_models(
+                        api_key, api_url, api_mode=_probe_api_mode or None
+                    )
                     if live_models:
                         models_list = live_models
                 except Exception:
@@ -2240,7 +2332,10 @@ def list_authenticated_providers(
                 try:
                     from hermes_cli.models import fetch_api_models
 
-                    live_models = fetch_api_models(api_key, api_url)
+                    live_models = fetch_api_models(
+                        api_key, api_url,
+                        extra_headers=grp.get("default_headers"),
+                    )
                     if live_models:
                         grp["models"] = live_models
                         grp["total_models"] = len(live_models)

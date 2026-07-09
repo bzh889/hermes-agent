@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTK Modem Check-in Flow</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+    padding: 40px 20px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.8em;
+    color: #58a6ff;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.95em;
+    margin-bottom: 32px;
+  }
+  .diagram-container {
+    max-width: 1000px;
+    margin: 0 auto 32px auto;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 24px;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+  }
+  .legend {
+    max-width: 1000px;
+    margin: 0 auto 24px auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .legend-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .legend-card h3 {
+    font-size: 1em;
+    color: #58a6ff;
+    margin-bottom: 4px;
+  }
+  .legend-card .full {
+    color: #8b949e;
+    font-size: 0.85em;
+    margin-bottom: 4px;
+  }
+  .legend-card .desc {
+    color: #c9d1d9;
+    font-size: 0.9em;
+    line-height: 1.5;
+  }
+  .legend-card .validity {
+    color: #f0883e;
+    font-size: 0.8em;
+    margin-top: 4px;
+  }
+  .section-title {
+    max-width: 1000px;
+    margin: 32px auto 16px auto;
+    color: #58a6ff;
+    font-size: 1.2em;
+    border-left: 3px solid #58a6ff;
+    padding-left: 12px;
+  }
+  .note-box {
+    max-width: 1000px;
+    margin: 0 auto 20px auto;
+    background: #1c1e21;
+    border-left: 3px solid #f0883e;
+    padding: 12px 16px;
+    font-size: 0.9em;
+    line-height: 1.6;
+    color: #c9d1d9;
+  }
+</style>
+</head>
+<body>
+
+<h1>MTK Modem Check-in 流程</h1>
+<p class="subtitle">Gen99 / 99R — Feature Check-in Flow & Bug Fix Quick Path</p>
+
+<!-- ========== Feature Check-in Flow ========== -->
+<div class="section-title">Feature Check-in Flow（完整 8 步）</div>
+<div class="diagram-container">
+<div class="mermaid">
+flowchart TD
+    START((RD 有代碼要提交)) --> S1{"Step 1<br/>是否為 Target Change?"}
+
+    S1 -->|Non-target<br/>不改 SQC 目標代碼| NT[EWSP Non-target 快速通道]
+    NT --> NT1[EWSP Binary Compare<br/>Case1: MCU/MUT 無差異<br/>Case3: DSP bin 無差異<br/>Case5: SWARM Self-bypass]
+    NT1 --> CIA2_NT[CIA2 Auto Approve<br/>CR Note 加 NON-TARGET_PASS]
+    CIA2_NT --> SWARM_NT[SWARM All Checkers Pass]
+    SWARM_NT --> P4V_NT[P4V Check-in ✅]
+
+    S1 -->|Target / Feature| S2["Step 2<br/>申請 FCIA<br/>(Jira 開票)"]
+    S2 --> S3["Step 3<br/>FCIA 審核<br/>PSI → PL 聯審<br/>⏱ 2~5 Days"]
+    S3 --> S4["Step 4<br/>驗證 GEWSP<br/>= EWSP ✅ + CI-MTBF ✅<br/>⏱ 2~4 Days"]
+    S4 --> S5{"Step 5<br/>CIA2 審批"}
+
+    S5 -->|Jira: Approve to check-in<br/>+ CR ID 已填| S5A[CIA2 Auto Approve]
+    S5 -->|不符合自動條件| S5B[CIA2 Manual Review<br/>→ BO/PL 審核<br/>⏱ 1H~1Day]
+    S5A --> S6
+    S5B --> S6
+
+    S6["Step 6<br/>SWARM Review<br/>所有 Checker 通過<br/>(Code Review, MTBF Checker,<br/>Binary Compare, Keyword Scan...)<br/>⏱ 1H~1Day"]
+    S6 --> S7["Step 7<br/>P4V Check-in 提交 🚀"]
+    S7 --> S8["Step 8<br/>更新 FCIA Status<br/>→ Check-in Done ✅"]
+    S8 --> PSDLC["*Complete PSDLC<br/>(Security 驗證)<br/>不擋 Check-in<br/>但必須盡快完成"]
+
+    style START fill:#238636,stroke:#2ea043,color:#fff
+    style S1 fill:#1f6feb,stroke:#388bfd,color:#fff
+    style S2 fill:#6e40c9,stroke:#8957e5,color:#fff
+    style S3 fill:#6e40c9,stroke:#8957e5,color:#fff
+    style S4 fill:#da3633,stroke:#f85149,color:#fff
+    style S5 fill:#1f6feb,stroke:#388bfd,color:#fff
+    style S5A fill:#238636,stroke:#2ea043,color:#fff
+    style S5B fill:#f0883e,stroke:#d29922,color:#fff
+    style S6 fill:#6e40c9,stroke:#8957e5,color:#fff
+    style S7 fill:#238636,stroke:#2ea043,color:#fff
+    style S8 fill:#238636,stroke:#2ea043,color:#fff
+    style PSDLC fill:#f0883e,stroke:#d29922,color:#fff
+    style NT fill:#1f6feb,stroke:#388bfd,color:#fff
+    style NT1 fill:#da3633,stroke:#f85149,color:#fff
+    style CIA2_NT fill:#238636,stroke:#2ea043,color:#fff
+    style SWARM_NT fill:#6e40c9,stroke:#8957e5,color:#fff
+    style P4V_NT fill:#238636,stroke:#2ea043,color:#fff
+</div>
+</div>
+
+<!-- ========== Bug Fix Quick Path ========== -->
+<div class="section-title">Bug Fix Quick Path（免 FCIA）</div>
+<div class="diagram-container">
+<div class="mermaid">
+flowchart LR
+    A["CI 通<br/>(編譯 + Sanity)"] --> B["CI-MTBF 通<br/>(≥1H 裝置驗證)"]
+    B --> C["EWSP 通<br/>(Binary Compare)"]
+    C --> D["CIA2<br/>Auto Approve"]
+    D --> E["SWARM<br/>All Checkers"]
+    E --> F["P4V 提交 ✅"]
+
+    style A fill:#238636,stroke:#2ea043,color:#fff
+    style B fill:#da3633,stroke:#f85149,color:#fff
+    style C fill:#da3633,stroke:#f85149,color:#fff
+    style D fill:#1f6feb,stroke:#388bfd,color:#fff
+    style E fill:#6e40c9,stroke:#8957e5,color:#fff
+    style F fill:#238636,stroke:#2ea043,color:#fff
+</div>
+</div>
+
+<!-- ========== MOS / MCF / SBP 關係 ========== -->
+<div class="section-title">MOS / MCF / SBP 關係圖</div>
+<div class="diagram-container">
+<div class="mermaid">
+flowchart TB
+    MOS["MOS<br/><b>Modem Option Switch</b><br/>編譯開關管理平台"] -->|enable/disable| MCF["MCF<br/><b>Modem Compile Feature</b><br/>編譯特性開關<br/>決定哪些功能編入 binary"]
+    MCF -->|影響| SQC["SQC Binary 內容<br/>與負載"]
+    SBP["SBP<br/><b>Subscriber Profile</b><br/>客戶設定檔<br/>(sbp_id.def, sbp_nvram_vdm_config, ims_config)"] -->|讀取| MCF
+    SBP -->|IMS 行為| IMS["IMS/SIP 客戶行為"]
+
+    RULE["⚠️ 改 MCF 在 MOS 上的開關<br/>= 影響 SQC Load<br/>→ 不能走 Non-target<br/>→ 必須走 Feature Check-in Flow"]
+
+    MOS -.->|觸發| RULE
+    RULE -.-> S4
+
+    subgraph CONFIG ["配置層（非流程環節）"]
+        MOS
+        MCF
+        SBP
+    end
+
+    subgraph IMPACT ["影響鏈"]
+        SQC
+        IMS
+    end
+
+    style MOS fill:#1f6feb,stroke:#388bfd,color:#fff
+    style MCF fill:#6e40c9,stroke:#8957e5,color:#fff
+    style SBP fill:#238636,stroke:#2ea043,color:#fff
+    style SQC fill:#da3633,stroke:#f85149,color:#fff
+    style IMS fill:#f0883e,stroke:#d29922,color:#fff
+    style RULE fill:#da3633,stroke:#f85149,color:#fff
+    style CONFIG fill:none,stroke:#30363d,color:#8b949e
+    style IMPACT fill:none,stroke:#30363d,color:#8b949e
+</div>
+</div>
+
+<!-- ========== 術語對照表 ========== -->
+<div class="section-title">術語對照表</div>
+<div class="legend">
+  <div class="legend-card">
+    <h3>CI</h3>
+    <div class="full">Code Integration</div>
+    <div class="desc">基本編譯驗證 — 確保代碼能編譯通過、不破 build。CI-0 = 最基本 sanity</div>
+  </div>
+  <div class="legend-card">
+    <h3>CI-MTBF</h3>
+    <div class="full">Mean Time Between Failures (for Check-in)</div>
+    <div class="desc">穩定性測試 — 在目標裝置跑 ≥1 小時，確認無 crash/重啟。分 risk level 1~5</div>
+    <div class="validity">有效期 7 天</div>
+  </div>
+  <div class="legend-card">
+    <h3>EWSP</h3>
+    <div class="full">Early Window Service Pack</div>
+    <div class="desc">二進位比對 — bin 檔跟基線比對，Non-target 必須 No different。分 Case1(MCU)/Case3(DSP)/Case5(SWARM bypass)</div>
+    <div class="validity">有效期 7 天</div>
+  </div>
+  <div class="legend-card">
+    <h3>GEWSP</h3>
+    <div class="full">Generic EWSP</div>
+    <div class="desc">= EWSP ✅ + CI-MTBF ✅ 合驗證。Wiki 原文：「Need to pass GEWSP (EWSP/CI-MTBF)」</div>
+  </div>
+  <div class="legend-card">
+    <h3>CIA / CIA2</h3>
+    <div class="full">Check-In Approval / CIA2</div>
+    <div class="desc">審批系統 — CIA 舊版自動審批；CIA2 新版支援 auto + manual。Auto條件：Jira Approved + CR ID 已填</div>
+    <div class="validity">CIA2 Manual 有效期 3 個工作天</div>
+  </div>
+  <div class="legend-card">
+    <h3>MOS</h3>
+    <div class="full">Modem Option Switch</div>
+    <div class="desc">開關管理平台 — 控制 MCF 的 enable/disable，改動 = 影響 SQC load = 必須走 Feature Flow</div>
+  </div>
+  <div class="legend-card">
+    <h3>MCF</h3>
+    <div class="full">Modem Compile Feature</div>
+    <div class="desc">編譯特性開關 — 透過 MOS 管理，決定哪些功能模組被編入 binary</div>
+  </div>
+  <div class="legend-card">
+    <h3>SBP</h3>
+    <div class="full">Subscriber Profile</div>
+    <div class="desc">客戶設定檔 — IMS/SIP 客製化配置 (sbp_id.def, sbp_nvram_vdm_config, ims_config folder)</div>
+  </div>
+</div>
+
+<!-- ========== 重要備註 ========== -->
+<div class="section-title">重要備註</div>
+<div class="note-box">
+  ⏱ <b>效期限制</b>：CI-EWSP 7天 / CI-MTBF 7天 / CIA2 Manual 3個工作天。逾期必須重測或重新申請。<br><br>
+  🚫 <b>MCF 規則</b>：修改 MCF（在 MOS 上 enable/disable）影響 SQC 負載 → <b>禁止走 Non-target 通道</b>，必須走 Feature Check-in Flow 申請 FCIA。<br><br>
+  📝 <b>CR Note 格式</b>：Bug fix 需加 <code>[CI-MTBF_PASS][Branch Name]</code>；Non-target 需加 <code>[CL#][NON-TARGET_PASS][CASEx][Branch]</code>。<br><br>
+  ⚠️ <b>Risk Level ≥ 4</b>：需提前驗證，緊急情況聯繫 func. team 或 PSI (SC/Ralf/Yajyun) 支援。
+</div>
+
+</body>
+</html>

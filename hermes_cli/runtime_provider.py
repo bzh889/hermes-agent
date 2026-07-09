@@ -1040,9 +1040,26 @@ def _resolve_named_custom_runtime(
     helper_cmd = str(custom_provider.get("api_key_helper", "") or "").strip()
     helper_key = run_api_key_helper(helper_cmd) if helper_cmd else ""
 
+    # Named Anthropic accounts (e.g. providers.anthropic-1 / anthropic-2, each a
+    # distinct OAuth login) keep their refreshable token in the credential pool
+    # keyed by the provider slug — NOT in config api_key/key_env. Without this the
+    # runtime resolves "no-key-required", the OAuth call is rejected, and the agent
+    # silently falls back to another provider. Scoped to the real Anthropic host so
+    # third-party anthropic-compatible endpoints are unaffected.
+    _pool_oauth_key = ""
+    if base_url_host_matches(base_url, "api.anthropic.com"):
+        try:
+            from agent.credential_pool import load_pool as _load_pool
+            _sel = _load_pool(requested_provider).select()
+            if _sel and getattr(_sel, "access_token", ""):
+                _pool_oauth_key = _sel.access_token
+        except Exception:
+            _pool_oauth_key = ""
+
     api_key_candidates = [
         (explicit_api_key or "").strip(),
         helper_key,
+        _pool_oauth_key,
         str(custom_provider.get("api_key", "") or "").strip(),
         _getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
         # Gate provider env keys on their authoritative hosts — sending

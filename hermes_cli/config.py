@@ -1789,11 +1789,11 @@ DEFAULT_CONFIG = {
         },
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
-        # e.g. `model · 68% · ~/projects/hermes`. Per-platform overrides go under
+        # e.g. `model · provider · 68% · ~/projects/hermes`. Per-platform overrides go under
         # display.platforms.<platform>.runtime_footer.
         "runtime_footer": {
             "enabled": False,
-            "fields": ["model", "context_pct", "cwd"],  # Order shown; drop any to hide
+            "fields": ["model", "provider", "context_pct", "cwd"],  # Order shown; drop any to hide
         },
         "copy_shortcut": "auto",  # "auto" (platform default) | "ctrl_c" | "ctrl_shift_c" | "disabled"
         # Petdex animated mascot (https://github.com/crafter-station/petdex).
@@ -2786,6 +2786,32 @@ DEFAULT_CONFIG = {
             # bounding CPU / memory / upstream-LLM-quota exhaustion from a
             # request flood. Set to 0 to disable the cap entirely.
             "max_concurrent_runs": 10,
+        },
+
+        # MTK internal Teams adapter (gateway/platforms/teams_mtk.py).
+        "teams_mtk": {
+            # Per-group whitelist + policy overrides, keyed by conversation
+            # id (the same id format used in MTK_TEAMS_CONVERSATION_ID,
+            # e.g. "19:xxx@thread.v2"). A conv_id present here authorizes
+            # every sender in that group (no need to add each member's OID
+            # to GATEWAY_ALLOWED_USERS). Managed via
+            # `hermes teams-mtk group add/list/set/remove` — hand-editing
+            # is fine too, but requires a gateway restart to take effect.
+            #
+            # Per-entry fields:
+            #   name: str                — human label shown in `group list`
+            #   require_mention: bool    — default False for entries added
+            #                              via the CLI; omit to fall back to
+            #                              the global TEAMS_MTK_REQUIRE_MENTION
+            #                              env var / MTK_TEAMS_NO_MENTION_CONVS.
+            #   blocked_toolsets: [str]  — toolsets disabled for this group.
+            #   blocked_keywords: [str]  — regex patterns (case-insensitive);
+            #                              a match on inbound or outbound text
+            #                              blocks that message/reply entirely.
+            #   per_user: {oid: {blocked_toolsets: [str]}} — additional
+            #                              per-sender toolset restrictions,
+            #                              unioned with the group-level list.
+            "groups": {},
         },
     },
 
@@ -4430,7 +4456,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
-        "discover_models", "extra_body",
+        "discover_models", "extra_body", "default_headers", "api_key_helper",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:

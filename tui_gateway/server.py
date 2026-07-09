@@ -8479,7 +8479,13 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             # the sudo.request overlay. (secret capture is a module global, so
             # re-running is a harmless no-op.)
             _wire_callbacks(sid)
-            _sync_agent_model_with_config(sid, session)
+            # Per-session model isolation: do NOT auto-sync the agent's model
+            # with config.yaml every turn.  A session's model is set at
+            # creation time (from config) and only changes when the user
+            # explicitly calls /model.  This prevents a /model --global on
+            # another session or platform from silently overwriting this
+            # session's model.  See mtk-integration "session model isolation".
+            # _sync_agent_model_with_config(sid, session)
             cwd = _session_cwd(session)
             _register_session_cwd(session)
             cols = session.get("cols", 80)
