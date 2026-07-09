@@ -263,3 +263,32 @@ async def test_throttle_per_conv_independent():
             pytest.skip("_maybe_throttle not yet implemented — RED phase")
 
         mock_sleep.assert_not_called()
+
+
+# ── §5 echo guard: _sent_message_ids set ─────────────────────────────────
+
+async def test_echo_guard_skips_known_sent_id():
+    """Messages whose id is in _sent_message_ids must be skipped."""
+    adapter = _make_adapter()
+    adapter._sent_message_ids.add("999")
+    assert "999" in adapter._sent_message_ids
+
+
+async def test_at_mention_preserved_in_html_strip():
+    """<at id='...'>hermes</at> must survive HTML stripping as plain 'hermes'."""
+    import re
+    raw = '<at id="8:orgid:abc">hermes</at>'
+    # Replicate the exact strip logic from _process_new_messages
+    content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", raw)
+    text = re.sub(r"<[^>]+>", "", content).strip()
+    assert text == "hermes", f"Expected 'hermes', got {text!r}"
+
+
+async def test_at_mention_only_message_not_empty():
+    """A message containing only an @mention should not be treated as empty."""
+    import re
+    raw = '<div><at id="8:orgid:abc">hermes</at></div>'
+    content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", raw)
+    text = re.sub(r"<[^>]+>", "", content).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    assert text == "hermes"

@@ -289,6 +289,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._user_oid: Optional[str] = None  # set during connect from first poll
         self._last_sent_message_id: Optional[str] = None  # id of last message WE sent (echo guard)
         self._last_sent_message_html: Optional[str] = None  # HTML cache for trailing-footer merge
+        self._sent_message_ids: set = set()  # all message IDs we sent (echo guard — superset of _last_sent_message_id)
 
         # Per-conversation last-seen message id (avoids replay on startup).
         self._last_message_ids: Dict[str, str] = {cid: None for cid in self._conv_ids}
@@ -554,6 +555,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
                 self._last_sent_message_id = str(msg_id)
+                self._sent_message_ids.add(str(msg_id))
                 # Cache the HTML for potential trailing-footer merge
                 if html_content:
                     self._last_sent_message_html = html_content
@@ -1091,8 +1093,16 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 logger.info("TeamsMTK: poll tick (backoff=%dx, convs=%d)", _backoff, len(self._conv_ids))
-                for _conv_id in self._conv_ids:
-                    msgs = await loop.run_in_executor(executor, lambda _c=_conv_id: self._fetch_messages(_c, 20))
+                # Fetch all conversations in parallel so N convs take ~1
+                # round-trip instead of N×round-trip.
+                fetch_tasks = {
+                    _conv_id: loop.run_in_executor(
+                        executor, lambda _c=_conv_id: self._fetch_messages(_c, 20)
+                    )
+                    for _conv_id in self._conv_ids
+                }
+                fetch_results = await asyncio.gather(*fetch_tasks.values())
+                for _conv_id, msgs in zip(fetch_tasks, fetch_results):
                     logger.info("TeamsMTK: poll conv=%s got %d messages", _conv_id[:40], len(msgs) if msgs else 0)
                     await self._process_new_messages(_conv_id, msgs)
                 _backoff = 1  # reset backoff on success
@@ -1209,6 +1219,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 is_own = True
             if self._last_sent_message_id and str(msg_id) == str(self._last_sent_message_id):
                 is_own = True
+            if str(msg_id) in self._sent_message_ids:
+                is_own = True
             if is_own:
                 logger.info("TeamsMTK: skipping own sent message id=%s", msg_id)
                 self._last_message_ids[conv_id] = msg_id
@@ -1275,6 +1287,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             # Better HTML stripping (matches teams skill _process_message_content)
             import re
+            # Preserve <at> tag content (Teams @mention format) before stripping
+            # all HTML tags. Without this, a message that is only "<at
+            # id=\"...\">hermes</at>" becomes empty and gets discarded.
+            content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", content)
             text = re.sub(r"<[^>]+>", "", content).strip()
             # Collapse multiple whitespace/newlines from HTML
             text = re.sub(r"\s+", " ", text).strip()
