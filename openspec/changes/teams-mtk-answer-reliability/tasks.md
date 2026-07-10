@@ -24,3 +24,12 @@
 ## 4. Decommission PKB Daemon
 - [ ] 4.1 Delete the 10 custom `teams_*.py` files in the PKB repository (excluding the legacy `teams_auth.py`).
 - [ ] 4.2 Delete associated test files in PKB.
+
+## 5. Echo guard, @mention preserve, parallel poll, token cache, edit throttle
+- [x] 5.1 Echo guard: `_sent_message_ids: set` tracks ALL sent message IDs so poll never re-processes own echoes.
+- [x] 5.2 @mention preserve: `<at id="...">hermes</at>` survives HTML strip via `re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", raw)` before generic tag removal. No more empty inbound.
+- [x] 5.3 Parallel poll: `asyncio.gather` replaces sequential `for` loop over `_conv_ids`. N convs fetch in ~1 RTT instead of N×RTT.
+- [x] 5.4 Token cache atomic write: `_save` writes to `.json.tmp` then `os.rename` to prevent corruption from concurrent writes or power loss. `fsync` before rename.
+- [x] 5.5 Token cache auto-purge: `_load` deletes corrupted cache file on unrecoverable `json.JSONDecodeError` so next poll triggers re-auth instead of permanently blocking.
+- [x] 5.6 Edit throttle: `edit_message` calls `_maybe_throttle(chat_id)` before the HTTP PUT, sharing the same per-conv throttle as `send`. Prevents rapid edits from hitting 429.
+- [x] 5.7 Self-reflection prompt (config-level quick-fix): `agent.system_prompt` in `config.yaml` instructs agent to check tool usage before answering. Objective check (did I use tools?) > subjective scoring (is my answer good?).

@@ -292,3 +292,71 @@ async def test_at_mention_only_message_not_empty():
     text = re.sub(r"<[^>]+>", "", content).strip()
     text = re.sub(r"\s+", " ", text).strip()
     assert text == "hermes"
+
+
+# ── §6 token cache: atomic write + auto-purge on corruption ───────────
+
+def test_token_cache_atomic_write(tmp_path, monkeypatch):
+    """_save writes to temp file then renames (atomic), not direct overwrite."""
+    from gateway.platforms.teams_mtk import _TeamsAuth
+    cache_path = tmp_path / "token_cache.json"
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
+    auth = _TeamsAuth()
+    auth._save({"access_token": "abc123", "saved_at": 100, "expires_in": 3600})
+    assert cache_path.exists()
+    import json
+    data = json.loads(cache_path.read_text())
+    assert data["access_token"] == "abc123"
+    # Temp file should not linger
+    assert not cache_path.with_suffix(".json.tmp").exists()
+
+
+def test_token_cache_auto_purge_on_corruption(tmp_path, monkeypatch):
+    """If cache JSON is totally corrupted, _load deletes the file and raises RuntimeError."""
+    from gateway.platforms.teams_mtk import _TeamsAuth
+    cache_path = tmp_path / "token_cache.json"
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
+    # Write garbage
+    cache_path.write_text("NOT JSON AT ALL {{{")
+    auth = _TeamsAuth()
+    with pytest.raises(RuntimeError, match="corrupted and has been deleted"):
+        auth._load()
+    # Cache file should be auto-purged
+    assert not cache_path.exists()
+
+
+def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
+    """If cache has one valid JSON + trailing garbage, raw_decode recovers it."""
+    from gateway.platforms.teams_mtk import _TeamsAuth
+    cache_path = tmp_path / "token_cache.json"
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
+    # Write valid JSON followed by garbage (simulating partial write)
+    cache_path.write_text('{"access_token":"abc","saved_at":1}GARBAGE')
+    auth = _TeamsAuth()
+    data = auth._load()
+    assert data["access_token"] == "abc"
+
+
+# ── §7 edit_message respects throttle ─────────────────────────────────
+
+async def test_edit_message_throttled_before_send():
+    """edit_message should call _maybe_throttle before the HTTP PUT."""
+    adapter = _make_adapter()
+    adapter._reply_throttle_seconds = 2.0
+    adapter._last_reply_at = {}
+    import time
+    adapter._last_reply_at["19:test@thread.v2"] = time.monotonic()
+
+    with patch("requests.put") as mock_put, \
+         patch("requests.Session"), \
+         patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_put.side_effect = _mock_requests_put([200])
+
+        result = await adapter.edit_message(
+            "19:test@thread.v2", "msg1", "updated content"
+        )
+
+        # Should have slept for throttle AND potentially for 429 backoff
+        # At minimum, throttle sleep should have been called
+        sleep_delays = [c[0][0] for c in mock_sleep.call_args_list]
+        assert any(d > 0 for d in sleep_delays), "edit_message should throttle before sending"

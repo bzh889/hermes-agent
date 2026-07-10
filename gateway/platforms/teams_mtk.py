@@ -117,15 +117,40 @@ class _TeamsAuth:
                 obj, _ = decoder.raw_decode(raw)
                 return obj
             except json.JSONDecodeError:
+                # Auto-purge corrupted cache so next poll triggers re-auth
+                # instead of permanently blocking on every tick.
+                logger.warning(
+                    "TeamsMTK: token cache corrupted and unrecoverable (%s) — "
+                    "deleting cache to force re-authentication on next poll",
+                    self.TOKEN_CACHE,
+                )
+                try:
+                    self.TOKEN_CACHE.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 raise RuntimeError(
-                    f"Teams token cache is corrupted: {self.TOKEN_CACHE}. "
-                    "Re-authenticate: python ~/.claude/skills/teams/auth_run.py"
+                    f"Teams token cache was corrupted and has been deleted: "
+                    f"{self.TOKEN_CACHE}. Re-authenticate: python ~/.claude/skills/teams/auth_run.py"
                 )
 
     def _save(self, tokens: dict) -> None:
+        """Atomic write: write to temp file then rename to prevent corruption
+        from concurrent writes or power loss mid-write."""
         self.TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.TOKEN_CACHE, "w", encoding="utf-8") as f:
-            json.dump(tokens, f)
+        tmp = self.TOKEN_CACHE.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(tokens, f)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp.replace(self.TOKEN_CACHE)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     def _expired(self, tokens: dict, buffer: int = 300) -> bool:
         saved_at = tokens.get("saved_at", 0)
@@ -686,6 +711,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """
         from gateway.platforms.base import SendResult
         try:
+            # Respect per-conv throttle to avoid hitting 429 on rapid edits
+            await self._maybe_throttle(chat_id)
+
             import re, requests
             self._auth._inject_truststore()
             skype_token = self._auth.skype_token()
