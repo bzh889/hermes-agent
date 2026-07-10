@@ -33,6 +33,26 @@ from typing import Any, Dict, List, Optional
 
 from gateway.platforms.base import BasePlatformAdapter
 
+# SDK pure-function HTML stripper (no auth/instance required)
+try:
+    from src.api._http import strip_teams_html as _strip_teams_html
+except ImportError:
+    _strip_teams_html = None  # fallback to regex if SDK not on path
+
+# SDK download_with_auth_url for domain-appropriate attachment downloads
+try:
+    from src.api._http import download_with_auth_url as _sdk_download
+except ImportError:
+    _sdk_download = None  # fallback to aiohttp when SDK not on path
+
+# SDK MessagesService for normalized message fetching
+try:
+    from src.api._http import HTTPLayer as _SDKHTTPLayer
+    from src.api._messages import MessagesService as _SDKMessages
+    _SDK_AVAILABLE = True
+except ImportError:
+    _SDK_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Teams API constants (from teams skill src/config.py)
@@ -246,6 +266,23 @@ class _TeamsAuth:
     def msg_base(self) -> str:
         """Return the regional MSG endpoint (discovered during auth)."""
         return self._msg_base or _DEFAULT_MSG_BASE
+
+
+class _SDKAuthAdapter:
+    """Duck-typing adapter so gateway _TeamsAuth works with SDK HTTPLayer.
+
+    SDK expects auth.get_skype_token() and auth.get_access_token();
+    gateway has auth.skype_token() and auth.access_token().
+    This thin wrapper bridges the naming gap.
+    """
+    def __init__(self, gw_auth: _TeamsAuth):
+        self._gw = gw_auth
+
+    def get_skype_token(self) -> str:
+        return self._gw.skype_token()
+
+    def get_access_token(self) -> str:
+        return self._gw.access_token()
 
 
 # ---------------------------------------------------------------------------
@@ -1061,18 +1098,73 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             conv_id: Conversation ID to fetch.  Defaults to ``self._conv_id``
                      (first / back-compat conversation).
 
-        Uses a fresh ``requests.Session`` each call to avoid stale pooled
-        connections — the MTK SSL proxy can silently drop idle TCP connections
-        after ~20 min, causing ConnectTimeout on reused sockets.
+        When the SDK is available, delegates to ``MessagesService.get_page()``
+        which handles auth retry, HTML normalisation via ``strip_teams_html``,
+        attachment extraction, and sender resolution automatically — and uses
+        the gateway's **regional** ``msg_base`` (discovered from Skype authz).
+
+        Falls back to raw ``requests`` when the SDK is not importable.
         """
         if conv_id is None:
             conv_id = self._conv_id
-        import urllib.parse, requests
-        from requests.adapters import HTTPAdapter
 
         self._auth._inject_truststore()
         import time as _t
         _t0 = _t.time()
+
+        try:
+            if _SDK_AVAILABLE:
+                return self._fetch_via_sdk(conv_id, limit, _t0)
+
+            # --- Fallback: raw requests (SDK not importable) ---
+            return self._fetch_via_raw(conv_id, limit, _t0)
+        finally:
+            logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time() - _t0)
+
+    def _fetch_via_sdk(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
+        """Fetch messages using SDK MessagesService (normalised, with attachments)."""
+        adapter = _SDKAuthAdapter(self._auth)
+        http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+        svc = _SDKMessages(http_layer)
+        try:
+            norm_msgs = svc.get_page(conv_id, page_size=limit,
+                                     msg_base=self._auth.msg_base)
+            # Back-fill raw-compatible fields so _process_new_messages works
+            # unchanged across both SDK-normalised and raw-fetch messages.
+            for m in norm_msgs:
+                m.setdefault("imdisplayname", m.get("sender", ""))
+                m.setdefault("messagetype", m.get("type", "RichText/Html"))
+                m.setdefault("properties", m.get("_raw_properties") or {})
+                # Convert SDK attachments to raw-API-compatible format so
+                # _process_new_messages layer-4 (top-level array) picks them up.
+                sdk_atts = m.get("attachments")
+                if isinstance(sdk_atts, list) and sdk_atts:
+                    raw_atts = []
+                    for a in sdk_atts:
+                        if isinstance(a, dict):
+                            raw_atts.append({
+                                "contentUrl": a.get("url", ""),
+                                "name": a.get("name", ""),
+                                "contentType": (
+                                    "image/" + a.get("kind", "image")
+                                    if a.get("kind") == "image"
+                                    else "application/octet-stream"
+                                ),
+                            })
+                    if raw_atts:
+                        m["attachments"] = raw_atts
+            # SDK returns newest-first; gateway expects oldest-first
+            norm_msgs.reverse()
+            return norm_msgs
+        except Exception as e:
+            logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", e)
+            return self._fetch_via_raw(conv_id, limit, _t0)
+
+    def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
+        """Fetch messages using raw requests (legacy, SDK unavailable)."""
+        import urllib.parse, requests
+        from requests.adapters import HTTPAdapter
+
         session = requests.Session()
         session.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
 
@@ -1096,15 +1188,17 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             else:
                 raise RuntimeError("_fetch_messages: all attempts exhausted")
         except requests.ConnectionError:
-            logger.warning("TeamsMTK: _fetch_messages ConnectionError after %.1fs", _t.time()-_t0)
-            # Timeout / reset — retry once with fresh token then give up this poll
+            logger.warning("TeamsMTK: _fetch_messages ConnectionError after %.1fs", _t.time() - _t0)
             raise
         finally:
             session.close()
-            logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time()-_t0)
 
         data = resp.json()
         messages = data.get("messages") or []
+        # Preserve raw fields for echo guard (matches SDK _normalize_raw)
+        for _m in messages:
+            _m["_raw_content"] = _m.get("content", "")
+            _m["_raw_properties"] = _m.get("properties")
         return list(reversed(messages))  # oldest-first for processing
 
     async def _poll_loop(self) -> None:
@@ -1150,12 +1244,51 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     async def _download_attachment(self, url: str, kind: str, filename: str) -> Optional[str]:
         """Download a Teams attachment and cache it locally.
 
-        Returns the local file path, or None on failure.
+        When the SDK is available, delegates to ``download_with_auth_url()``
+        which picks the correct auth strategy per domain (skype_token for
+        Skype/Teams, Bearer for SharePoint/OneDrive).  Runs in a thread
+        pool via ``asyncio.to_thread`` to avoid blocking the event loop.
+
+        Falls back to ``aiohttp`` with a single ``Bearer skype_token`` header
+        when the SDK is not importable — the legacy behaviour.
         """
         from gateway.platforms.base import cache_image_from_bytes, cache_document_from_bytes
-        import aiohttp
 
-        headers = {"Authorization": f"Bearer {self._auth.skype_token}"}
+        # --- SDK path: domain-appropriate auth, thread-pooled ---
+        if _sdk_download is not None:
+            try:
+                _sk = self._auth.skype_token()
+                _at = self._auth.access_token()
+                data = await asyncio.to_thread(
+                    _sdk_download, url, _sk, _at, False, 30,
+                )
+            except Exception as exc:
+                logger.warning("TeamsMTK: SDK download failed (%s), falling back to aiohttp url=%.60s", exc, url)
+                # Fall through to aiohttp below
+                data = None
+            if data is not None:
+                try:
+                    if kind == "image":
+                        _ext = ".jpg"
+                        if ".png" in url.lower():
+                            _ext = ".png"
+                        elif ".gif" in url.lower():
+                            _ext = ".gif"
+                        elif ".webp" in url.lower():
+                            _ext = ".webp"
+                        return cache_image_from_bytes(data, _ext)
+                    else:
+                        if not filename:
+                            _parts = url.rsplit("/", 1)
+                            filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
+                        return cache_document_from_bytes(data, filename)
+                except Exception as exc:
+                    logger.warning("TeamsMTK: attachment cache error: %s", exc)
+                    return None
+
+        # --- Fallback: aiohttp with single Bearer header (legacy) ---
+        import aiohttp
+        headers = {"Authorization": f"Bearer {self._auth.skype_token()}"}
         try:
             async with aiohttp.ClientSession(headers=headers) as sess:
                 async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as resp:
@@ -1169,7 +1302,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         try:
             if kind == "image":
-                # Determine extension from URL or default to .jpg
                 _ext = ".jpg"
                 if ".png" in url.lower():
                     _ext = ".png"
@@ -1179,7 +1311,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     _ext = ".webp"
                 return cache_image_from_bytes(data, _ext)
             else:
-                # Document / file — derive filename from URL if missing
                 if not filename:
                     _parts = url.rsplit("/", 1)
                     filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
@@ -1232,18 +1363,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # Echo-loop guard: in a self-chat (48:notes), every message
             # comes from the same OID.  We use three signals to decide
             # whether a message is our own output:
-            #   1. properties.hermes_sender == "agent"  (tag on send)
+            #   1. properties.hermes_sender in ("agent", "bot")  (tag on send)
+            #      Gateway sends "agent"; SDK-normalized messages carry "bot"
             #   2. clientmessageid matches our sent id  (id-match fallback)
             #   3. composetime is within 2s and content matches last sent
             #      (catches cases where Teams API strips properties)
             is_own = False
-            props = msg.get("properties", {})
+            # Check hermes_sender from both msg.properties and _raw_properties
+            props = msg.get("properties", {}) or {}
             if isinstance(props, str):
                 try:
                     props = json.loads(props)
                 except (json.JSONDecodeError, TypeError):
                     props = {}
-            if props.get("hermes_sender") == "agent":
+            _raw_props = msg.get("_raw_properties") or {}
+            if isinstance(_raw_props, str):
+                try:
+                    _raw_props = json.loads(_raw_props)
+                except (json.JSONDecodeError, TypeError):
+                    _raw_props = {}
+            _sender_val = props.get("hermes_sender") or _raw_props.get("hermes_sender")
+            if _sender_val in ("agent", "bot"):
                 is_own = True
             if self._last_sent_message_id and str(msg_id) == str(self._last_sent_message_id):
                 is_own = True
@@ -1313,15 +1453,25 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     [f"{k}:{n or u[:40]}" for k, n, u in zip(_att_kinds, _att_names, _att_urls)],
                 )
 
-            # Better HTML stripping (matches teams skill _process_message_content)
-            import re
-            # Preserve <at> tag content (Teams @mention format) before stripping
-            # all HTML tags. Without this, a message that is only "<at
-            # id=\"...\">hermes</at>" becomes empty and gets discarded.
-            content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", content)
-            text = re.sub(r"<[^>]+>", "", content).strip()
-            # Collapse multiple whitespace/newlines from HTML
-            text = re.sub(r"\s+", " ", text).strip()
+            # HTML stripping: use SDK strip_teams_html when available
+            # (handles <at>, <blockquote>, <img> emoji, <file>, <a> truncated URLs)
+            # Falls back to regex for environments where SDK is not on sys.path.
+            if _strip_teams_html is not None:
+                text, _extra_imgs = _strip_teams_html(content)
+            else:
+                import re
+                content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", content)
+                text = re.sub(r"<[^>]+>", "", content).strip()
+                text = re.sub(r"\s+", " ", text).strip()
+                _extra_imgs = []
+            # Merge any additional inline images from SDK extraction
+            if _extra_imgs:
+                for _ei in _extra_imgs:
+                    _eurl = _ei.get("src", "")
+                    if _eurl and _eurl not in _att_urls:
+                        _att_urls.append(_eurl)
+                        _att_names.append(_ei.get("alt", ""))
+                        _att_kinds.append(_ei.get("kind", "image"))
             # For messages with only attachments and no text, keep a placeholder
             # so the message isn't discarded as "empty"
             if not text and _att_urls:
