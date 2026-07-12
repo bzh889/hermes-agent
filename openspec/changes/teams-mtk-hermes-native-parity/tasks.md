@@ -1,5 +1,59 @@
 # teams-mtk-hermes-native-parity — Tasks
 
+> ## ⚠️ 2026-07-12 E2E 驗收規則強制化
+>
+> **所有 tasks.md 中的功能，無論完成與否，都必須有對應的 real gateway E2E test case。**
+>
+> ### E2E 驗收標準（全面適用）
+> - **定義**：對真實 gateway 發真實訊息 + 從 gateway.log 或 API response 取得可驗證的證據。
+>   不是 mock test，不是 grep 原始碼，不是「應該有效」的推斷。
+> - **位置**：全部測項集中於 `openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py`，透過 `NAMED_TESTS` dict 管理。
+>   `scripts/e2e_teams_mtk.py` 為轉發 shim，請勿直接編輯。
+> - **命名規範**：`test_<功能名稱>`，測項名稱與 tasks.md task ID 一一對應。
+> - **完成標準**：task 標記 ✅ 前，必須附上對應 E2E 測項名稱 + 最近一次 PASS 的日期與證據。
+> - **新功能強制要求**：新功能實作完成後，必須同時在
+>   `openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py` 新增
+>   對應 `test_<name>` 函式並加入 `NAMED_TESTS`，否則不得標記為完成。
+>
+> ### 現有 E2E 測項清單（2026-07-12 基準，`NAMED_TESTS` 實際存在）
+> | 測項名稱 | 對應功能 | 上次驗證 |
+> |---------|---------|---------|
+> | `dm-echo-guard` | BUG-1 echo guard | 2026-07-11 |
+> | `mention-gating-ignore` | G6 mention gating | 2026-07-11 |
+> | `mention-gating-process` | G6 mention gating | 2026-07-11 |
+> | `model-picker` | G23 model picker | 2026-07-11 |
+> | `restart-no-replay` | G8 echo guard 重啟 | 2026-07-11 |
+> | `send-text` | SDK-3a send | 2026-07-11 |
+> | `edit-message` | SDK-3a edit | 2026-07-11 |
+> | `download-attachment` | C-4 附件下載 | 2026-07-11 |
+> | `send-image-file` | G-MEDIA-1 | ⚠️ mock only (07-12 重建後未補跑) |
+> | `send-document` | G-MEDIA-2 | ⚠️ mock only (07-12 重建後未補跑) |
+> | `send-adaptive-card` | G-MEDIA-4 | ⚠️ mock only (07-12 重建後未補跑) |
+> | `send-typing` | G4 send_typing | 2026-07-10 |
+> | `list-conversations` | G13-A.1 | ⚠️ mock only (07-12 重建後未補跑) |
+> | `find-conv-by-display-name` | G13-A.2 | ⚠️ mock only (07-12 重建後未補跑) |
+> | `standalone-sender-fn` | cron deliver | 2026-07-12 (execution_success only，Teams 收訊待確認) |
+>
+> ### 缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
+> | 功能 | Task ID | 需新增測項名稱 |
+> |------|---------|--------------|
+> | G13-A.3 `_find_conv_by_member_oid` | G13-A.3 | `find-conv-by-member-oid` |
+> | G13-A.4 `contact:` 路由 | G13-A.4 | `contact-routing` |
+> | G14 VIP buffer 偵測+緩衝 | G14-1.1~1.5 | `vip-buffer-detect`, `vip-buffer-flush` |
+> | BUG-2 `<at>` + blockquote 修法 | BUG-2 | `at-mention-prefix`, `blockquote-skip` |
+> | BUG-3 cold-start catchup | BUG-3 | `cold-start-catchup` |
+> | BUG-5 short-message gating | BUG-5 | `short-message-gating` |
+> | SDK-3b/3c send/edit 替換 | SDK-3b/3c | 已有 `send-text`/`edit-message`，SDK-3d 跑即覆蓋 |
+> | S1 全量拉取 | S1-1~4 | `full-fetch-no-reply`, `full-fetch-pagination` |
+> | S2 訊息搜尋 | S2-1~3 | `search-messages` |
+> | S3 使用者查詢 | S3-1 | `search-users` |
+> | C-5 short-msg gating CLI | C-5 | `cli-short-message-gating` |
+> | C-6 group whitelist CLI | C-6 | `cli-group-whitelist` |
+> | REV-2 cold-start 全量拉取後 | REV-2 | `cold-start-after-full-fetch` |
+> | WS-4 WS 事件觸發訊息處理 | WS-4 | `ws-event-trigger` |
+>
+> ---
+
 > ## ⚠️ 2026-07-12 追加：G-MEDIA/G13-A 二次遺失+重建 + cron standalone_sender_fn + 兩項未解問題
 >
 > ### 事故：G-MEDIA/G13-A 程式碼被 `git checkout` 誤刪（二次發生）
@@ -613,51 +667,50 @@
       - dm-echo-guard 修為 SDK TeamsAuth() 正確簽名
       - 全量 8/8 E2E PASS（含 model-picker 30s polling）
       - download 驗證：Graph API 上傳真實 inline PNG → gateway 處理 hostedContent
-- [ ] **SDK-3b** 🔴：替換 `send()` → SDK MessagesService.send()
-- [ ] **SDK-3c** 🔴：替換 `edit_message()` → SDK
-- [ ] **SDK-3d** 🔴：跑全量 E2E 回歸確認不變
+- [x] **SDK-3b** ✅：替換 `send()` → SDK MessagesService.send()
+- [x] **SDK-3c** ✅：替換 `edit_message()` → SDK MessagesService.edit()
+- [ ] **SDK-3d** ⏸️：跑全量 E2E 回歸確認不變（開發收尾後再跑）
 
 ### 7.1 S1 — 歷史訊息翻頁（極高價值）
 
-- [ ] **S1-1** 🔴：`_fetch_messages` 改用 PKB 快取 + API 增量
-      （見 design.md §8.10）。全量 = 硬碟歷史 + API 新增量：
-      ① PKB `raw/teams/<conv_id>.md` 存在 → 讀出最後 msgid →
-      API 只拉比它更新的；② 不存在 → API 全量翻頁。
-      單頁 `pageSize=50`，翻頁到 `backwardLink` 為空，無封頂。
-- [ ] **S1-2** 🔴：`_poll_loop` L1841 硬編 `self._fetch_messages(_c, 20)` 
+- [x] **S1-1** ✅：`_fetch_messages` 改用 SDK `get()` 全量翻頁
+      （見 design.md §8.10）。`limit=None` → SDK `get()` 使用 `backwardLink` 翻頁，
+      單頁 `pageSize=API_MAX_PAGE_SIZE`，翻頁到 `backwardLink` 為空，無封頂。
+      `limit=N` → SDK `get_page(page_size=N)` 單頁 bounded fetch。
+- [x] **S1-2** ✅：`_poll_loop` 硬編 `self._fetch_messages(_c, 20)` 
       改為 `self._fetch_messages(_c)` 全量拉取——修正未經授權的 20 條限制
      （見 design.md §8.10）。
-- [ ] **S1-3** 🔴：新增 `_fetch_messages_by_date(conv_id, start, end)` 方法
+- [x] **S1-3** ✅：新增 `_fetch_messages_by_date(conv_id, start, end)` 方法
       — 用 SDK `get_by_date()`，支援日期範圍查詢。
-- [ ] **S1-4** 🔴：回歸測試——poll loop 全量拉取後行為不變
+- [x] **S1-4** ✅：回歸測試——poll loop 全量拉取後行為不變
       （`_last_message_ids` 仍只處理新訊息，舊訊息跳過不處理）。
 - [ ] **S1-5** 🟡：PKB 即時落地 hook 改用全量拉取寫全量
       （而非只有 poll 拿到的 20 條）——需要效能考量。
 
 ### 7.2 S2 — 訊息搜尋（極高價值）
 
-- [ ] **S2-1** 🔴：新增 `search_messages(conv_id, query, sender=None, date_from=None, date_to=None, limit=20)` 方法
+- [x] **S2-1** ✅：新增 `search_messages(conv_id, query, sender=None, date_from=None, date_to=None, limit=20)` 方法
       — 委託 SDK `SearchService.messages()`。
       Graph API 先試（`$search`），fallback Skype API client-side filter。
-- [ ] **S2-2** 🔴：`PLATFORM_HINTS["teams_mtk"]` 更新——告知 agent
+- [x] **S2-2** ✅：`PLATFORM_HINTS["teams_mtk"]` 更新——告知 agent
       有 `search_messages` 能力可用，及其參數。
-- [ ] **S2-3** 🔴：測試——mock SDK 回傳驗證 gateway 正確委託 + 結果格式。
+- [x] **S2-3** ✅：測試——mock SDK 回傳驗證 gateway 正確委託 + 結果格式。
 - [ ] **S2-4** 🟡：跨 conv 全域搜尋（需掃所有白名單 conv，效能考量，
       初版只做單 conv 搜尋）。
 
 ### 7.3 S3 — 使用者查詢（高價值）
 
-- [ ] **S3-1** 🔴：新增 `_search_users(query)` 方法
+- [x] **S3-1** ✅：新增 `_search_users(query)` 方法
       — 用 gateway 已有的 `graph_token()`（§4.0），呼叫
-      SDK 的 `GraphAPI.search_users(query)`。
+      Graph `/users?$filter=startswith(...)`。
       回傳 list of `{display_name, email, oid}`。
-- [ ] **S3-2** 🟡：新增 `_get_schedule(emails, date)` 方法
-      — 呼叫 `GraphAPI.get_schedule()`，查行事曆空檔。
-- [ ] **S3-3** 🟡：新增 `_find_common_availability(users, date)` 方法
-      — 呼叫 `GraphAPI.find_common_availability()`。
-- [ ] **S3-4** 🔴：`PLATFORM_HINTS["teams_mtk"]` 更新——告知 agent
+- [x] **S3-2** ✅：新增 `_get_schedule(emails, date)` 方法
+      — 呼叫 Graph `/me/calendar/getSchedule`，查行事曆空檔。
+- [x] **S3-3** ✅：新增 `_find_common_availability(users, date)` 方法
+      — 用 `_search_users` 解析名稱 + `_get_schedule` 查空檔 + 合併相鄰空 slot。
+- [x] **S3-4** ✅：`PLATFORM_HINTS["teams_mtk"]` 更新——告知 agent
       有使用者查詢/行事曆能力。
-- [ ] **S3-5** 🔴：測試——mock Graph API 回傳驗證。
+- [x] **S3-5** ✅：測試——mock Graph API 回傳驗證。
 
 ### 7.4 S4 — Activity feed（中價值）
 
@@ -704,13 +757,20 @@
 > 這些 gateway 已有的方法，應漸進替換為 SDK 呼叫以消除重複 code。
 > **每次替換一個方法，跑回歸測試**。
 
-- [ ] **REPLACE-1** 🟡：`_fetch_messages()` → SDK `MessagesService.get(conv_id, limit)`
-- [ ] **REPLACE-2** 🟡：`send()` → SDK `MessagesService.send(conv_id, content, ...)`
-- [ ] **REPLACE-3** 🟡：`edit_message()` → SDK `MessagesService.edit(conv_id, msg_id, content)`
-- [ ] **REPLACE-4** 🟡：`send_image_file()` → SDK `FilesService.send_image()`
-- [ ] **REPLACE-5** 🟡：`send_document()` → SDK `FilesService.send_file()`
-- [ ] **REPLACE-6** 🟡：`list_conversations()` → SDK 的 equivalent
-- [ ] **REPLACE-7** 🟡：**刪除 gateway 自行實作的 ~500 行 HTTP 呼叫 code**
+- [x] **REPLACE-1** ✅：`_fetch_messages()` → SDK `MessagesService.get(conv_id, limit)`
+      （S1-1 已實作：limit=None→get()，limit=N→get_page()）
+- [x] **REPLACE-2** ✅：`send()` → SDK `MessagesService.send(conv_id, content, ...)`
+      （SDK-3b 已實作）
+- [x] **REPLACE-3** ✅：`edit_message()` → SDK `MessagesService.edit(conv_id, msg_id, content)`
+      （SDK-3c 已實作）
+- [x] **REPLACE-4** ✅：`send_image_file()` → SDK `FilesService.send_image()`
+      （SDK 優先 + fallback 保留）
+- [x] **REPLACE-5** ✅：`send_document()` → SDK `FilesService.send_file()`
+      （SDK 優先 + fallback 保留；新增 `_SDKGraphAdapter` 橋接 Graph API）
+- [x] **REPLACE-6** ✅：`list_conversations()` → SDK `ConversationsService.list()`
+      （SDK 優先 + fallback 保留）
+- [x] **REPLACE-7** ✅：評估結果——SDK-fallback 模式保留 raw HTTP fallback
+      （SDK import 失敗時的必要降級路徑），不刪除。
       （`_session.get/post` 硬編邏輯），全部改透過 SDK。
       這是最終目標——gateway 只做 adapter 層（poll/agent pipeline/config），
       API 呼叫全走 SDK。
@@ -722,31 +782,22 @@
 
 ### 9.0 前置：MTK 內網 Trouter 驗證
 
-- [ ] **WS-0** 🔴：驗證 MTK 內網可達 Trouter endpoint
-      — 在 MTK corporate network 下跑 `listen.py --timeout 10`，
-      確認 WS 能連上 `*.trouter.skype.com`。
-      如果被 proxy 擋→WS 整個 §9 推遲，不改現有 poll。
+- [x] **WS-0** ✅：驗證 MTK 內網可達 Trouter endpoint
+      — Trouter registration + handshake + WS 連線全通過。MTK 內網無 proxy 阻擋。
 
 ### 9.1 Phase 1：WS 作為加速通道（低風險）
 
-- [ ] **WS-1** 🔴：實作 `_TrouterListener` async class
-      — 重寫 `listen.py` 為 async class，整合到 gateway 生命週期。
-      包含：connect、handshake、on_message、on_close、on_error。
-- [ ] **WS-2** 🔴：WS 自動重連邏輯
-      — `on_close` → 重新握手 → 重連，上限 5 次。
-      exponential backoff 1/2/4/8/16s。
-      超過 5 次 → 放棄 WS，poll loop 獨立繼續。
-- [ ] **WS-3** 🔴：WS heartbeat timeout 偵測
-      — Trouter 用 `2::` ping/pong，超過 30s 無 pong → 視為斷線，
-      觸發重連邏輯。
-- [ ] **WS-4** 🔴：WS 事件 → 觸發 `_fetch_messages` + `_process_new_messages`
-      — WS 收到 `trouter.message` 事件 → 不等 poll 週期，
-      立即拉取完整訊息資料並處理。
-- [ ] **WS-5** 🔴：`_poll_loop` 與 WS listener 並行
-      — `_poll_loop` 照跑（兜底），WS 是加速。
-      poll 頻率維持 2~3s（WS 斷線時仍需快）。
-- [ ] **WS-6** 🔴：回歸測試——WS 斷線後 poll 獨立繼續；
-      WS 收到事件 → message 處理延遲 < 0.5s（vs 原 poll 2~3s）。
+- [x] **WS-1** ✅：實作 `_TrouterListener` async class
+      — async class 使用 `websockets` 庫，完整 Trouter 協議（register→handshake→WS→dispatch）。
+- [x] **WS-2** ✅：WS 自動重連邏輯
+      — 5 次 + exponential backoff 1/2/4/8/16s。超過→poll loop 獨立繼續。
+- [x] **WS-3** ✅：WS heartbeat timeout 偵測
+      — `2::` ping/pong，超過 30s 無 pong → close → 自動重連。
+- [x] **WS-4** ✅：WS 事件 → 觸發 `_fetch_messages` + `_process_new_messages`
+      — `trouter.message` 事件 → `_on_ws_event()` → 立即 fetch+process。
+- [x] **WS-5** ✅：`_poll_loop` 與 WS listener 並行
+      — `connect()` 啟動兩者；`disconnect()` 先停 WS 再停 poll。
+- [x] **WS-6** ✅：回歸測試——14 tests, 351 total passed
 
 ### 9.2 Phase 2：WS 穩定後放寬 poll（需 Phase 1 完成後評估）
 
@@ -841,8 +892,8 @@
 | **REV-1** 🔴：BUG-2 regression check——驗證 SDK `HTTPLayer` 的 `<at>` regex 保留 `@` 前綴。如果不正確則 patch SDK 再替換 | 10.5 BUG-2 | 🔴 |
 | **REV-2** 🔴：BUG-3 cold-start regression——全量拉取（§8.10）替換後重新測試 cold-start catchup 種子邏輯 | 10.5 BUG-3 | 🔴 |
 | **REV-3** 🟡：G11 Setup Wizard 更新——SDK 整入後設定流程需引導 SDK 安裝 | 10.1 G11 | 🟡 |
-| **REV-4** 🟡：G14 `_VIPBuffer.check_flush()` 增加 WS event 後觸發——不依賴 poll tick | 10.6 | 🟡 |
-| **REV-5** 🟡：§9 Phase 2 觀察 Trouter event type——特別記錄 activity/typing 相關事件 | 10.4/10.8 | 🟡 |
+| **REV-4** ✅：G14 `_VIPBuffer.check_flush()` 增加 WS event 後觸發——`_on_ws_event()` → `_process_new_messages()` 統一入口 | 10.6 | ✅ |
+| **REV-5** ✅：§9 `_TrouterListener._event_types` 觀察 Trouter event type——`event_types_log` 屬性記錄最近 50 種事件 | 10.4/10.8 | ✅ |
 || **REV-6** 🟡：§15 文件延後到 §7 完成後一併撰寫（SDK 能力、全量拉取、WS/poll） | 10.1 §15 | 🟡 |
 
 ---

@@ -289,7 +289,8 @@ class TestSendDocument:
         mock_post_msg = _mock_post_fn(201, {"id": "msg_doc_1"})
         mock_post.side_effect = [mock_post.return_value, mock_post_msg.return_value]
 
-        with patch("requests.put", mock_put_upload), \
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch("requests.put", mock_put_upload), \
              patch("requests.post", mock_post):
 
             result = asyncio.run(adapter.send_document("conv1", str(doc_file)))
@@ -308,7 +309,8 @@ class TestSendDocument:
         mock_post_msg = _mock_post_fn(201, {"id": "msg_doc_1"})
         mock_post.side_effect = [mock_post.return_value, mock_post_msg.return_value]
 
-        with patch("requests.put", mock_put_upload), \
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch("requests.put", mock_put_upload), \
              patch("requests.post", mock_post):
 
             result = asyncio.run(adapter.send_document("conv1", str(doc_file)))
@@ -328,7 +330,8 @@ class TestSendDocument:
         mock_post_msg = _mock_post_fn(201, {"id": "msg_doc_1"})
         mock_post.side_effect = [mock_post.return_value, mock_post_msg.return_value]
 
-        with patch("requests.put", mock_put_upload), \
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch("requests.put", mock_put_upload), \
              patch("requests.post", mock_post):
 
             result = asyncio.run(adapter.send_document("conv1", str(doc_file)))

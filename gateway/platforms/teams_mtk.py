@@ -26,8 +26,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+import ssl
 import time
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +61,8 @@ except ImportError:
 try:
     from teams_skype_sdk.api._http import HTTPLayer as _SDKHTTPLayer
     from teams_skype_sdk.api._messages import MessagesService as _SDKMessages
+    from teams_skype_sdk.api._files import FilesService as _SDKFiles
+    from teams_skype_sdk.api._conversations import ConversationsService as _SDKConvs
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
@@ -348,6 +353,354 @@ class _SDKAuthAdapter:
         return self._gw.access_token()
 
 
+class _SDKGraphAdapter:
+    """Minimal Graph API adapter for SDK FilesService.send_file().
+
+    Provides the duck-typed interface that send_file() expects:
+    upload_to_onedrive, create_sharing_link, get_sharepoint_ids,
+    delete_onedrive_item.  Delegates to raw Graph HTTP using the
+    gateway's graph_token().
+    """
+    def __init__(self, gw_auth: _TeamsAuth, verify_ssl: bool = False):
+        self._gw = gw_auth
+        self.verify_ssl = verify_ssl
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._gw.graph_token()}",
+            "Content-Type": "application/json",
+        }
+
+    def upload_to_onedrive(self, file_bytes: bytes, original_filename: str) -> dict:
+        import requests as _req, time as _time, uuid as _uuid, os as _os
+        ext = _os.path.splitext(original_filename)[1]
+        unique_name = f"{int(_time.time())}_{_uuid.uuid4().hex[:8]}{ext}"
+        target_path = f"/Microsoft Teams Chat Files/TeamsMCP/{unique_name}"
+        upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:{target_path}:/content"
+        read_timeout = max(120, len(file_bytes) / (100 * 1024))
+        headers = self._headers()
+        headers["Content-Type"] = "application/octet-stream"
+        self._gw._inject_truststore()
+
+        if len(file_bytes) <= 4 * 1024 * 1024:
+            resp = _req.put(upload_url, headers=headers, data=file_bytes,
+                           verify=self.verify_ssl, timeout=(10, read_timeout))
+        else:
+            sess_url = f"https://graph.microsoft.com/v1.0/me/drive/root:{target_path}:/createUploadSession"
+            sess_resp = _req.post(sess_url, headers=self._headers(), json={},
+                                  verify=self.verify_ssl, timeout=30)
+            sess_resp.raise_for_status()
+            upload_url = sess_resp.json()["uploadUrl"]
+            sz = len(file_bytes)
+            resp = _req.put(upload_url, headers={
+                "Content-Length": str(sz),
+                "Content-Range": f"bytes 0-{sz - 1}/{sz}",
+            }, data=file_bytes, verify=self.verify_ssl, timeout=(10, read_timeout))
+
+        resp.raise_for_status()
+        item = resp.json()
+        return {
+            "id": item["id"],
+            "fileName": item.get("name", original_filename),
+            "webUrl": item.get("webUrl", ""),
+            "downloadUrl": item.get("@microsoft.graph.downloadUrl", ""),
+            "size": item.get("size", len(file_bytes)),
+        }
+
+    def create_sharing_link(self, item_id: str) -> str:
+        import requests as _req
+        self._gw._inject_truststore()
+        resp = _req.post(
+            f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink",
+            headers=self._headers(),
+            json={"type": "view", "scope": "organization"},
+            verify=self.verify_ssl, timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json().get("link", {}).get("webUrl", "")
+
+    def get_sharepoint_ids(self, item_id: str) -> dict:
+        import requests as _req
+        self._gw._inject_truststore()
+        resp = _req.get(
+            f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}?$select=sharepointIds",
+            headers=self._headers(),
+            verify=self.verify_ssl, timeout=15,
+        )
+        resp.raise_for_status()
+        sp = resp.json().get("sharepointIds", {})
+        return {
+            "listItemUniqueId": sp.get("listItemUniqueId", ""),
+            "siteId": sp.get("siteId", ""),
+            "siteUrl": sp.get("siteUrl", ""),
+        }
+
+    def delete_onedrive_item(self, item_id: str) -> bool:
+        import requests as _req
+        self._gw._inject_truststore()
+        resp = _req.delete(
+            f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}",
+            headers=self._headers(),
+            verify=self.verify_ssl, timeout=15,
+        )
+        return resp.status_code in (200, 204)
+
+
+# ---------------------------------------------------------------------------
+# Trouter WebSocket Listener (§9 — WS + Poll dual channel)
+# ---------------------------------------------------------------------------
+
+_TROUTER_URL = "https://go.trouter.teams.microsoft.com:443/v4/a"
+_WS_MAX_RECONNECT = 5
+_WS_BACKOFF_BASE = 1  # seconds; exponential: 1, 2, 4, 8, 16
+_WS_HEARTBEAT_TIMEOUT = 30  # seconds without a 2:: ping → consider dead
+
+
+class _TrouterListener:
+    """Async Trouter WebSocket listener (§9 dual-channel: WS + poll).
+
+    Lifecycle:
+        1. ``_register()``  — POST to Trouter, get socketio endpoint + params
+        2. ``_handshake()``  — GET socket.io/1/ to get session_id
+        3. ``_connect()``    — open WSS to Trouter, start receiving
+        4. ``_listen()``     — loop reading frames, dispatch events
+        5. On close/error   — auto-reconnect up to _WS_MAX_RECONNECT times
+        6. ``stop()``       — clean shutdown
+
+    Events are dispatched to ``on_event(event_dict)`` which the gateway
+    implements to trigger immediate ``_fetch_messages`` + ``_process_new_messages``.
+    """
+
+    def __init__(self, gw_auth: _TeamsAuth, on_event, loop: asyncio.AbstractEventLoop):
+        self._auth = gw_auth
+        self._on_event = on_event    # async callback(event_dict)
+        self._loop = loop
+        self._running = False
+        self._ws = None              # websockets.WebSocketClientProtocol
+        self._task: Optional[asyncio.Task] = None
+        self._reconnect_count = 0
+        self._connected = False
+        self._last_heartbeat = 0.0
+        # Event type log for REV-5 observation
+        self._event_types: List[str] = []
+
+    # ---- Public API ----
+
+    def start(self) -> asyncio.Task:
+        """Start the listener as an asyncio Task."""
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+        return self._task
+
+    async def stop(self) -> None:
+        """Signal shutdown and wait for the task to finish."""
+        self._running = False
+        if self._ws:
+            await self._ws.close()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    @property
+    def event_types_log(self) -> List[str]:
+        """REV-5: observed Trouter event names."""
+        return list(self._event_types[-50:])
+
+    # ---- Internal ----
+
+    async def _run(self) -> None:
+        """Main loop: connect, listen, reconnect on failure."""
+        import websockets
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        while self._running:
+            try:
+                ic3_token = await asyncio.to_thread(
+                    self._auth.exchange_for_scope,
+                    "https://ic3.teams.office.com/Teams.AccessAsUser.All",
+                )
+                ic3_token = ic3_token["access_token"]
+                skype_token = self._auth.skype_token()
+
+                trouter_info = await asyncio.to_thread(self._register, ic3_token)
+                session_id, params = await asyncio.to_thread(
+                    self._handshake, trouter_info, ic3_token, skype_token,
+                )
+                ws_url = self._build_ws_url(trouter_info, session_id, params)
+
+                async with websockets.connect(
+                    ws_url,
+                    additional_headers={
+                        "Authorization": f"Bearer {ic3_token}",
+                        "Authentication": f"skypetoken={skype_token}",
+                    },
+                    ssl=ssl_ctx,
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as ws:
+                    self._ws = ws
+                    self._connected = True
+                    self._reconnect_count = 0
+                    self._last_heartbeat = time.monotonic()
+                    logger.info("TeamsMTK/WS: connected to Trouter")
+
+                    async for raw in ws:
+                        if not self._running:
+                            break
+                        await self._handle_frame(raw)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("TeamsMTK/WS: error (%s), reconnect=%d/%d", e, self._reconnect_count, _WS_MAX_RECONNECT)
+
+            self._connected = False
+            self._ws = None
+
+            if not self._running:
+                break
+
+            self._reconnect_count += 1
+            if self._reconnect_count > _WS_MAX_RECONNECT:
+                logger.error("TeamsMTK/WS: max reconnect attempts reached — giving up (poll loop will keep working)")
+                break
+
+            delay = _WS_BACKOFF_BASE * (2 ** (self._reconnect_count - 1))
+            logger.info("TeamsMTK/WS: reconnecting in %ds...", delay)
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                break
+
+    async def _handle_frame(self, raw: str) -> None:
+        """Dispatch a Socket.IO frame."""
+        # Heartbeat: respond to server ping
+        if raw == "2::":
+            if self._ws:
+                await self._ws.send("2::")
+            self._last_heartbeat = time.monotonic()
+            return
+        if raw == "1::":
+            self._last_heartbeat = time.monotonic()
+            return
+        # WS-3: heartbeat timeout check
+        if time.monotonic() - self._last_heartbeat > _WS_HEARTBEAT_TIMEOUT:
+            logger.warning("TeamsMTK/WS: heartbeat timeout — closing connection")
+            if self._ws:
+                await self._ws.close()
+            return
+
+        # Event frame: "5:<N>::<json>"
+        if raw.startswith("5:"):
+            try:
+                evt = self._parse_event(raw)
+                if evt:
+                    event_name = evt.get("_trouter_name", "unknown")
+                    self._event_types.append(event_name)
+                    if event_name == "trouter.message":
+                        await self._on_event(evt)
+                    elif event_name == "trouter.connected":
+                        logger.info("TeamsMTK/WS: trouter.connected (ttl=%s)", evt.get("ttl", "?"))
+                    elif event_name == "trouter.message_loss":
+                        logger.debug("TeamsMTK/WS: message_loss notification")
+            except Exception as e:
+                logger.debug("TeamsMTK/WS: parse error: %s", e)
+
+    @staticmethod
+    def _parse_event(message: str) -> Optional[Dict[str, Any]]:
+        """Parse a Socket.IO 5: frame into an event dict."""
+        parts = message.split("::", 1)
+        if len(parts) < 2:
+            return None
+        json_part = parts[1].lstrip(":")
+        if not json_part:
+            return None
+        data = json.loads(json_part)
+        name = data.get("name", "")
+        body = data.get("args", [{}])[0]
+        if isinstance(body.get("body"), str):
+            try:
+                body = json.loads(body["body"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        resource = body.get("resource", {})
+        return {
+            "_trouter_name": name,
+            "sender": resource.get("imdisplayname", ""),
+            "content": resource.get("content", ""),
+            "conversation": resource.get("conversationLink", "").split("/conversations/")[-1] if "conversationLink" in resource else "",
+            "message_id": resource.get("id", ""),
+            "type": resource.get("messagetype", ""),
+            "timestamp": resource.get("composetime", ""),
+            "ttl": body.get("ttl"),
+        }
+
+    def _register(self, ic3_token: str) -> dict:
+        """POST to Trouter registration endpoint."""
+        import urllib.request, certifi
+        epid = uuid.uuid4().hex[:32]
+        url = f"{_TROUTER_URL}?con_num={_CLIENT_ID}_1&epid={epid}"
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        req = urllib.request.Request(url, method="POST")
+        req.add_header("Authorization", f"Bearer {ic3_token}")
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _handshake(self, trouter_info: dict, ic3_token: str, skype_token: str):
+        """Socket.IO handshake to get session_id."""
+        base_url = trouter_info.get("socketio", "")
+        if not base_url.endswith("/"):
+            base_url += "/"
+        connect_params = {
+            k: v for k, v in trouter_info.get("connectparams", {}).items()
+            if v != "" and k != "scae"
+        }
+        params = {
+            "v": "v4",
+            "tc": json.dumps({"cv": "2024.19.01.3", "ua": "SkypeSpaces", "hr": "", "v": "0.0.0"}),
+            "con_num": f"{_CLIENT_ID}_1",
+            **connect_params,
+        }
+        ccid = trouter_info.get("ccid")
+        if ccid:
+            params["ccid"] = ccid
+        r = requests.get(
+            f"{base_url}socket.io/1/",
+            params=params,
+            headers={
+                "Authorization": f"Bearer {ic3_token}",
+                "Authentication": f"skypetoken={skype_token}",
+            },
+            verify=False,
+            timeout=15,
+        )
+        r.raise_for_status()
+        session_id = r.text.split(":")[0]
+        return session_id, params
+
+    @staticmethod
+    def _build_ws_url(trouter_info: dict, session_id: str, params: dict) -> str:
+        """Build the WSS URL from handshake results."""
+        import urllib.parse as _up
+        base = trouter_info.get("socketio", "")
+        if base.startswith("https://"):
+            base = "wss://" + base[8:]
+        if not base.endswith("/"):
+            base += "/"
+        filtered = {k: v for k, v in params.items() if v != "" and k != "scae"}
+        qs = "&".join(f"{k}={_up.quote(str(v), safe='')}" for k, v in filtered.items())
+        return f"{base}socket.io/1/websocket/{session_id}?{qs}"
+
+
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
@@ -410,6 +763,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._conv_id: Optional[str] = self._conv_ids[0] if self._conv_ids else None  # back-compat
         self._auth = _TeamsAuth()
         self._poll_task: Optional[asyncio.Task] = None
+        self._ws_listener: Optional[_TrouterListener] = None  # WS-1: Trouter listener
         self._connected = False
         self._user_oid: Optional[str] = None  # set during connect from first poll
         self._last_sent_message_id: Optional[str] = None  # id of last message WE sent (echo guard)
@@ -534,6 +888,15 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
+
+        # WS-1/5: Start Trouter listener alongside poll loop
+        loop = asyncio.get_event_loop()
+        self._ws_listener = _TrouterListener(
+            self._auth, on_event=self._on_ws_event, loop=loop,
+        )
+        self._ws_listener.start()
+        logger.info("TeamsMTK: Trouter WS listener starting")
+
         self._mark_connected()
         logger.info(
             "TeamsMTK: connected — polling %d conversation(s) every %ds: %s",
@@ -544,6 +907,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        # Stop WS listener first (clean WebSocket close)
+        if self._ws_listener:
+            await self._ws_listener.stop()
+            self._ws_listener = None
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -582,73 +949,83 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         _skip_footer_extract = bool(metadata and metadata.get("skip_footer_extract"))
         try:
-            # Reply throttle: wait if this conversation was answered too
-            # recently (prevents rapid-fire flooding).
             await self._maybe_throttle(chat_id)
 
-            import re, requests
+            import re
+            from datetime import datetime
+            html_content, runtime_footer = self._build_html(content, _skip_footer_extract)
+
+            # Trailing-footer-only message (streaming mode):
+            # Merge into the last body message instead of sending a separate mini-card.
+            if not html_content or (runtime_footer and not content.strip()):
+                if self._last_sent_message_id and runtime_footer and self._last_sent_message_html:
+                    _existing = self._last_sent_message_html
+                    _old_footer_pat = re.compile(
+                        r'(<span style="color:#888;font-size:0\.85em">)(.*?)(</span>)',
+                        re.DOTALL,
+                    )
+                    _merged = f"— Hermes · {datetime.now().strftime('%Y-%m-%d %H:%M')} · {runtime_footer}"
+                    _new_footer = f'<span style="color:#888;font-size:0.85em">{_merged}</span>'
+                    _patched = _old_footer_pat.sub(
+                        lambda m: m.group(1) + _merged + m.group(3),
+                        _existing,
+                        count=1,
+                    )
+                    if _patched == _existing:
+                        _patched = _existing.replace("</div>", f"{_new_footer}</div>", 1)
+                    try:
+                        _edit_res = await self.edit_message(
+                            chat_id, self._last_sent_message_id, _patched, finalize=True,
+                        )
+                        if _edit_res.success:
+                            logger.info(
+                                "TeamsMTK: merged trailing footer into msg %s: %s",
+                                self._last_sent_message_id, runtime_footer,
+                            )
+                            return SendResult(success=True)
+                    except Exception as _ee:
+                        logger.debug("TeamsMTK: footer edit failed, falling back to send: %s", _ee)
+                html_content, _ = self._build_html(runtime_footer, _skip_footer_extract=True)
+
+            # SDK-3b: delegate to SDK MessagesService.send() when available.
+            # Falls back to raw HTTP on any SDK failure.
+            if _SDK_AVAILABLE:
+                try:
+                    adapter = _SDKAuthAdapter(self._auth)
+                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                    svc = _SDKMessages(http_layer)
+                    result = svc.send(
+                        conversation_id=chat_id,
+                        content=html_content,
+                        is_html=True,
+                        return_context=False,
+                    )
+                    msg_id = result.get("id")
+                    if msg_id:
+                        self._last_sent_message_id = str(msg_id)
+                        self._sent_dedup.is_duplicate(str(msg_id))
+                        if html_content:
+                            self._last_sent_message_html = html_content
+                    logger.info(
+                        "TeamsMTK: sent message id=%s to %s via SDK (html=%d chars)",
+                        msg_id, chat_id, len(html_content) if html_content else 0,
+                    )
+                    return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+                except Exception as _sdk_err:
+                    logger.warning(
+                        "TeamsMTK: SDK send failed (%s) — falling back to raw HTTP", _sdk_err,
+                    )
+
+            # Raw HTTP fallback (SDK unavailable or SDK send failed)
+            import requests
             from requests.adapters import HTTPAdapter
             self._auth._inject_truststore()
-
-            # Fresh session to avoid stale pooled connections through the proxy
             session = requests.Session()
             session.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
             try:
                 for attempt in range(2):
                     skype_token = self._auth.skype_token()
                     url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
-                    # Build HTML using the shared template builder so send/edit
-                    # always produce the same branded output.
-                    html_content, runtime_footer = self._build_html(content, _skip_footer_extract)
-
-                    # Trailing-footer-only message (streaming mode):
-                    # Merge into the last body message instead of sending
-                    # a separate mini-card.
-                    from datetime import datetime
-                    if not html_content or (runtime_footer and not content.strip()):
-                        if self._last_sent_message_id and runtime_footer and self._last_sent_message_html:
-                            _existing = self._last_sent_message_html
-                            # Find the footer span in the cached HTML and
-                            # replace it with the updated version that
-                            # includes runtime_footer.
-                            _old_footer_pat = re.compile(
-                                r'(<span style="color:#888;font-size:0\.85em">)(.*?)(</span>)',
-                                re.DOTALL,
-                            )
-                            _merged = f"— Hermes · {datetime.now().strftime('%Y-%m-%d %H:%M')} · {runtime_footer}"
-                            _new_footer = f'<span style="color:#888;font-size:0.85em">{_merged}</span>'
-                            _patched = _old_footer_pat.sub(
-                                lambda m: m.group(1) + _merged + m.group(3),
-                                _existing,
-                                count=1,
-                            )
-                            if _patched == _existing:
-                                # Fallback: append footer span if none found
-                                _patched = _existing.replace(
-                                    "</div>",
-                                    f"{_new_footer}</div>",
-                                    1,
-                                )
-                            try:
-                                _edit_res = await self.edit_message(
-                                    chat_id,
-                                    self._last_sent_message_id,
-                                    _patched,
-                                    finalize=True,
-                                )
-                                if _edit_res.success:
-                                    logger.info(
-                                        "TeamsMTK: merged trailing footer into msg %s: %s",
-                                        self._last_sent_message_id, runtime_footer,
-                                    )
-                                    # _last_sent_message_html is already updated
-                                    # by edit_message() above (same id → cache sync).
-                                    return SendResult(success=True)
-                            except Exception as _ee:
-                                logger.debug("TeamsMTK: footer edit failed, falling back to send: %s", _ee)
-                        # Fall back: send as separate mini-card
-                        # Re-generate with the footer-only template from _build_html
-                        html_content, _ = self._build_html(runtime_footer, _skip_footer_extract=True)
                     payload = {
                         "content": html_content,
                         "messagetype": "RichText/Html",
@@ -684,11 +1061,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
                 self._last_sent_message_id = str(msg_id)
-                self._sent_dedup.is_duplicate(str(msg_id))  # register as seen
-                # Cache the HTML for potential trailing-footer merge
+                self._sent_dedup.is_duplicate(str(msg_id))
                 if html_content:
                     self._last_sent_message_html = html_content
-            logger.info("TeamsMTK: sent message id=%s to %s (html=%d chars)", msg_id, chat_id, len(html_content) if html_content else 0)
+            logger.info(
+                "TeamsMTK: sent message id=%s to %s via raw HTTP (html=%d chars)",
+                msg_id, chat_id, len(html_content) if html_content else 0,
+            )
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
             logger.error("TeamsMTK: send failed: %s", e)
@@ -815,28 +1194,46 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """
         from gateway.platforms.base import SendResult
         try:
-            # Respect per-conv throttle to avoid hitting 429 on rapid edits
             await self._maybe_throttle(chat_id)
 
-            import re, requests
+            import re
             self._auth._inject_truststore()
-            skype_token = self._auth.skype_token()
-            url = f"{self._auth.msg_base}/conversations/{chat_id}/messages/{message_id}"
 
             # If content is already a branded-template HTML (e.g. from the
             # trailing-footer merge path), use it as-is to avoid double-wrapping.
             is_already_html = bool(re.search(r'<div\s+style="border-left:', content))
             if is_already_html:
                 html_content = content
-                runtime_footer = ""
             else:
-                # Use the same branded template as send()
-                html_content, runtime_footer = self._build_html(content)
+                html_content, _ = self._build_html(content)
 
             logger.info(
                 "TeamsMTK: editing message %s — content=%d chars, html=%d chars, finalize=%s",
                 message_id, len(content), len(html_content), finalize,
             )
+
+            # SDK-3c: delegate to SDK MessagesService.edit() when available.
+            if _SDK_AVAILABLE:
+                try:
+                    adapter = _SDKAuthAdapter(self._auth)
+                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                    svc = _SDKMessages(http_layer)
+                    svc.edit(
+                        conversation_id=chat_id,
+                        message_id=message_id,
+                        content=html_content,
+                    )
+                    logger.info("TeamsMTK: edited message %s via SDK", message_id)
+                    return SendResult(success=True, message_id=message_id)
+                except Exception as _sdk_err:
+                    logger.warning(
+                        "TeamsMTK: SDK edit failed (%s) — falling back to raw HTTP", _sdk_err,
+                    )
+
+            # Raw HTTP fallback
+            import requests
+            skype_token = self._auth.skype_token()
+            url = f"{self._auth.msg_base}/conversations/{chat_id}/messages/{message_id}"
             payload = {"content": html_content, "messagetype": "RichText/Html", "contenttype": "text"}
             headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
             resp = requests.put(url, json=payload, headers=headers, verify=False, timeout=30)
@@ -848,9 +1245,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 await asyncio.sleep(self._RATE_LIMIT_BACKOFF_S)
                 resp = requests.put(url, json=payload, headers=headers, verify=False, timeout=30)
             resp.raise_for_status()
-            logger.info("TeamsMTK: edited message %s (resp=%d bytes)", message_id, len(resp.content))
-            # Keep the HTML cache in sync so the trailing-footer merge
-            # operates on the latest content, not a stale snapshot.
+            logger.info("TeamsMTK: edited message %s via raw HTTP (resp=%d bytes)", message_id, len(resp.content))
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", e)
@@ -896,18 +1291,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     async def send_image_file(self, chat_id: str, path: str, caption: str = "") -> "SendResult":
         """Upload a local image to AMS and send it inline (AMS 3-step flow).
 
-        Step 1: POST /v1/objects — create an AMS object with read permission
-                scoped to this conversation ({"type": "pish/image",
-                "permissions": {chat_id: ["read"]}}).
-        Step 2: PUT /v1/objects/{id}/content/imgpsh — upload the raw image
-                bytes (NOT /content/original — that path 404s for this object
-                type).
-        Step 3: POST .../messages with an <img> tag using the AMSImage schema
-                markup and "amsreferences": [object_id] so Teams renders it
-                as a native inline image instead of a plain link.
+        REPLACE-4: delegates to SDK FilesService.send_image() when available.
+        Falls back to raw HTTP if SDK not on sys.path.
         """
         from gateway.platforms.base import SendResult
-        import mimetypes, requests
+        import mimetypes
         try:
             with open(path, "rb") as f:
                 image_data = f.read()
@@ -916,6 +1304,25 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         content_type = mimetypes.guess_type(path)[0] or "image/png"
 
+        # REPLACE-4: SDK path
+        if _SDK_AVAILABLE and _SDKFiles is not None:
+            try:
+                self._auth._inject_truststore()
+                adapter = _SDKAuthAdapter(self._auth)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                svc = _SDKFiles(http_layer, _SDKMessages(http_layer))
+                result = svc.send_image(chat_id, image_data, content_type, caption=caption)
+                msg_id = result.get("id", "")
+                if msg_id:
+                    self._last_sent_message_id = str(msg_id)
+                return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+            except Exception as _sdk_err:
+                logger.warning(
+                    "TeamsMTK: SDK send_image failed (%s) — falling back to raw HTTP", _sdk_err,
+                )
+
+        # Fallback: raw HTTP AMS 3-step flow
+        import requests
         try:
             self._auth._inject_truststore()
             skype_token = self._auth.skype_token()
@@ -1067,14 +1474,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     async def send_document(self, chat_id: str, path: str, caption: str = "") -> "SendResult":
         """Upload a local file to OneDrive and share a clickable link.
 
-        Flow: Graph API PUT (simple upload for the file sizes Hermes deals
-        with) -> Graph API POST createLink (organization-scoped view link)
-        -> a plain HTML message with the filename + link. Falls back to a
-        text notice via send() if the Graph upload fails (e.g. Graph scope
-        not granted) rather than raising and losing the whole turn's reply.
+        REPLACE-5: delegates to SDK FilesService.send_file() when available.
+        Falls back to raw HTTP if SDK not on sys.path.
         """
         from gateway.platforms.base import SendResult
-        import os as _os, requests
+        import os as _os
 
         filename = _os.path.basename(path)
         try:
@@ -1083,6 +1487,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except OSError as e:
             return SendResult(success=False, error=f"Cannot read file: {e}")
 
+        # REPLACE-5: SDK path
+        if _SDK_AVAILABLE and _SDKFiles is not None:
+            try:
+                self._auth._inject_truststore()
+                adapter = _SDKAuthAdapter(self._auth)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                msg_svc = _SDKMessages(http_layer)
+                file_svc = _SDKFiles(http_layer, msg_svc)
+                graph_api = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                result = file_svc.send_file(chat_id, file_bytes, filename, graph_api, caption=caption)
+                msg_id = result.get("id", "")
+                if msg_id:
+                    self._last_sent_message_id = str(msg_id)
+                return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+            except Exception as _sdk_err:
+                logger.warning(
+                    "TeamsMTK: SDK send_file failed (%s) — falling back to raw HTTP", _sdk_err,
+                )
+
+        # Fallback: raw HTTP Graph upload + Skype send
+        import requests
         try:
             self._auth._inject_truststore()
             graph_token = self._auth.graph_token()
@@ -1090,10 +1515,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "Authorization": f"Bearer {graph_token}",
                 "Content-Type": "application/octet-stream",
             }
-            # Simple upload — Graph's simple-PUT path caps at 4MB; larger
-            # files would need the upload-session flow, but Hermes-generated
-            # attachments (skill outputs, screenshots, docs) are well under
-            # that in practice, so the session flow is left as a follow-up.
             import time as _time, uuid as _uuid
             unique_name = f"{int(_time.time())}_{_uuid.uuid4().hex[:8]}{_os.path.splitext(filename)[1]}"
             target_path = f"/Microsoft Teams Chat Files/TeamsMCP/{unique_name}"
@@ -1231,12 +1652,34 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     def list_conversations(self, limit: int = 50) -> List[Dict[str, Any]]:
         """List conversations visible to this account via the Skype chat service.
 
-        Read-only, no new OAuth scope needed (chatSvc GET /conversations is
-        already covered by the Skype token this adapter uses for send/poll).
-        Returns a flat list of {id, title, type, member_names} dicts so
-        _find_conv_by_display_name() can do a simple substring match without
-        each caller re-parsing the raw Skype response shape.
+        REPLACE-6: delegates to SDK ConversationsService.list() when available.
+        Falls back to raw HTTP if SDK not on sys.path.
         """
+        # REPLACE-6: SDK path
+        if _SDK_AVAILABLE and _SDKConvs is not None:
+            try:
+                self._auth._inject_truststore()
+                adapter = _SDKAuthAdapter(self._auth)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                msg_svc = _SDKMessages(http_layer)
+                svc = _SDKConvs(http_layer, msg_svc)
+                raw = svc.list(limit=limit)
+                # Normalize to gateway's expected shape
+                results: List[Dict[str, Any]] = []
+                for conv in raw:
+                    results.append({
+                        "id": conv.get("id", ""),
+                        "title": conv.get("title", ""),
+                        "type": conv.get("type", ""),
+                        "member_names": conv.get("title", ""),  # SDK doesn't return members in list()
+                    })
+                return results
+            except Exception as _sdk_err:
+                logger.warning(
+                    "TeamsMTK: SDK list_conversations failed (%s) — falling back to raw HTTP", _sdk_err,
+                )
+
+        # Fallback: raw HTTP
         import requests
         try:
             self._auth._inject_truststore()
@@ -1295,9 +1738,248 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 return conv.get("id")
         return None
 
+    def _search_users(self, query: str) -> List[Dict[str, Any]]:
+        """S3-1: Search AAD/M365 users by display name or email prefix via Graph API.
+
+        Uses the gateway's existing graph_token() so no extra OAuth scope is needed.
+        Delegates to Graph /users?$filter=startswith(...) (same logic as
+        ~/.claude/skills/teams/scripts/users.py search).
+
+        Args:
+            query: Name or email prefix to search (e.g. "Alice", "alice@").
+
+        Returns:
+            List of {display_name, email, oid} dicts, up to 10 results.
+            Returns [] on any error (network, auth, etc.) — non-fatal.
+        """
+        try:
+            import requests as _req
+            self._auth._inject_truststore()
+            graph_token = self._auth.graph_token()
+            filter_str = (
+                f"startswith(displayName,'{query}') or "
+                f"startswith(mail,'{query}')"
+            )
+            resp = _req.get(
+                "https://graph.microsoft.com/v1.0/users",
+                params={"$filter": filter_str, "$top": 10},
+                headers={"Authorization": f"Bearer {graph_token}"},
+                verify=False,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            users = resp.json().get("value", [])
+            return [
+                {
+                    "display_name": u.get("displayName", ""),
+                    "email": u.get("mail") or u.get("userPrincipalName", ""),
+                    "oid": u.get("id", ""),
+                }
+                for u in users
+            ]
+        except Exception as e:
+            logger.warning("TeamsMTK: _search_users failed (%s)", e)
+            return []
+
+    def _get_schedule(
+        self, emails: List[str], date_str: Optional[str] = None, interval: int = 30
+    ) -> List[Dict[str, Any]]:
+        """S3-2: Get free/busy schedule for AAD users via Graph API.
+
+        Args:
+            emails:   List of email addresses to check.
+            date_str: Target date (YYYY-MM-DD). Defaults to today (CST +8).
+            interval: Availability interval in minutes (default 30).
+
+        Returns:
+            List of schedule dicts from Graph /me/calendar/getSchedule.
+            Each dict has ``availabilityView`` string where
+            0=free, 1=tentative, 2=busy, 3=OOF, 4=working elsewhere.
+            Returns [] on error (non-fatal).
+        """
+        try:
+            import requests as _req
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            self._auth._inject_truststore()
+            graph_token = self._auth.graph_token()
+            tz = _tz(_td(hours=8))
+            now = _dt.now(tz)
+            if date_str:
+                target = _dt.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
+            else:
+                target = now
+            start = target.replace(hour=9, minute=0, second=0)
+            end = target.replace(hour=18, minute=0, second=0)
+
+            body = {
+                "schedules": emails,
+                "startTime": {
+                    "dateTime": start.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "timeZone": "Asia/Shanghai",
+                },
+                "endTime": {
+                    "dateTime": end.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "timeZone": "Asia/Shanghai",
+                },
+                "availabilityViewInterval": interval,
+            }
+            resp = _req.post(
+                "https://graph.microsoft.com/v1.0/me/calendar/getSchedule",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {graph_token}",
+                    "Content-Type": "application/json",
+                },
+                verify=False,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("value", [])
+        except Exception as e:
+            logger.warning("TeamsMTK: _get_schedule failed (%s)", e)
+            return []
+
+    def _find_common_availability(
+        self, user_queries: List[str], date_str: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """S3-3: Find meeting slots where all named participants are free.
+
+        Resolves user names -> emails via _search_users, delegates to
+        _get_schedule, then parses availabilityView to compute free slots.
+
+        Args:
+            user_queries: List of user name/email strings.
+            date_str:     Target date (YYYY-MM-DD). Defaults to today.
+
+        Returns:
+            Dict with resolved_users, available_slots, and notes.
+            On ambiguity (2+ matches for a name) or error, the slot
+            list is empty and notes explain the problem.
+        """
+        try:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            tz = _tz(_td(hours=8))
+            if date_str:
+                target_date = _dt.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
+            else:
+                target_date = _dt.now(tz)
+            start = target_date.replace(hour=9, minute=0, second=0)
+            end = target_date.replace(hour=18, minute=0, second=0)
+
+            # Resolve each user with ambiguity guard
+            resolved = []
+            for query in user_queries:
+                query = query.strip()
+                if not query:
+                    continue
+                if "@" in query:
+                    resolved.append({"query": query, "email": query, "name": query})
+                    continue
+                matches = self._search_users(query)
+                if len(matches) == 0:
+                    return {
+                        "resolved_users": resolved,
+                        "date": target_date.strftime("%Y-%m-%d"),
+                        "available_slots": [],
+                        "notes": [f"User '{query}' not found. Try full name or email."],
+                    }
+                elif len(matches) == 1:
+                    u = matches[0]
+                    resolved.append({
+                        "query": query,
+                        "email": u["email"],
+                        "name": u["display_name"],
+                    })
+                else:
+                    candidates = [f"  - {u['display_name']} -- {u['email']}" for u in matches[:5]]
+                    return {
+                        "resolved_users": resolved,
+                        "date": target_date.strftime("%Y-%m-%d"),
+                        "available_slots": [],
+                        "notes": [
+                            f"Ambiguous user '{query}'. Found {len(matches)} matches:\n"
+                            + "\n".join(candidates)
+                            + "\nAsk which person they mean, or provide the full email."
+                        ],
+                    }
+            if not resolved:
+                return {
+                    "resolved_users": [],
+                    "date": target_date.strftime("%Y-%m-%d"),
+                    "available_slots": [],
+                    "notes": ["No users specified."],
+                }
+
+            emails = [r["email"] for r in resolved]
+            schedules = self._get_schedule(emails, date_str=date_str, interval=30)
+            if not schedules:
+                return {
+                    "resolved_users": resolved,
+                    "date": target_date.strftime("%Y-%m-%d"),
+                    "available_slots": [],
+                    "notes": ["Schedule API returned no data."],
+                }
+
+            status_map = {"1": "tentative", "2": "busy", "3": "OOF", "4": "working elsewhere"}
+            slot_count = max((len(s.get("availabilityView", "")) for s in schedules), default=0)
+            available_slots = []
+            notes = []
+
+            for slot_idx in range(slot_count):
+                slot_start = start + _td(minutes=30 * slot_idx)
+                slot_end = slot_start + _td(minutes=30)
+                all_free = True
+                slot_notes = []
+                for i, sched in enumerate(schedules):
+                    view = sched.get("availabilityView", "")
+                    name = resolved[i]["name"] if i < len(resolved) else emails[i]
+                    if slot_idx < len(view):
+                        status = view[slot_idx]
+                        if status != "0":
+                            all_free = False
+                            slot_notes.append(f"{name}: {status_map.get(status, 'unavailable')}")
+                    else:
+                        all_free = False
+                        slot_notes.append(f"{name}: unknown (no data)")
+                if all_free:
+                    available_slots.append({
+                        "start": slot_start.strftime("%H:%M"),
+                        "end": slot_end.strftime("%H:%M"),
+                    })
+                elif slot_notes:
+                    for note in slot_notes:
+                        if note not in notes:
+                            notes.append(note)
+
+            # Merge adjacent free slots
+            merged = []
+            for slot in available_slots:
+                if merged and merged[-1]["end"] == slot["start"]:
+                    merged[-1]["end"] = slot["end"]
+                else:
+                    merged.append(dict(slot))
+
+            return {
+                "resolved_users": resolved,
+                "date": target_date.strftime("%Y-%m-%d"),
+                "available_slots": merged,
+                "notes": notes,
+            }
+        except Exception as e:
+            logger.warning("TeamsMTK: _find_common_availability failed (%s)", e)
+            return {
+                "resolved_users": [],
+                "date": date_str or "unknown",
+                "available_slots": [],
+                "notes": [f"Error: {e}"],
+            }
+
     async def cancel_background_tasks(self) -> None:
-        """Cancel poll task, then delegate to base for in-flight message tasks."""
+        """Cancel poll + WS tasks, then delegate to base for in-flight message tasks."""
         self._running = False
+        if self._ws_listener:
+            await self._ws_listener.stop()
+            self._ws_listener = None
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
             try:
@@ -1306,7 +1988,30 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 pass
         await super().cancel_background_tasks()
 
-    # ---- Interactive model picker ----
+    # ---- WS event handler (WS-4 + REV-4) ----
+
+    async def _on_ws_event(self, evt: Dict[str, Any]) -> None:
+        """Handle Trouter message event — trigger immediate fetch + process.
+
+        WS-4: When WS pushes a message event, immediately fetch the full
+        message details (WS events only carry a subset) and process them.
+        REV-4: VIP buffer flush is also triggered since WS events arrive
+        faster than poll ticks.
+        """
+        conv_id = evt.get("conversation", "")
+        if not conv_id or conv_id not in self._last_message_ids:
+            # Not a monitored conversation — ignore
+            return
+        logger.info("TeamsMTK/WS: message event for conv=%s — triggering immediate fetch", conv_id[:40])
+        try:
+            import concurrent.futures
+            loop = asyncio.get_event_loop()
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            msgs = await loop.run_in_executor(executor, lambda: self._fetch_messages(conv_id))
+            await self._process_new_messages(conv_id, msgs)
+            executor.shutdown(wait=False)
+        except Exception as e:
+            logger.warning("TeamsMTK/WS: immediate fetch failed (%s) — poll will catch it", e)
 
     async def send_model_picker(
         self,
@@ -1596,20 +2301,22 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "current_model": picker.get("current_model"),
             "current_provider": picker.get("current_provider"),
         }
+    def _fetch_messages(self, conv_id: str = None, limit: Optional[int] = None) -> List[dict]:
+        """Fetch messages from a conversation (sync, called from thread).
 
-    def _fetch_messages(self, conv_id: str = None, limit: int = 20) -> List[dict]:
-        """Fetch recent messages from a conversation (sync, called from thread).
+        S1-1/S1-2: Full-history fetch with backwardLink pagination.
 
         Args:
-            conv_id: Conversation ID to fetch.  Defaults to ``self._conv_id``
-                     (first / back-compat conversation).
+            conv_id: Conversation ID.  Defaults to ``self._conv_id``.
+            limit:   Maximum messages to return.  ``None`` (default) = all
+                     messages via backwardLink pagination (no cap).
+                     Pass an integer for a bounded single-page fetch.
 
-        When the SDK is available, delegates to ``MessagesService.get_page()``
-        which handles auth retry, HTML normalisation via ``strip_teams_html``,
-        attachment extraction, and sender resolution automatically — and uses
-        the gateway's **regional** ``msg_base`` (discovered from Skype authz).
+        When SDK is available, delegates to:
+          - ``MessagesService.get()``  (limit=None → full history via pagination)
+          - ``MessagesService.get_page()``  (limit=N → single page, poll-loop use)
 
-        Falls back to raw ``requests`` when the SDK is not importable.
+        Falls back to raw ``requests`` when SDK is not importable.
         """
         if conv_id is None:
             conv_id = self._conv_id
@@ -1621,20 +2328,35 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         try:
             if _SDK_AVAILABLE:
                 return self._fetch_via_sdk(conv_id, limit, _t0)
-
-            # --- Fallback: raw requests (SDK not importable) ---
-            return self._fetch_via_raw(conv_id, limit, _t0)
+            return self._fetch_via_raw(conv_id, limit if limit is not None else 20, _t0)
         finally:
             logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time() - _t0)
 
-    def _fetch_via_sdk(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
-        """Fetch messages using SDK MessagesService (normalised, with attachments)."""
+    def _fetch_via_sdk(self, conv_id: str, limit: Optional[int], _t0: float) -> List[dict]:
+        """Fetch messages using SDK MessagesService (normalised, with attachments).
+
+        S1-1: When limit is None, uses MessagesService.get() which follows
+        backwardLink pagination to retrieve the full history.  When limit is
+        an integer, uses get_page() for a single-page bounded fetch (poll loop).
+        """
         adapter = _SDKAuthAdapter(self._auth)
         http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
         svc = _SDKMessages(http_layer)
         try:
-            norm_msgs = svc.get_page(conv_id, page_size=limit,
-                                     msg_base=self._auth.msg_base)
+            if limit is None:
+                # Full-history fetch via backwardLink pagination (S1-1)
+                # get() returns newest-first; no reversal needed here because
+                # we reverse the final list at the end regardless.
+                norm_msgs = svc.get(conv_id)
+                logger.debug(
+                    "TeamsMTK: SDK full-history fetch: %d messages for conv=%s",
+                    len(norm_msgs), conv_id[:40],
+                )
+            else:
+                # Bounded single-page fetch (poll loop, S1-2 unchanged path)
+                norm_msgs = svc.get_page(conv_id, page_size=limit,
+                                         msg_base=self._auth.msg_base)
+
             # Back-fill raw-compatible fields so _process_new_messages works
             # unchanged across both SDK-normalised and raw-fetch messages.
             for m in norm_msgs:
@@ -1664,7 +2386,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return norm_msgs
         except Exception as e:
             logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", e)
-            return self._fetch_via_raw(conv_id, limit, _t0)
+            return self._fetch_via_raw(conv_id, limit if limit is not None else 20, _t0)
 
     def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
         """Fetch messages using raw requests (legacy, SDK unavailable)."""
@@ -1707,6 +2429,45 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             _m["_raw_properties"] = _m.get("properties")
         return list(reversed(messages))  # oldest-first for processing
 
+    def _fetch_messages_by_date(
+        self, conv_id: str, date_from: str = None, date_to: str = None, limit: int = 200
+    ) -> List[dict]:
+        """S1-3: Fetch messages in a date range via SDK get_by_date().
+
+        Args:
+            conv_id:    Conversation ID.
+            date_from:  Start date inclusive (YYYY-MM-DD), or None for no lower bound.
+            date_to:    End date inclusive (YYYY-MM-DD), or None for no upper bound.
+            limit:      Max messages to return (default 200).
+
+        Returns oldest-first list of message dicts (same format as _fetch_messages).
+        Raises RuntimeError if SDK is not available.
+        """
+        if not _SDK_AVAILABLE:
+            raise RuntimeError(
+                "_fetch_messages_by_date requires teams_skype_sdk — SDK not available"
+            )
+        self._auth._inject_truststore()
+        adapter = _SDKAuthAdapter(self._auth)
+        http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+        svc = _SDKMessages(http_layer)
+
+        norm_msgs = svc.get_by_date(
+            conv_id, date_from=date_from, date_to=date_to, limit=limit
+        )
+        logger.debug(
+            "TeamsMTK: _fetch_messages_by_date: %d messages for conv=%s [%s → %s]",
+            len(norm_msgs), conv_id[:40], date_from, date_to,
+        )
+        # Back-fill raw-compatible fields (same as _fetch_via_sdk)
+        for m in norm_msgs:
+            m.setdefault("imdisplayname", m.get("sender", ""))
+            m.setdefault("messagetype", m.get("type", "RichText/Html"))
+            m.setdefault("properties", m.get("_raw_properties") or {})
+        # SDK returns newest-first; return oldest-first for consistency
+        norm_msgs.reverse()
+        return norm_msgs
+
     async def _poll_loop(self) -> None:
         """Poll all monitored conversations for new messages every _POLL_INTERVAL seconds.
 
@@ -1725,7 +2486,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 # round-trip instead of N×round-trip.
                 fetch_tasks = {
                     _conv_id: loop.run_in_executor(
-                        executor, lambda _c=_conv_id: self._fetch_messages(_c, 20)
+                        # S1-2: limit=None → full-history pagination; _process_new_messages
+                        # already skips msgs <= _last_message_ids[conv_id], so returning
+                        # the full history is safe — only genuinely new msgs are dispatched.
+                        executor, lambda _c=_conv_id: self._fetch_messages(_c)
                     )
                     for _conv_id in self._conv_ids
                 }
@@ -1965,7 +2729,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if _strip_teams_html is not None:
                 text, _extra_imgs = _strip_teams_html(content)
             else:
-                import re
                 content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", content)
                 text = re.sub(r"<[^>]+>", "", content).strip()
                 text = re.sub(r"\s+", " ", text).strip()
@@ -1979,8 +2742,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         _att_names.append(_ei.get("alt", ""))
                         _att_kinds.append(_ei.get("kind", "image"))
             # For messages with only attachments and no text, keep a placeholder
-            # so the message isn't discarded as "empty"
+            # so the message isn't discarded as "empty".  Also treat pure
+            # markdown image links (from SDK strip_teams_html) as attach-only.
             if not text and _att_urls:
+                text = "[attachment]"
+            elif text and _att_urls and not re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text).strip():
                 text = "[attachment]"
             if not text:
                 self._last_message_ids[conv_id] = msg_id
