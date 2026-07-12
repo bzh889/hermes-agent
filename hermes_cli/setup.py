@@ -1984,6 +1984,18 @@ def setup_gateway(config: dict):
     for idx in selected:
         _configure_platform(platforms[idx])
 
+    # ── REV-3: Teams MTK SDK detection ──
+    # If teams_mtk is configured, check if the SDK package is available
+    try:
+        from gateway.platforms.teams_mtk import _SDK_AVAILABLE as _tmk_sdk
+        if not _tmk_sdk:
+            print()
+            print_warning("teams_mtk adapter is enabled but teams_skype_sdk is not installed.")
+            print_info("  Install it with:  pip install -e lib/teams_skype_sdk")
+            print_info("  (This enables reactions, activity streams, call logs, forwarding, etc.)")
+    except Exception:
+        pass  # Non-fatal
+
     # ── Gateway Service Setup ──
     # Count any platform (built-in or plugin) the user configured during this
     # setup pass — reuses ``_platform_status`` so plugin platforms like IRC

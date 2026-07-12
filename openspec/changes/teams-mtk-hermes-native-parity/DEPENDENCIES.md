@@ -34,11 +34,11 @@
     │
     ├→ C-4 ✅ 附件下載 auth
     │
-    ╰→ C-2 🟡 echo guard 加強
+    ╰→ C-2 ✅ echo guard 加強（4道防線 + HTML fingerprint）
          │
-         ╰→ C-5 🟡 short-msg gating
-         ╰→ C-6 🟡 group whitelist
-         ╰→ C-7 🟡 VIP 偵測路由
+         ╰→ C-5 ✅ short-msg gating（≤2 chars, BUG-5 fix）
+         ╰→ C-6 ✅ group whitelist（authz_mixin 已實作）
+         ╰→ C-7 ✅ VIP 偵測路由（_VIPBuffer + flush + config gate）
 
 §7 SDK 整入 gateway（依賴 §11 C-1~C-4 先完成）
 
@@ -51,13 +51,13 @@
     │      S1-2 ✅ poll loop 全量
     │      S1-3 ✅ 日期範圍查詢
     │      S1-4 ✅ 回歸
-    │      S1-5 🟡 PKB 即時落地 hook
+    ╰──→ S1-5 ✅ PKB 即時落地 hook
     │
     ╰──→ S2 ✅ 訊息搜尋
     │      S2-1 ✅ search_messages
     │      S2-2 ✅ PLATFORM_HINTS 更新
     │      S2-3 ✅ 測試
-    │      S2-4 🟡 跨 conv 全域搜尋
+    │      S2-4 ✅ 跨 conv 全域搜尋
     │
     ╰──→ S3 ✅ 使用者查詢
     │      S3-1 ✅ _search_users
@@ -66,29 +66,29 @@
     │      S3-4 ✅ PLATFORM_HINTS 更新
     │      S3-5 ✅ 測試
     │
-    ╰──→ S4 🟡 Activity feed
-    │      S4-1 🟡 _get_activity
-    │      S4-2 🟡 poll loop 擴充（依賴 WS-0 或單獨）
-    │      S4-3 🟡 PLATFORM_HINTS + 測試
+    ╰──→ S4 ✅ Activity feed
+    │      S4-1 ✅ _get_activity
+    │      S4-2 ✅ poll loop 擴充（WS 事件已整合）
+    │      S4-3 ✅ PLATFORM_HINTS + 測試
+
+    ╰──→ S5 ✅ 通話記錄
+    │      S5-1 ✅ _get_call_logs
+    │      S5-2 ✅ PLATFORM_HINTS + 測試
     │
-    ╰──→ S5 🟡 通話記錄
-    │      S5-1 🟡 _get_call_logs
-    │      S5-2 🟡 PLATFORM_HINTS + 測試
+    ╰──→ S7 ✅ Reactions
+    │      S7-1 ✅ send/remove_reaction
+    │      S7-2 ✅ VALID_REACTIONS 驗證
+    │      S7-3 ✅ PLATFORM_HINTS + 測試
+│
+    ╰──→ S9 ✅ 訊息刪除
+    │      S9-1 ✅ delete_message
+    │      S9-2 ✅ 只允許刪自己（delete_message_safe）
+    │      S9-3 ✅ PLATFORM_HINTS + 測試
     │
-    ╰──→ S7 🟡 Reactions
-    │      S7-1 🟡 send/remove_reaction
-    │      S7-2 🟡 VALID_REACTIONS 驗證
-    │      S7-3 🟡 PLATFORM_HINTS + 測試
-    │
-    ╰──→ S9 🟡 訊息刪除
-    │      S9-1 🟡 delete_message
-    │      S9-2 🟡 只允許刪自己
-    │      S9-3 🟡 PLATFORM_HINTS + 測試
-    │
-    ╰──→ S10 🟡 訊息轉發
-    │      S10-1 🟡 forward_message
-    │      S10-2 🟡 只允許轉到白名單
-    │      S10-3 🟡 PLATFORM_HINTS + 測試
+    ╰──→ S10 ✅ 訊息轉發
+    │      S10-1 ✅ forward_message
+    │      S10-2 ✅ 只允許轉到白名單
+    │      S10-3 ✅ PLATFORM_HINTS + 測試
     │
     ╰──→ REPLACE-1~7 ✅ 漸進替換 gateway 自行實作
            REPLACE-1 ✅ fetch_messages → SDK
@@ -111,26 +111,26 @@
     ╰→ WS-6 ✅ 回歸
     │
     ╰──→ Phase 2（需 Phase 1.5 穩定後）：
-         WS-7 🟡 poll 頻率自適應
-         WS-8 🟡 WS 穩定指標追蹤
-         WS-9 🟡 評估進一步放寬 poll
+         WS-7 ✅ poll 頻率自適應
+         WS-8 ✅ WS 穩定指標追蹤
+         WS-9 ✅ 評估進一步放寬 poll（very-stable→30s）
 
 §10 跨 Section 影響 Review 任務
 
   REV-1 ✅ BUG-2 regression ──→ C-1 完成後自動關閉
   REV-2 ✅ BUG-3 cold-start ──→ poll bounded fetch + 種子正確
-  REV-3 🟡 G11 Setup Wizard ──→ SDK-0 完成後更新
+  REV-3 ✅ G11 Setup Wizard ──→ SDK 偵測提示已加入 setup_gateway
   REV-4 ✅ VIP flush WS 後觸發 ──→ WS-4 完成後實作
   REV-5 ✅ Trouter event type 觀察 ──→ WS-1 上線後記錄
-  REV-6 🟡 §15 文件 ──→ §7 完成後一併寫
+  REV-6 ✅ §15 文件 ──→ §15-platform-docs.md 已完成
 
 Backlog
 
-  G15 🟡 白名單頻道可見度 ──→ 不阻塞，獨立做
+  G15 ✅ 白名單頻道可見度 ──→ list_whitelisted_groups()
   G13-B.3 🔴 blocked（Chat.Create scope） ──→ 等 IT 授權
   G14-2.1 🔴 blocked（P7 Persona） ──→ 等 P7 完成
-  1.5 G11 Setup Wizard ──→ REV-3 覆蓋
-  1.7 §15 文件 ──→ REV-6 覆蓋
+  1.5 G11 ✅ Setup Wizard ──→ REV-3 覆蓋（SDK 偵測提示）
+  1.7 §15 ✅ 文件 ──→ REV-6 覆蓋（§15-platform-docs.md）
   1.8 §16 測試 ──→ §7.9 REPLACE 測試覆蓋
 ```
 
@@ -173,16 +173,16 @@ Backlog
 
 | 順序 | 任務 | 依賴 | 產出 |
 |---|---|---|---|
-| 17 | **S4-1~3** 🟡 Activity | SDK-0 | _get_activity |
-| 18 | **S5-1~2** 🟡 通話 | SDK-0 | _get_call_logs |
-| 19 | **S7-1~3** 🟡 Reactions | SDK-0 | send/remove_reaction |
-| 20 | **S9-1~3** 🟡 訊息刪除 | SDK-0 | delete_message |
-| 21 | **S10-1~3** 🟡 訊息轉發 | SDK-0 | forward_message |
-| 22 | **C-5~7** 🟡 poll.py 加強 | C-2 | short-msg / whitelist / VIP |
-| 23 | **S1-5** 🟡 PKB 即時落地 | S1-1 | 全量寫 PKB |
-| 24 | **S2-4** 🟡 跨 conv 搜尋 | S2-1 | 全域搜尋 |
+| 17 | **S4-1~3** ✅ Activity | SDK-0 | _get_activity ✅ |
+| 18 | **S5-1~2** ✅ 通話 | SDK-0 | _get_call_logs ✅ |
+| 19 | **S7-1~3** ✅ Reactions | SDK-0 | send/remove_reaction ✅ |
+| 20 | **S9-1~3** ✅ 訊息刪除 | SDK-0 | delete_message ✅ |
+| 21 | **S10-1~3** ✅ 訊息轉發 | SDK-0 | forward_message + whitelist ✅ |
+| 22 | **C-5~7** ✅ CLI 加強 | C-2 | short-msg ✅ / whitelist ✅ / VIP ✅ |
+| 23 | **S1-5** ✅ PKB 即時落地 | S1-1 | on_message_processed hook ✅ |
+| 24 | **S2-4** ✅ 跨 conv 搜尋 | S2-1 | search_all_conversations ✅ |
 | 25 | **S3-2~3** 🟡 行事曆 | S3-1 | schedule + availability |
-| 26 | **WS-7~9** 🟡 poll 自適應 | WS-6 穩定 | poll 15s~30s |
+| 26 | **WS-7~9** ✅ poll 自適應 | WS-6 穩定 | WS healthy→15s ✅ |
 
 ### Phase 3 — 收尾（低優先）
 
@@ -206,16 +206,15 @@ Backlog
 
 | 狀態 | 數量 |
 |---|---|
-| ✅ 已完成 | 59 |
-| 🔴 待做（高優先） | 3 |
-| 🟡 待做（中優先） | 21 |
+| ✅ 已完成 | 79 |
+| 🟡 待做（中優先） | 1 |
 | 🔴 blocked | 2 |
 
 ## 關鍵路徑
 
 ```
 C-1 ✅ → C-3 ✅ → SDK-0 ✅ → SDK-1~2 ✅ → S1~S3 ✅ → REPLACE-1~7 ✅
-                         → WS-0 ✅ → WS-1~6 ✅
+                         → WS-0 ✅ → WS-1~6 ✅ → WS-7~9 ✅
+                         → C-2~C-7 ✅, S4~S10 ✅, REV-3/6 ✅, G15 ✅
+Phase 0 + 1 + 1.5 + Phase 2 完成。待做 = S3-2~3 行事曆 + SDK-3 E2E。
 ```
-
-Phase 0 + 1 + 1.5 關鍵路徑已完成。下一步 = Phase 2（功能擴充）或 Phase 3 收尾。

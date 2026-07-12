@@ -65,6 +65,7 @@ try:
     from teams_skype_sdk.api._conversations import ConversationsService as _SDKConvs
     from teams_skype_sdk.api._reactions import ReactionsService as _SDKReactions
     from teams_skype_sdk.api._constants import VALID_REACTIONS as _VALID_REACTIONS
+    from teams_skype_sdk.api._activity import ActivityService as _SDKActivity
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
@@ -702,6 +703,15 @@ class _TrouterListener:
         filtered = {k: v for k, v in params.items() if v != "" and k != "scae"}
         qs = "&".join(f"{k}={_up.quote(str(v), safe='')}" for k, v in filtered.items())
         return f"{base}socket.io/1/websocket/{session_id}?{qs}"
+
+    def is_healthy(self) -> bool:
+        """Return True if the WS connection is alive and responsive."""
+        if not self._ws or self._ws.closed:
+            return False
+        if self._last_pong_time is None:
+            return False
+        # Consider unhealthy if no pong within 2× heartbeat timeout
+        return (time.time() - self._last_pong_time) < (self._heartbeat_timeout * 2)
 
 
 # ---------------------------------------------------------------------------
@@ -2150,8 +2160,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return {"status": "error", "error": f"Invalid reaction '{reaction}'. "
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
-            if _SDK_AVAILABLE and self._auth._graph_token:
-                _svc = _SDKReactions(_SDKGraphAdapter(self._auth._graph_token))
+            if _SDK_AVAILABLE and self._auth.graph_token():
+                _svc = _SDKReactions(_SDKGraphAdapter(self._auth.graph_token()))
                 result = _svc.send(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, message_id)
                 return result
@@ -2172,8 +2182,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return {"status": "error", "error": f"Invalid reaction '{reaction}'. "
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
-            if _SDK_AVAILABLE and self._auth._graph_token:
-                _svc = _SDKReactions(_SDKGraphAdapter(self._auth._graph_token))
+            if _SDK_AVAILABLE and self._auth.graph_token():
+                _svc = _SDKReactions(_SDKGraphAdapter(self._auth.graph_token()))
                 result = _svc.remove(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, message_id)
                 return result
@@ -2197,7 +2207,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         MessagesService.delete() when available, falls back to raw API.
         """
         try:
-            if _SDK_AVAILABLE and self._auth._skype_token:
+            if _SDK_AVAILABLE and self._auth.skype_token():
                 _svc = _SDKMessages(_SDKAuthAdapter(self._auth))
                 result = _svc.delete(chat_id, message_id)
                 logger.info("TeamsMTK: deleted msg=%s in conv=%s", message_id, chat_id[:30])
@@ -2214,6 +2224,225 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("TeamsMTK: delete_message error: %s", e)
             return {"status": "error", "error": str(e)}
+
+    # ---- S4: Activity feed (spaces, notes, call logs, threads, saved) ----
+
+    async def get_activity(self, kind: str, limit: int = 20, offset: int = 0) -> list:
+        """List activity-stream items by kind.
+
+        ``kind`` is one of: spaces, notes, call_logs, threads, saved.
+        Uses SDK ActivityService when available.
+        """
+        if not _SDK_AVAILABLE or not self._auth.skype_token():
+            return [{"error": "SDK or auth unavailable"}]
+        try:
+            _svc = _SDKActivity(_SDKAuthAdapter(self._auth))
+            _method_map = {
+                "spaces": _svc.list_spaces,
+                "notes": _svc.list_notes,
+                "call_logs": _svc.list_call_logs,
+                "threads": _svc.list_threads,
+                "saved": _svc.list_saved,
+            }
+            _fn = _method_map.get(kind)
+            if not _fn:
+                return [{"error": f"Unknown activity kind '{kind}'. "
+                         f"Valid: {', '.join(sorted(_method_map))}"}]
+            result = _fn(limit=limit, offset=offset)
+            logger.info("TeamsMTK: get_activity kind=%s → %d items", kind, len(result))
+            return result
+        except Exception as e:
+            logger.error("TeamsMTK: get_activity error: %s", e)
+            return [{"error": str(e)}]
+
+    # ---- S5: Call logs (via ActivityService) ----
+
+    async def get_call_logs(self, limit: int = 20, offset: int = 0) -> list:
+        """List call history. Shortcut for get_activity('call_logs')."""
+        return await self.get_activity("call_logs", limit, offset)
+
+    # ---- S10: Message forwarding ----
+
+    async def forward_message(self, source_conv: str, message_id: str,
+                              target_conv: str, allowed_targets: list = None) -> dict:
+        """Forward a message from source to target conversation.
+
+        ``allowed_targets``: optional whitelist of target conversation IDs.
+        If set, forward is rejected if target_conv is not in the list.
+        """
+        # Whitelist check
+        if allowed_targets and target_conv not in allowed_targets:
+            logger.warning("TeamsMTK: forward rejected — target %s not in whitelist",
+                           target_conv[:30])
+            return {"status": "error",
+                    "error": f"Target conversation not in allowed list"}
+        try:
+            if _SDK_AVAILABLE and self._auth.skype_token():
+                _svc = _SDKMessages(_SDKAuthAdapter(self._auth))
+                result = _svc.forward(source_conv, message_id, target_conv)
+                logger.info("TeamsMTK: forwarded msg=%s %s→%s", message_id,
+                            source_conv[:20], target_conv[:20])
+                return result
+            # Raw fallback: fetch original then send as blockquote
+            _enc = __import__("urllib.parse", fromlist=["quote"]).quote(source_conv, safe="")
+            url = (f"https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
+                   f"/conversations/{_enc}/messages")
+            import requests as _req
+            _headers = {"Authorization": f"skype_token {self._auth.skype_token}"}
+            resp = _req.get(url, headers=_headers, params={"pageSize": 50})
+            raw_msgs = resp.json().get("messages", [])
+            original = None
+            for m in raw_msgs:
+                if str(m.get("id")) == str(message_id):
+                    original = m
+                    break
+            if not original:
+                return {"status": "error", "error": f"Message {message_id} not found"}
+            sender = original.get("imdisplayname", "Unknown")
+            content = original.get("content", "")
+            fwd_html = (f'<blockquote itemtype="http://schema.skype.com/Forward">'
+                        f'<p><strong>Forwarded from {sender}:</strong></p>'
+                        f'{content}</blockquote>')
+            return await self.send(target_conv, fwd_html)
+        except Exception as e:
+            logger.error("TeamsMTK: forward_message error: %s", e)
+            return {"status": "error", "error": str(e)}
+
+    # ---- S7-3 / S9-2~3: PLATFORM_HINTS injection ----
+
+    def get_platform_hints(self) -> str:
+        """Return a text block describing this platform's capabilities.
+
+        Injected into the agent's system prompt so it knows what it can do
+        on Teams (reactions, delete, forward, search, activity, etc.).
+        """
+        hints = [
+            "Platform: Microsoft Teams (MTK internal)",
+            "Capabilities:",
+            "  - send_message, edit_message, delete_message (own messages only)",
+            "  - send_reaction / remove_reaction (like/heart/laugh/surprised/sad/angry)",
+            "  - forward_message (with optional target whitelist)",
+            "  - search_messages (content + date range)",
+            "  - get_activity (spaces/notes/call_logs/threads/saved)",
+            "  - get_call_logs, list_conversations",
+            "  - send_image_file, send_document, send_image",
+            "  - Users: _search_users, _get_schedule, _find_common_availability",
+            "Mention gating: groups require @hermes unless require_mention=false",
+            "Short-msg gating: ≤2 chars ignored in non-mention groups (no ?/!/mention)",
+        ]
+        if self._vip_config:
+            hints.append(f"  - VIP monitor: buffered → {self._vip_config.get('notify_targets', [])}")
+        return "\n".join(hints)
+
+    # ---- S9-2: Enforce delete-only-own ----
+
+    async def delete_message_safe(self, chat_id: str, message_id: str) -> dict:
+        """Delete a message only if we are the sender (echo guard check)."""
+        # Check if this was our own message
+        if self._last_sent_message_id and str(message_id) == str(self._last_sent_message_id):
+            return await self.delete_message(chat_id, message_id)
+        if self._sent_dedup.is_duplicate(str(message_id)):
+            return await self.delete_message(chat_id, message_id)
+        # Otherwise verify via fetch that sender is us before deleting
+        try:
+            msgs = self._fetch_messages(chat_id, limit=5)
+            for m in (msgs or []):
+                if str(m.get("id")) == str(message_id):
+                    _props = m.get("properties", {}) or {}
+                    if isinstance(_props, str):
+                        import json; _props = json.loads(_props)
+                    _sender = _props.get("hermes_sender")
+                    if _sender in ("agent", "bot"):
+                        return await self.delete_message(chat_id, message_id)
+                    return {"status": "error", "error": "Cannot delete — not your message"}
+            return {"status": "error", "error": f"Message {message_id} not found"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    # ---- S1-5: PKB instant-landing hook ----
+
+    async def on_message_processed(self, chat_id: str, msg: dict, response: str = None) -> None:
+        """Hook called after a message is fully processed by the agent.
+
+        S1-5: Optionally land the conversation turn into PKB.
+        Controlled by gateway.teams_mtk.pkb_instant_landing config.
+        """
+        _cfg = self._group_config(chat_id) if "@thread" in chat_id else {}
+        if not _cfg.get("pkb_instant_landing", False):
+            return
+        # If PKB landing is enabled, write the turn to PKB
+        try:
+            _text = msg.get("content", "") or ""
+            if _strip_teams_html is not None:
+                _text, _ = _strip_teams_html(_text)
+            _sender = msg.get("imdisplayname") or "User"
+            _ts = msg.get("composetime", "") or msg.get("originalarrivaltime", "")
+            _entry = f"[{_ts}] {_sender}: {_text.strip()}"
+            if response:
+                _entry += f"\n[{_ts}] Hermes: {response[:500]}"
+            # Append to PKB file
+            _pkb_dir = _cfg.get("pkb_landing_dir", "")
+            if _pkb_dir:
+                import os
+                os.makedirs(_pkb_dir, exist_ok=True)
+                _fname = chat_id.replace(":", "_").replace("@", "_")[:40] + ".md"
+                with open(os.path.join(_pkb_dir, _fname), "a", encoding="utf-8") as f:
+                    f.write(_entry + "\n\n")
+                logger.debug("TeamsMTK: PKB landed msg to %s", _fname)
+        except Exception as e:
+            logger.warning("TeamsMTK: PKB landing error: %s", e)
+
+    # ---- S2-4: Cross-conversation global search ----
+
+    async def search_all_conversations(self, query: str, limit: int = 10) -> list:
+        """Search messages across all monitored conversations.
+
+        S2-4: Iterates _conv_ids and searches each, merging results.
+        """
+        all_results = []
+        for cid in self._conv_ids:
+            try:
+                results = self._search_messages(cid, query, limit=limit)
+                for r in (results or []):
+                    r["_source_conv"] = cid
+                all_results.extend(results or [])
+            except Exception as e:
+                logger.debug("TeamsMTK: search conv=%s error: %s", cid[:20], e)
+        # Sort by relevance (if timestamp available)
+        all_results.sort(key=lambda r: r.get("originalarrivaltime", ""), reverse=True)
+        return all_results[:limit]
+
+    # ---- G15: Whitelist visibility ----
+
+    def list_whitelisted_groups(self) -> list:
+        """List all group conversation IDs in the TeamsMTK whitelist.
+
+        G15: Lets the agent (and user) query which groups are whitelisted
+        without reading config.yaml directly.
+        """
+        try:
+            from hermes_cli.config import load_config_readonly
+            groups = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("groups", {})
+            )
+            if not isinstance(groups, dict):
+                return []
+            result = []
+            for cid, cfg in groups.items():
+                if isinstance(cfg, dict):
+                    result.append({
+                        "chat_id": cid,
+                        "require_mention": cfg.get("require_mention", True),
+                        "label": cfg.get("label", ""),
+                    })
+                else:
+                    result.append({"chat_id": cid, "require_mention": True, "label": ""})
+            return result
+        except Exception:
+            return []
 
     async def send_model_picker(
         self,
@@ -2680,10 +2909,37 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         loop = asyncio.get_event_loop()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(len(self._conv_ids), 1))
         _backoff = 1  # multiplier for _POLL_INTERVAL on errors
+        _ws_stable_ticks = 0  # consecutive successful ticks with WS healthy
+        _ws_stats = {"healthy_ticks": 0, "unhealthy_ticks": 0, "ws_reconnects": 0,
+                     "poll_interval_changes": 0}  # WS-8: stability metrics
 
         while self._running:
             try:
-                logger.info("TeamsMTK: poll tick (backoff=%dx, convs=%d)", _backoff, len(self._conv_ids))
+                # WS-7: Adaptive poll interval — when WS listener is healthy
+                # and stable, poll less frequently (15s) since WS pushes
+                # events in real-time. When WS is down, revert to 2s.
+                _active_interval = _POLL_INTERVAL
+                if self._ws_listener and self._ws_listener.is_healthy():
+                    _ws_stable_ticks += 1
+                    _ws_stats["healthy_ticks"] += 1
+                    if _ws_stable_ticks >= 5:  # 5 consecutive healthy ticks → relax
+                        _active_interval = 15  # seconds
+                        if _ws_stable_ticks == 5:
+                            _ws_stats["poll_interval_changes"] += 1
+                    if _ws_stable_ticks >= 20:  # WS-9: very stable → further relax
+                        _active_interval = 30  # seconds
+                        if _ws_stable_ticks == 20:
+                            _ws_stats["poll_interval_changes"] += 1
+                            logger.info("TeamsMTK: WS very stable (20 ticks) → poll interval 30s")
+                else:
+                    _ws_stable_ticks = 0
+                    _ws_stats["unhealthy_ticks"] += 1
+                    # Track reconnects from listener
+                    if self._ws_listener and hasattr(self._ws_listener, '_reconnect_count'):
+                        _ws_stats["ws_reconnects"] = self._ws_listener._reconnect_count
+
+                logger.info("TeamsMTK: poll tick (backoff=%dx, interval=%ds, ws_stable=%d, convs=%d)",
+                            _backoff, _active_interval, _ws_stable_ticks, len(self._conv_ids))
                 # Fetch all conversations in parallel so N convs take ~1
                 # round-trip instead of N×round-trip.
                 fetch_tasks = {
@@ -2709,7 +2965,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 logger.warning("TeamsMTK: poll error (backoff=%dx): %s", _backoff, e, exc_info=True)
 
             try:
-                await asyncio.sleep(_POLL_INTERVAL * _backoff)
+                await asyncio.sleep(_active_interval * _backoff)
             except asyncio.CancelledError:
                 break
 
