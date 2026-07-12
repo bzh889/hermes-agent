@@ -2328,7 +2328,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         try:
             if _SDK_AVAILABLE:
                 return self._fetch_via_sdk(conv_id, limit, _t0)
-            return self._fetch_via_raw(conv_id, limit if limit is not None else 20, _t0)
+            return self._fetch_via_raw(conv_id, limit if limit is not None else 30, _t0)
         finally:
             logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time() - _t0)
 
@@ -2386,7 +2386,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return norm_msgs
         except Exception as e:
             logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", e)
-            return self._fetch_via_raw(conv_id, limit if limit is not None else 20, _t0)
+            return self._fetch_via_raw(conv_id, limit if limit is not None else 30, _t0)
 
     def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
         """Fetch messages using raw requests (legacy, SDK unavailable)."""
@@ -2486,10 +2486,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 # round-trip instead of N×round-trip.
                 fetch_tasks = {
                     _conv_id: loop.run_in_executor(
-                        # S1-2: limit=None → full-history pagination; _process_new_messages
-                        # already skips msgs <= _last_message_ids[conv_id], so returning
-                        # the full history is safe — only genuinely new msgs are dispatched.
-                        executor, lambda _c=_conv_id: self._fetch_messages(_c)
+                        # S1-2: Poll uses bounded fetch (limit=30) for efficiency.
+                        # Full-history (limit=None) is reserved for explicit
+                        # search/history queries, not every poll tick.
+                        # _process_new_messages skips msgs <= last_message_id,
+                        # so 30 recent messages is more than enough.
+                        executor, lambda _c=_conv_id: self._fetch_messages(_c, limit=30)
                     )
                     for _conv_id in self._conv_ids
                 }
@@ -2752,6 +2754,21 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._last_message_ids[conv_id] = msg_id
                 continue
 
+            # Control commands (/stop, /new, /reset, /approve, /deny, /status, etc.)
+            # MUST bypass mention gating — a user typing "/stop" in a group
+            # without @hermes should still be able to interrupt the agent.
+            # Follows the same bypass list as base adapter's
+            # should_bypass_active_session().
+            _cmd_name = None
+            if text.startswith("/") and len(text.split()) <= 2:
+                _raw_cmd = text.split()[0][1:].lower()
+                if "@" in _raw_cmd:
+                    _raw_cmd = _raw_cmd.split("@", 1)[0]
+                _cmd_name = _raw_cmd
+
+            from hermes_cli.commands import should_bypass_active_session
+            _is_control_cmd = _cmd_name and should_bypass_active_session(_cmd_name)
+
             # Mention gating: in groups, only respond when @hermes is present.
             # Resolution order: gateway.teams_mtk.groups.<id>.require_mention
             # (config.yaml, set via `hermes teams-mtk group add/set`) → the
@@ -2766,7 +2783,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 effective_require_mention = False
             else:
                 effective_require_mention = self.require_mention
-            if is_group and effective_require_mention:
+            if is_group and effective_require_mention and not _is_control_cmd:
                 if self._MENTION_TAG.lower() not in text.lower():
                     logger.debug(
                         "TeamsMTK: ignoring group message (require_mention=true, no %s): %s",
@@ -2783,7 +2800,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # message from reaching the agent entirely, replying with a
             # fixed refusal notice instead. Checked after mention-tag
             # stripping so the pattern only sees the actual question text.
-            if is_group:
+            # Control commands bypass keyword blocking (same as mention gating).
+            if is_group and not _is_control_cmd:
                 _blocked_patterns = self._group_blocked_keyword_patterns(conv_id)
                 _hit = self._find_blocked_keyword(text, _blocked_patterns)
                 if _hit:

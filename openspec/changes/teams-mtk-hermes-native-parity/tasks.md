@@ -889,8 +889,8 @@
 
 | 任務 | 來源 | 優先度 |
 |---|---|---|
-| **REV-1** 🔴：BUG-2 regression check——驗證 SDK `HTTPLayer` 的 `<at>` regex 保留 `@` 前綴。如果不正確則 patch SDK 再替換 | 10.5 BUG-2 | 🔴 |
-| **REV-2** 🔴：BUG-3 cold-start regression——全量拉取（§8.10）替換後重新測試 cold-start catchup 種子邏輯 | 10.5 BUG-3 | 🔴 |
+| **REV-1** ✅：BUG-2 regression——SDK `<at>` regex 已修正 → REV-1 自動關閉 | 10.5 BUG-2 | ✅ |
+| **REV-2** ✅：BUG-3 cold-start——poll loop 改 bounded fetch limit=30，種子邏輯正確，全量拉取限於 search/history 查詢 | 10.5 BUG-3 | ✅ |
 | **REV-3** 🟡：G11 Setup Wizard 更新——SDK 整入後設定流程需引導 SDK 安裝 | 10.1 G11 | 🟡 |
 | **REV-4** ✅：G14 `_VIPBuffer.check_flush()` 增加 WS event 後觸發——`_on_ws_event()` → `_process_new_messages()` 統一入口 | 10.6 | ✅ |
 | **REV-5** ✅：§9 `_TrouterListener._event_types` 觀察 Trouter event type——`event_types_log` 屬性記錄最近 50 種事件 | 10.4/10.8 | ✅ |
