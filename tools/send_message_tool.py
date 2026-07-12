@@ -308,7 +308,74 @@ def _handle_send(args):
     chat_id = None
     thread_id = None
 
-    if target_ref:
+    # G13-A.3/B.2: "teams_mtk:contact:<display name>" resolves against
+    # conversations Hermes has already talked to.  First try substring
+    # match on conversation title/member names; if no hit, fall back to
+    # people.py search (Graph /me/people) to get the OID and re-match
+    # against conversation member OIDs.  If still nothing, the contact
+    # has no existing 1:1 or group with Hermes — we cannot create a new
+    # chat (Chat.Create scope unavailable) so we tell the user to open
+    # the conversation manually in Teams first.
+    # No new tool schema; this is a target-string extension on the
+    # existing send_message tool (Footprint Ladder tier 1).
+    if platform_name == "teams_mtk" and target_ref and target_ref.lower().startswith("contact:"):
+        contact_name = target_ref[len("contact:"):].strip()
+        if not contact_name:
+            return tool_error("teams_mtk contact target requires a name: 'teams_mtk:contact:<display name>'")
+        try:
+            from gateway.run import _gateway_runner_ref
+            from gateway.config import Platform as _Platform
+            runner = _gateway_runner_ref()
+            adapter = runner.adapters.get(_Platform.TEAMS_MTK) if runner is not None else None
+        except Exception:
+            adapter = None
+        if adapter is None:
+            return tool_error("teams_mtk contact lookup requires a live gateway with TeamsMTK connected")
+
+        # B.2 step 1: substring match on title / member display names
+        resolved_chat_id = adapter._find_conv_by_display_name(contact_name)
+
+        # B.2 step 2: people.py OID fallback
+        # NOTE: Skype /conversations does not return member OIDs, and
+        # Graph Chat.Read scope is unavailable, so OID-based conv
+        # matching is not possible.  Keep people.py to enrich the error
+        # message with the contact's display name from directory.
+        if not resolved_chat_id:
+            _found_in_directory = False
+            try:
+                import subprocess, os as _os
+                _people_script = _os.path.expanduser("~/.hermes/skills/m365/scripts/people.py")
+                _r = subprocess.run(
+                    ["python", _people_script, "search", "--query", contact_name],
+                    capture_output=True, text=True, timeout=15,
+                    env={**_os.environ, "PYTHONPATH": ""},
+                )
+                if _r.returncode == 0 and _r.stdout.strip():
+                    import json as _json
+                    _data = _json.loads(_r.stdout)
+                    _people = _data.get("people") or []
+                    if _people:
+                        _found_in_directory = True
+                        # Use canonical name from directory for clearer error
+                        contact_name = _people[0].get("displayName", contact_name)
+            except Exception:
+                pass
+
+        # B.3: No existing conversation — cannot create (Chat.Create scope
+        # unavailable).  Tell the user to open the chat manually.
+        if not resolved_chat_id:
+            _dir_note = ""
+            if _found_in_directory:
+                _dir_note = f" (found in directory as '{contact_name}')"
+            return tool_error(
+                f"No existing TeamsMTK conversation found for '{contact_name}'{_dir_note}. "
+                f"Hermes can only message people it has already talked to. "
+                f"Open a 1:1 chat with {contact_name} in Teams first, "
+                f"then Hermes will see it on the next poll cycle."
+            )
+        chat_id = resolved_chat_id
+        is_explicit = True
+    elif target_ref:
         chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
     else:
         is_explicit = False
@@ -536,6 +603,18 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         # are explicit targets — pass through verbatim. E.164 '+' numbers fall
         # through to the _PHONE_PLATFORMS handler below.
         if _WHATSAPP_JID_RE.fullmatch(target_ref):
+            return target_ref.strip(), None, True
+    if platform_name == "teams_mtk":
+        # Raw Skype/Teams conversation IDs are explicit targets — pass
+        # through verbatim. Formats: "19:...@thread.v2" (group),
+        # "19:...@unq.gbl.spaces" (1:1 chat), "8:orgid:..." (user MRI),
+        # "48:notes" (self-chat). All contain a ":" so they'd otherwise
+        # fall through to channel-name resolution and fail to match.
+        if ":" in target_ref and (
+            target_ref.startswith("19:")
+            or target_ref.startswith("8:orgid:")
+            or target_ref.startswith("48:notes")
+        ):
             return target_ref.strip(), None, True
     stripped_target = target_ref.strip()
     if platform_name == "signal" and stripped_target.startswith("group:"):

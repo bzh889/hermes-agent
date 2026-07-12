@@ -2816,6 +2816,13 @@ DEFAULT_CONFIG = {
             # conversation. Prevents flooding when the agent fires
             # multiple rapid sends within one turn. 0 = disabled.
             "reply_throttle_seconds": 0,
+            # Adaptive Card (static, read-only display). Disabled by
+            # default because cards are purely visual—buttons requiring
+            # invoke callbacks cannot work under the polling architecture.
+            # Enable via `hermes config set gateway.teams_mtk.adaptive_cards.enabled true`.
+            "adaptive_cards": {
+                "enabled": False,
+            },
         },
     },
 

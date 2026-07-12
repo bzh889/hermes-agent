@@ -34,21 +34,30 @@ from typing import Any, Dict, List, Optional
 from gateway.platforms.base import BasePlatformAdapter
 
 # SDK pure-function HTML stripper (no auth/instance required)
+#
+# NOTE: the package's installed top-level module is ``teams_skype_sdk``
+# (see lib/teams_skype_sdk/pyproject.toml — [tool.setuptools.packages.find]
+# include = ["teams_skype_sdk*"]), not ``src``. The original "src.api.*"
+# imports below silently failed on every machine (ModuleNotFoundError,
+# swallowed by the bare except ImportError), so _SDK_AVAILABLE was always
+# False and every code path that branches on it fell through to the regex/
+# aiohttp fallback — functionally safe, but the SDK integration from the
+# "Phase1 SDK integration" commit was never actually exercised.
 try:
-    from src.api._http import strip_teams_html as _strip_teams_html
+    from teams_skype_sdk.api._http import strip_teams_html as _strip_teams_html
 except ImportError:
     _strip_teams_html = None  # fallback to regex if SDK not on path
 
 # SDK download_with_auth_url for domain-appropriate attachment downloads
 try:
-    from src.api._http import download_with_auth_url as _sdk_download
+    from teams_skype_sdk.api._http import download_with_auth_url as _sdk_download
 except ImportError:
     _sdk_download = None  # fallback to aiohttp when SDK not on path
 
 # SDK MessagesService for normalized message fetching
 try:
-    from src.api._http import HTTPLayer as _SDKHTTPLayer
-    from src.api._messages import MessagesService as _SDKMessages
+    from teams_skype_sdk.api._http import HTTPLayer as _SDKHTTPLayer
+    from teams_skype_sdk.api._messages import MessagesService as _SDKMessages
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
@@ -254,6 +263,60 @@ class _TeamsAuth:
 
     def access_token(self) -> str:
         return self.tokens()["access_token"]
+
+    # Graph API scope used by graph_token() — distinct from the Skype scope
+    # (_SKYPE_SCOPE) used by _refresh(). Cached separately in the same token
+    # cache file under graph_token/graph_token_saved_at/graph_token_expires_in
+    # so a Graph refresh never disturbs the Skype token's expiry bookkeeping.
+    _GRAPH_SCOPE = "https://graph.microsoft.com/.default offline_access"
+
+    def graph_token(self) -> str:
+        """Return a valid Microsoft Graph API access token.
+
+        Used by send_document() (OneDrive upload + share link) and the m365
+        skill scripts. Exchanges the cached refresh_token for a Graph-scoped
+        access token via the same OAuth client as the Skype token flow, and
+        caches the result (graph_token / graph_token_saved_at /
+        graph_token_expires_in) alongside the Skype tokens so repeated calls
+        within the token lifetime are free.
+        """
+        import requests
+
+        with self._lock:
+            tok = self._load()
+            saved_at = tok.get("graph_token_saved_at", 0)
+            expires_in = tok.get("graph_token_expires_in", 0)
+            if tok.get("graph_token") and time.time() < saved_at + expires_in - 300:
+                return tok["graph_token"]
+
+            self._inject_truststore()
+            refresh_token = tok.get("refresh_token", "")
+            if not refresh_token:
+                raise RuntimeError(
+                    "No refresh_token in cache — re-authenticate: "
+                    "python ~/.claude/skills/teams/auth_run.py"
+                )
+            resp = requests.post(
+                _TOKEN_URL,
+                data={
+                    "client_id": _CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "scope": self._GRAPH_SCOPE,
+                },
+                verify=False,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            new_tok = resp.json()
+
+            tok["graph_token"] = new_tok["access_token"]
+            tok["graph_token_saved_at"] = int(time.time())
+            tok["graph_token_expires_in"] = new_tok.get("expires_in", 3600)
+            if new_tok.get("refresh_token"):
+                tok["refresh_token"] = new_tok["refresh_token"]
+            self._save(tok)
+            return tok["graph_token"]
 
     def _force_refresh(self) -> None:
         """Force a token refresh regardless of expiry (e.g. on 401)."""
@@ -788,6 +851,417 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", e)
             return SendResult(success=False, error=str(e))
+
+    # ---- G-MEDIA: image / document / adaptive card sending ----
+
+    # AMS (Async Media Service) endpoints — reverse-engineered from the teams
+    # skill's src/api/_files.py + src/api/_constants.py. AMS uses a DIFFERENT
+    # auth header format than the chat service ("skype_token {token}", not
+    # "skypetoken={token}") and requires the Teams desktop User-Agent.
+    _AMS_BASE_URL = "https://api.asm.skype.com/v1/objects"
+    _AMS_USER_AGENT = "27/1.0.0.0"
+
+    async def send_image_file(self, chat_id: str, path: str, caption: str = "") -> "SendResult":
+        """Upload a local image to AMS and send it inline (AMS 3-step flow).
+
+        Step 1: POST /v1/objects — create an AMS object with read permission
+                scoped to this conversation ({"type": "pish/image",
+                "permissions": {chat_id: ["read"]}}).
+        Step 2: PUT /v1/objects/{id}/content/imgpsh — upload the raw image
+                bytes (NOT /content/original — that path 404s for this object
+                type).
+        Step 3: POST .../messages with an <img> tag using the AMSImage schema
+                markup and "amsreferences": [object_id] so Teams renders it
+                as a native inline image instead of a plain link.
+        """
+        from gateway.platforms.base import SendResult
+        import mimetypes, requests
+        try:
+            with open(path, "rb") as f:
+                image_data = f.read()
+        except OSError as e:
+            return SendResult(success=False, error=f"Cannot read image file: {e}")
+
+        content_type = mimetypes.guess_type(path)[0] or "image/png"
+
+        try:
+            self._auth._inject_truststore()
+            skype_token = self._auth.skype_token()
+            ams_headers = {
+                "Authorization": f"skype_token {skype_token}",
+                "User-Agent": self._AMS_USER_AGENT,
+            }
+
+            # Step 1: create AMS object
+            create_resp = requests.post(
+                self._AMS_BASE_URL,
+                headers={**ams_headers, "Content-Type": "application/json"},
+                json={"type": "pish/image", "permissions": {chat_id: ["read"]}},
+                verify=False,
+                timeout=30,
+            )
+            create_resp.raise_for_status()
+            ams_id = create_resp.json()["id"]
+
+            # Step 2: upload image binary
+            upload_resp = requests.put(
+                f"{self._AMS_BASE_URL}/{ams_id}/content/imgpsh",
+                headers={**ams_headers, "Content-Type": content_type},
+                data=image_data,
+                verify=False,
+                timeout=(10, 120),
+            )
+            upload_resp.raise_for_status()
+
+            # Step 3: send message referencing the AMS object
+            img_url = f"{self._AMS_BASE_URL}/{ams_id}/views/imgo"
+            img_html = (
+                f'<div itemscope itemtype="http://schema.skype.com/AMSImage">'
+                f'<img src="{img_url}" itemid="{ams_id}" '
+                f'itemtype="http://schema.skype.com/AMSImage">'
+                f'</div>'
+            )
+            html_content = f"{caption}<br>{img_html}" if caption else img_html
+
+            await self._maybe_throttle(chat_id)
+            msg_url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+            payload = {
+                "content": html_content,
+                "messagetype": "RichText/Html",
+                "contenttype": "text",
+                "amsreferences": [ams_id],
+            }
+            msg_resp = requests.post(
+                msg_url,
+                json=payload,
+                headers={
+                    "Authentication": f"skypetoken={skype_token}",
+                    "Content-Type": "application/json",
+                },
+                verify=False,
+                timeout=15,
+            )
+            msg_resp.raise_for_status()
+            msg_id = msg_resp.json().get("id")
+            if msg_id:
+                self._last_sent_message_id = str(msg_id)
+            return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+        except Exception as e:
+            logger.warning("TeamsMTK: send_image_file failed: %s", e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_image(self, chat_id: str, image_url_or_path: str, caption: str = "") -> "SendResult":
+        """Send an image from an AMS URL (direct embed) or any other source.
+
+        AMS URLs (api.asm.skype.com/v1/objects/...) are embedded directly
+        with the AMSImage schema markup — no re-upload needed, the object
+        already exists and this conversation may already have read access
+        (or will be granted it via the message send). Any other URL is
+        downloaded to a temp file and delegated to send_image_file() so it
+        goes through the full AMS upload pipeline. A local filesystem path
+        is treated the same way (delegated to send_image_file() directly).
+        """
+        from gateway.platforms.base import SendResult
+        import re as _re, requests
+
+        if _re.match(r"^https?://", image_url_or_path) and "asm.skype.com" in image_url_or_path:
+            ams_id_match = _re.search(r"/objects/([^/]+)/", image_url_or_path)
+            ams_id = ams_id_match.group(1) if ams_id_match else ""
+            img_html = (
+                f'<div itemscope itemtype="http://schema.skype.com/AMSImage">'
+                f'<img src="{image_url_or_path}" itemid="{ams_id}" '
+                f'itemtype="http://schema.skype.com/AMSImage">'
+                f'</div>'
+            )
+            html_content = f"{caption}<br>{img_html}" if caption else img_html
+            try:
+                await self._maybe_throttle(chat_id)
+                self._auth._inject_truststore()
+                skype_token = self._auth.skype_token()
+                msg_url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+                payload = {
+                    "content": html_content,
+                    "messagetype": "RichText/Html",
+                    "contenttype": "text",
+                }
+                if ams_id:
+                    payload["amsreferences"] = [ams_id]
+                resp = requests.post(
+                    msg_url,
+                    json=payload,
+                    headers={
+                        "Authentication": f"skypetoken={skype_token}",
+                        "Content-Type": "application/json",
+                    },
+                    verify=False,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                msg_id = resp.json().get("id")
+                if msg_id:
+                    self._last_sent_message_id = str(msg_id)
+                return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+            except Exception as e:
+                logger.warning("TeamsMTK: send_image (AMS direct embed) failed: %s", e)
+                return SendResult(success=False, error=str(e))
+
+        if _re.match(r"^https?://", image_url_or_path):
+            # Remote (non-AMS) URL — download then delegate to send_image_file.
+            import tempfile, os as _os
+            try:
+                dl_resp = requests.get(image_url_or_path, timeout=30, verify=False)
+                dl_resp.raise_for_status()
+                content_type = dl_resp.headers.get("Content-Type", "image/png")
+                ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+                       "image/webp": ".webp"}.get(content_type.split(";")[0].strip(), ".png")
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                    for chunk in dl_resp.iter_content(65536):
+                        tf.write(chunk)
+                    tmp_path = tf.name
+                try:
+                    return await self.send_image_file(chat_id, tmp_path, caption=caption)
+                finally:
+                    try:
+                        _os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                logger.warning("TeamsMTK: send_image (remote download) failed: %s", e)
+                return SendResult(success=False, error=str(e))
+
+        # Local filesystem path.
+        return await self.send_image_file(chat_id, image_url_or_path, caption=caption)
+
+    async def send_document(self, chat_id: str, path: str, caption: str = "") -> "SendResult":
+        """Upload a local file to OneDrive and share a clickable link.
+
+        Flow: Graph API PUT (simple upload for the file sizes Hermes deals
+        with) -> Graph API POST createLink (organization-scoped view link)
+        -> a plain HTML message with the filename + link. Falls back to a
+        text notice via send() if the Graph upload fails (e.g. Graph scope
+        not granted) rather than raising and losing the whole turn's reply.
+        """
+        from gateway.platforms.base import SendResult
+        import os as _os, requests
+
+        filename = _os.path.basename(path)
+        try:
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+        except OSError as e:
+            return SendResult(success=False, error=f"Cannot read file: {e}")
+
+        try:
+            self._auth._inject_truststore()
+            graph_token = self._auth.graph_token()
+            headers = {
+                "Authorization": f"Bearer {graph_token}",
+                "Content-Type": "application/octet-stream",
+            }
+            # Simple upload — Graph's simple-PUT path caps at 4MB; larger
+            # files would need the upload-session flow, but Hermes-generated
+            # attachments (skill outputs, screenshots, docs) are well under
+            # that in practice, so the session flow is left as a follow-up.
+            import time as _time, uuid as _uuid
+            unique_name = f"{int(_time.time())}_{_uuid.uuid4().hex[:8]}{_os.path.splitext(filename)[1]}"
+            target_path = f"/Microsoft Teams Chat Files/TeamsMCP/{unique_name}"
+            upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:{target_path}:/content"
+            upload_resp = requests.put(
+                upload_url, headers=headers, data=file_bytes, verify=False, timeout=(10, 120),
+            )
+            if upload_resp.status_code not in (200, 201):
+                logger.warning(
+                    "TeamsMTK: send_document upload failed (%s): %s",
+                    upload_resp.status_code, upload_resp.text[:300],
+                )
+                fallback_text = f"{caption}\n\n[Could not upload {filename} — Graph API error]".strip()
+                await self.send(chat_id=chat_id, content=fallback_text)
+                return SendResult(success=False, error=f"Graph upload failed: {upload_resp.status_code}")
+            upload_resp.raise_for_status()
+            item = upload_resp.json()
+            item_id = item["id"]
+            web_url = item.get("webUrl", "")
+
+            share_url = web_url
+            try:
+                share_resp = requests.post(
+                    f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink",
+                    headers={"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"},
+                    json={"type": "view", "scope": "organization"},
+                    verify=False,
+                    timeout=30,
+                )
+                share_resp.raise_for_status()
+                share_url = share_resp.json().get("link", {}).get("webUrl", "") or web_url
+            except Exception:
+                pass  # Non-fatal — fall back to the plain webUrl.
+
+            html_content = (
+                f'{caption}<br>' if caption else ""
+            ) + f'📎 <a href="{share_url}">{item.get("name", filename)}</a>'
+
+            await self._maybe_throttle(chat_id)
+            skype_token = self._auth.skype_token()
+            msg_url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+            html_wrapped, _ = self._build_html(html_content, _skip_footer_extract=True)
+            payload = {"content": html_wrapped, "messagetype": "RichText/Html", "contenttype": "text"}
+            msg_resp = requests.post(
+                msg_url,
+                json=payload,
+                headers={"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"},
+                verify=False,
+                timeout=15,
+            )
+            msg_resp.raise_for_status()
+            msg_id = msg_resp.json().get("id")
+            if msg_id:
+                self._last_sent_message_id = str(msg_id)
+            return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+        except Exception as e:
+            logger.warning("TeamsMTK: send_document failed: %s", e)
+            try:
+                await self.send(chat_id=chat_id, content=f"{caption}\n\n[Could not send document {filename}: {e}]".strip())
+            except Exception:
+                pass
+            return SendResult(success=False, error=str(e))
+
+    async def send_adaptive_card(
+        self, chat_id: str, card: Dict[str, Any], fallback_text: str = "",
+    ) -> "SendResult":
+        """Send an Adaptive Card (static, read-only display) — G-MEDIA-4.
+
+        Disabled by default (gateway.teams_mtk.adaptive_cards.enabled) because
+        this polling architecture has no invoke-callback endpoint — any card
+        with Action.Submit/Action.OpenUrl buttons would render but silently
+        do nothing when clicked, which is worse than not sending a card at
+        all. When enabled, the card must be purely informational.
+
+        Encoding note: the top-level "attachments" array (the Bot
+        Framework / Graph convention for adaptive cards) is silently dropped
+        by the Skype consumer messaging endpoint — verified via a real
+        POST+GET readback. ``properties.cards`` (a JSON-stringified list) is
+        the encoding that actually persists and renders server-side.
+        """
+        from gateway.platforms.base import SendResult
+        from hermes_cli.config import load_config_readonly
+        import requests
+
+        try:
+            cfg = load_config_readonly()
+        except Exception:
+            cfg = {}
+        enabled = bool(
+            (cfg.get("gateway", {}) or {})
+            .get("teams_mtk", {})
+            .get("adaptive_cards", {})
+            .get("enabled", False)
+        )
+        if not enabled:
+            if fallback_text:
+                return await self.send(chat_id=chat_id, content=fallback_text, metadata=None)
+            return SendResult(success=False, error="Adaptive cards are disabled (gateway.teams_mtk.adaptive_cards.enabled=false) and no fallback_text was provided")
+
+        try:
+            await self._maybe_throttle(chat_id)
+            self._auth._inject_truststore()
+            skype_token = self._auth.skype_token()
+            msg_url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+            cards_json = json.dumps([{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card,
+            }])
+            payload = {
+                "content": "",
+                "messagetype": "RichText/Html",
+                "contenttype": "text",
+                "properties": {"cards": cards_json},
+            }
+            resp = requests.post(
+                msg_url,
+                json=payload,
+                headers={"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"},
+                verify=False,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            msg_id = resp.json().get("id")
+            if msg_id:
+                self._last_sent_message_id = str(msg_id)
+            return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+        except Exception as e:
+            logger.warning("TeamsMTK: send_adaptive_card failed (%s) — falling back to text", e)
+            if fallback_text:
+                return await self.send(chat_id=chat_id, content=fallback_text, metadata=None)
+            return SendResult(success=False, error=str(e))
+
+    # ---- G13-A: read-only contact / conversation lookup ----
+
+    def list_conversations(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List conversations visible to this account via the Skype chat service.
+
+        Read-only, no new OAuth scope needed (chatSvc GET /conversations is
+        already covered by the Skype token this adapter uses for send/poll).
+        Returns a flat list of {id, title, type, member_names} dicts so
+        _find_conv_by_display_name() can do a simple substring match without
+        each caller re-parsing the raw Skype response shape.
+        """
+        import requests
+        try:
+            self._auth._inject_truststore()
+            skype_token = self._auth.skype_token()
+            url = f"{self._auth.msg_base}/conversations"
+            session = requests.Session()
+            resp = session.get(
+                url,
+                headers={"Authentication": f"skypetoken={skype_token}"},
+                verify=False,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("TeamsMTK: list_conversations failed: %s", e)
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for conv in (data.get("conversations") or [])[:limit]:
+            thread_props = conv.get("threadProperties") or {}
+            title = thread_props.get("topic", "")
+            conv_type = thread_props.get("threadType", "")
+            members = conv.get("members") or []
+            member_names = ", ".join(
+                m.get("imdisplayname") or m.get("friendlyName") or ""
+                for m in members
+                if m.get("imdisplayname") or m.get("friendlyName")
+            )
+            results.append({
+                "id": conv.get("id", ""),
+                "title": title,
+                "type": conv_type,
+                "member_names": member_names,
+            })
+        return results
+
+    def _find_conv_by_display_name(self, name: str) -> Optional[str]:
+        """Case-insensitive substring match on conversation title or member names.
+
+        Returns the conversation id of the first match, or None if *name*
+        is blank or no existing conversation matches. Deliberately does NOT
+        create a new chat — Hermes can only message people/groups it has
+        already talked to (Chat.Create Graph scope is unavailable), which is
+        the safety property G13 relies on: an unknown contact is simply
+        unreachable via this path, no separate authorization gate needed.
+        """
+        name = (name or "").strip()
+        if not name:
+            return None
+        needle = name.lower()
+        for conv in self.list_conversations(limit=200):
+            if needle in (conv.get("title") or "").lower():
+                return conv.get("id")
+            if needle in (conv.get("member_names") or "").lower():
+                return conv.get("id")
+        return None
 
     async def cancel_background_tasks(self) -> None:
         """Cancel poll task, then delegate to base for in-flight message tasks."""
@@ -1646,3 +2120,117 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 logger.error("TeamsMTK: handler error for message %s: %s", msg_id, e, exc_info=True)
             finally:
                 self._last_message_ids[conv_id] = msg_id
+
+
+# ---------------------------------------------------------------------------
+# Out-of-process standalone sender + platform_registry registration
+# ---------------------------------------------------------------------------
+#
+# teams_mtk historically lived entirely outside gateway.platform_registry —
+# the adapter was only ever constructed via the hardcoded if/elif chain in
+# gateway/run.py's _create_adapter(). That works fine while the gateway
+# process itself is alive and holding a live adapter instance, but it means
+# tools/send_message_tool._send_via_adapter() has no fallback path when the
+# caller (cron, running in-process alongside the gateway but hitting the
+# runner weakref before it's bound, or a genuinely separate process) can't
+# get a live adapter reference: "No live adapter for platform 'teams_mtk'...
+# the platform plugin must register a standalone_sender_fn on its
+# PlatformEntry." Registering here (even though teams_mtk is a built-in, not
+# a plugin) gives every out-of-process caller — cron deliver=teams_mtk being
+# the concrete case that surfaced this — the same fallback plugin platforms
+# already have.
+
+async def _standalone_send(
+    pconfig,
+    chat_id,
+    message,
+    *,
+    thread_id=None,
+    media_files=None,
+    force_document=False,
+):
+    """Out-of-process TeamsMTK delivery — builds a transient adapter and sends.
+
+    Implements the standalone_sender_fn contract (see
+    gateway/platform_registry.py::PlatformEntry.standalone_sender_fn) so
+    ``deliver=teams_mtk`` cron jobs succeed even when the caller can't reach
+    the gateway's live adapter instance. Auth is self-contained (the
+    ~/.teams-tokens/token_cache.json cache _TeamsAuth reads from), so no
+    pconfig fields are required beyond what TeamsMTKAdapter.__init__ already
+    reads from the MTK_TEAMS_CONVERSATION_ID env var.
+
+    MEDIA: tags are handled by the caller (BasePlatformAdapter.extract_media
+    splits them out of *message* before this is invoked) — media_files here
+    are delivered natively via send_image_file/send_document based on file
+    extension, mirroring the live adapter's in-band capability.
+    """
+    media_files = media_files or []
+    try:
+        adapter = TeamsMTKAdapter(pconfig)
+    except Exception as e:
+        return {"error": f"TeamsMTK standalone send: failed to construct adapter: {e}"}
+
+    try:
+        last_result = None
+        if message and message.strip():
+            last_result = await adapter.send(chat_id, message)
+            if not last_result.success:
+                return {"error": f"TeamsMTK send failed: {last_result.error}"}
+
+        _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+        for media_path, _is_voice in media_files:
+            if not os.path.exists(media_path):
+                return {"error": f"Media file not found: {media_path}"}
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _IMAGE_EXTS:
+                last_result = await adapter.send_image_file(chat_id, media_path)
+            else:
+                last_result = await adapter.send_document(chat_id, media_path)
+            if not last_result.success:
+                return {"error": f"TeamsMTK media send failed: {last_result.error}"}
+
+        if last_result is None:
+            return {"error": "No deliverable text or media remained after processing MEDIA tags"}
+        return {
+            "success": True,
+            "platform": "teams_mtk",
+            "chat_id": chat_id,
+            "message_id": last_result.message_id,
+        }
+    except Exception as e:
+        return {"error": f"TeamsMTK standalone send failed: {e}"}
+
+
+def _is_connected(config) -> bool:
+    """TeamsMTK is connected when MTK_TEAMS_CONVERSATION_ID is set and the
+    skypetoken cache exists — mirrors check_teams_mtk_requirements()."""
+    return check_teams_mtk_requirements()
+
+
+def _register_teams_mtk_platform() -> None:
+    """Register teams_mtk with platform_registry so out-of-process callers
+    (cron, standalone send_message) get the standalone_sender_fn fallback.
+
+    This does NOT change how the live gateway constructs its adapter —
+    gateway/run.py's _create_adapter() checks platform_registry first (see
+    GatewayRunner._create_adapter), so this registration becomes the live
+    construction path too, but with the identical factory (TeamsMTKAdapter)
+    and identical check_fn (check_teams_mtk_requirements) it previously used
+    in the hardcoded if/elif branch. No behavior change for the live path;
+    the new capability is purely the standalone_sender_fn fallback.
+    """
+    from gateway.platform_registry import platform_registry, PlatformEntry
+
+    platform_registry.register(PlatformEntry(
+        name="teams_mtk",
+        label="Microsoft Teams (MTK)",
+        adapter_factory=lambda cfg: TeamsMTKAdapter(cfg),
+        check_fn=check_teams_mtk_requirements,
+        is_connected=_is_connected,
+        source="builtin",
+        standalone_sender_fn=_standalone_send,
+        emoji="👥",
+    ))
+
+
+_register_teams_mtk_platform()

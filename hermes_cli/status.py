@@ -438,6 +438,11 @@ def show_status(args):
         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
         "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
         "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL"),
+        # TeamsMTK has no separate token var — MTK_TEAMS_CONVERSATION_ID doubles
+        # as both the "configured" signal and the home channel (it IS the
+        # conversation being monitored; auth lives in the skypetoken cache,
+        # not an env var). See gateway/platforms/teams_mtk.py.
+        "TeamsMTK": ("MTK_TEAMS_CONVERSATION_ID", "MTK_TEAMS_CONVERSATION_ID"),
     }
 
     for name, (token_var, home_var) in platforms.items():
