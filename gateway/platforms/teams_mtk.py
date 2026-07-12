@@ -63,9 +63,12 @@ try:
     from teams_skype_sdk.api._messages import MessagesService as _SDKMessages
     from teams_skype_sdk.api._files import FilesService as _SDKFiles
     from teams_skype_sdk.api._conversations import ConversationsService as _SDKConvs
+    from teams_skype_sdk.api._reactions import ReactionsService as _SDKReactions
+    from teams_skype_sdk.api._constants import VALID_REACTIONS as _VALID_REACTIONS
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
+    _VALID_REACTIONS = {"like", "heart", "laugh", "surprised", "sad", "angry"}
 
 logger = logging.getLogger(__name__)
 
@@ -702,6 +705,80 @@ class _TrouterListener:
 
 
 # ---------------------------------------------------------------------------
+# G14 VIP Buffer — lightweight detection + buffering + flush-to-notify
+# ---------------------------------------------------------------------------
+
+class _VIPBuffer:
+    """Per-conversation VIP message buffer.
+
+    Detects messages from VIP OIDs, buffers them, and flushes to
+    ``notify_targets`` when:
+      1. Immediate flush: message ends with sentence-ending punctuation
+         (。！？!?) or exceeds 100 chars (substantive message).
+      2. Stale timeout: ``buffer_timeout_seconds`` (default 60s) after
+         the first buffered message without a flush trigger.
+    """
+
+    _IMMEDIATE_FLUSH_ENDS = tuple("。！？!?")
+    _LONG_MSG_THRESHOLD = 100  # chars
+
+    def __init__(self, conv_id: str, oids: List[str], notify_targets: List[str],
+                 buffer_timeout_seconds: float = 60.0):
+        self.conv_id = conv_id
+        self.oids = set(oids)
+        self.notify_targets = notify_targets
+        self.buffer_timeout = buffer_timeout_seconds
+        self._messages: List[Dict[str, Any]] = []
+        self._first_msg_at: Optional[float] = None
+        self._flush_task: Optional[asyncio.Task] = None
+
+    def is_vip(self, sender_oid: str) -> bool:
+        return sender_oid in self.oids
+
+    def add(self, msg: Dict[str, Any]) -> str:
+        """Buffer a VIP message. Returns 'immediate' | 'buffered'."""
+        now = time.time()
+        self._messages.append(msg)
+        if self._first_msg_at is None:
+            self._first_msg_at = now
+
+        text = msg.get("content", "") or ""
+        # Immediate flush if ends with sentence-ending punctuation or is long
+        if (text.rstrip()[-1:] in self._IMMEDIATE_FLUSH_ENDS
+                or len(text) >= self._LONG_MSG_THRESHOLD):
+            return "immediate"
+
+        # Start/reset stale timeout
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        loop = asyncio.get_event_loop()
+        self._flush_task = loop.create_task(self._stale_timeout())
+        return "buffered"
+
+    async def _stale_timeout(self) -> None:
+        try:
+            await asyncio.sleep(self.buffer_timeout)
+        except asyncio.CancelledError:
+            return
+
+    def should_flush(self) -> bool:
+        """Check if the stale timeout has expired."""
+        if not self._messages or self._first_msg_at is None:
+            return False
+        return (time.time() - self._first_msg_at) >= self.buffer_timeout
+
+    def drain(self) -> List[Dict[str, Any]]:
+        """Return buffered messages and reset state."""
+        msgs = self._messages
+        self._messages = []
+        self._first_msg_at = None
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        self._flush_task = None
+        return msgs
+
+
+# ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
 
@@ -813,6 +890,24 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         }
         # Legacy alias (None — use _model_picker_states[conv_id] instead).
         self._model_picker_state: Optional[Dict[str, Any]] = None
+
+        # G14 VIP monitor: per-conversation buffer state keyed by conv_id.
+        # Enabled via gateway.teams_mtk.vip_monitor config section.
+        self._vip_buffers: Dict[str, Any] = {}
+        self._vip_config: Dict[str, Any] = {}
+        try:
+            _vip_cfg = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("vip_monitor", {})
+            )
+            if _vip_cfg and _vip_cfg.get("enabled"):
+                self._vip_config = _vip_cfg
+                logger.info("TeamsMTK: VIP monitor enabled (oids=%s, targets=%s)",
+                            _vip_cfg.get("oids", []), _vip_cfg.get("notify_targets", []))
+        except Exception:
+            pass
 
     # ---- Per-group config (gateway.teams_mtk.groups in config.yaml) ----
 
@@ -1974,6 +2069,31 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "notes": [f"Error: {e}"],
             }
 
+    async def _flush_vip_buffer(self, conv_id: str) -> None:
+        """Flush buffered VIP messages to notify_targets."""
+        _buf = self._vip_buffers.get(conv_id)
+        if not _buf:
+            return
+        msgs = _buf.drain()
+        if not msgs:
+            return
+        # Compose summary from buffered messages
+        _parts = []
+        for m in msgs:
+            _text = m.get("content", "") or ""
+            if _strip_teams_html is not None:
+                _text, _ = _strip_teams_html(_text)
+            _sender = m.get("imdisplayname") or "VIP"
+            _parts.append(f"[{_sender}] {_text.strip()}")
+        _summary = "\n".join(_parts)
+        # Route to each notify_target
+        for _target in _buf.notify_targets:
+            try:
+                await self.send(_target, f"📋 VIP buffered ({len(msgs)} msg):\n{_summary}")
+                logger.info("TeamsMTK: VIP flush %d msgs → %s", len(msgs), _target[:30])
+            except Exception as e:
+                logger.error("TeamsMTK: VIP flush send error to %s: %s", _target[:30], e)
+
     async def cancel_background_tasks(self) -> None:
         """Cancel poll + WS tasks, then delegate to base for in-flight message tasks."""
         self._running = False
@@ -2009,9 +2129,91 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             msgs = await loop.run_in_executor(executor, lambda: self._fetch_messages(conv_id))
             await self._process_new_messages(conv_id, msgs)
+            # REV-4: after processing, flush any VIP buffers whose
+            # stale timeout has expired (WS arrives faster than poll).
+            _vip_buf = self._vip_buffers.get(conv_id)
+            if _vip_buf and _vip_buf.should_flush():
+                await self._flush_vip_buffer(conv_id)
             executor.shutdown(wait=False)
         except Exception as e:
             logger.warning("TeamsMTK/WS: immediate fetch failed (%s) — poll will catch it", e)
+
+    # ---- S7: Reactions (send/remove) ----
+
+    async def send_reaction(self, chat_id: str, message_id: str, reaction: str) -> dict:
+        """Send an emoji reaction to a message.
+
+        ``reaction`` must be one of: like, heart, laugh, surprised, sad, angry.
+        Uses SDK ReactionsService when available, falls back to raw Graph API.
+        """
+        if reaction not in _VALID_REACTIONS:
+            return {"status": "error", "error": f"Invalid reaction '{reaction}'. "
+                    f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
+        try:
+            if _SDK_AVAILABLE and self._auth._graph_token:
+                _svc = _SDKReactions(_SDKGraphAdapter(self._auth._graph_token))
+                result = _svc.send(chat_id, message_id, reaction)
+                logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, message_id)
+                return result
+            # Raw fallback
+            url = (f"https://graph.microsoft.com/beta/chats/{chat_id}"
+                   f"/messages/{message_id}/setReaction")
+            _resp = self._auth._graph_request("POST", url,
+                                              json={"reactionType": reaction})
+            logger.info("TeamsMTK: sent reaction %s to msg=%s (raw)", reaction, message_id)
+            return {"status": "reacted", "reaction": reaction, "message_id": message_id}
+        except Exception as e:
+            logger.error("TeamsMTK: send_reaction error: %s", e)
+            return {"status": "error", "error": str(e)}
+
+    async def remove_reaction(self, chat_id: str, message_id: str, reaction: str) -> dict:
+        """Remove an emoji reaction from a message."""
+        if reaction not in _VALID_REACTIONS:
+            return {"status": "error", "error": f"Invalid reaction '{reaction}'. "
+                    f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
+        try:
+            if _SDK_AVAILABLE and self._auth._graph_token:
+                _svc = _SDKReactions(_SDKGraphAdapter(self._auth._graph_token))
+                result = _svc.remove(chat_id, message_id, reaction)
+                logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, message_id)
+                return result
+            # Raw fallback
+            url = (f"https://graph.microsoft.com/beta/chats/{chat_id}"
+                   f"/messages/{message_id}/unsetReaction")
+            _resp = self._auth._graph_request("POST", url,
+                                              json={"reactionType": reaction})
+            logger.info("TeamsMTK: removed reaction %s from msg=%s (raw)", reaction, message_id)
+            return {"status": "removed", "reaction": reaction, "message_id": message_id}
+        except Exception as e:
+            logger.error("TeamsMTK: remove_reaction error: %s", e)
+            return {"status": "error", "error": str(e)}
+
+    # ---- S9: Message deletion ----
+
+    async def delete_message(self, chat_id: str, message_id: str) -> dict:
+        """Delete a message from a conversation.
+
+        Only the sender's own messages can be deleted. Uses SDK
+        MessagesService.delete() when available, falls back to raw API.
+        """
+        try:
+            if _SDK_AVAILABLE and self._auth._skype_token:
+                _svc = _SDKMessages(_SDKAuthAdapter(self._auth))
+                result = _svc.delete(chat_id, message_id)
+                logger.info("TeamsMTK: deleted msg=%s in conv=%s", message_id, chat_id[:30])
+                return result
+            # Raw fallback
+            _enc = __import__("urllib.parse", fromlist=["quote"]).quote(chat_id, safe="")
+            url = (f"https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
+                   f"/conversations/{_enc}/messages/{message_id}")
+            import requests as _req
+            _headers = {"Authorization": f"skype_token {self._auth.skype_token}"}
+            _req.delete(url, headers=_headers)
+            logger.info("TeamsMTK: deleted msg=%s in conv=%s (raw)", message_id, chat_id[:30])
+            return {"id": message_id, "status": "deleted"}
+        except Exception as e:
+            logger.error("TeamsMTK: delete_message error: %s", e)
+            return {"status": "error", "error": str(e)}
 
     async def send_model_picker(
         self,
@@ -2622,6 +2824,34 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 content.strip()[:40] if content else "<empty>",
             )
 
+            # ---- G14 VIP interception ----
+            # If VIP monitor is enabled and the sender OID is in the VIP list,
+            # buffer the message instead of dispatching to the agent.
+            _from_url = msg.get("from", "")
+            _sender_oid = ""
+            if "8:orgid:" in _from_url:
+                _sender_oid = _from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
+            if self._vip_config and _sender_oid:
+                _vip_buf = self._vip_buffers.get(conv_id)
+                if _vip_buf is None:
+                    _vip_buf = _VIPBuffer(
+                        conv_id,
+                        oids=self._vip_config.get("oids", []),
+                        notify_targets=self._vip_config.get("notify_targets", []),
+                        buffer_timeout_seconds=self._vip_config.get("buffer_timeout_seconds", 60),
+                    )
+                    self._vip_buffers[conv_id] = _vip_buf
+                if _vip_buf.is_vip(_sender_oid):
+                    _action = _vip_buf.add(msg)
+                    self._last_message_ids[conv_id] = msg_id
+                    logger.info(
+                        "TeamsMTK: VIP msg id=%s from oid=%s → %s (buf=%d)",
+                        msg_id, _sender_oid[:12], _action, len(_vip_buf._messages),
+                    )
+                    if _action == "immediate":
+                        await self._flush_vip_buffer(conv_id)
+                    continue
+
             # Skip system messages
             if msg_type in ("ThreadActivity/MemberJoined", "ThreadActivity/TopicUpdate"):
                 self._last_message_ids[conv_id] = msg_id
@@ -2661,6 +2891,17 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 is_own = True
             if self._sent_dedup.is_duplicate(str(msg_id)):
                 is_own = True
+            # ④ HTML fingerprint detection: Hermes wraps responses in a
+            # <div style="border-left:#6264A7"> block with a
+            # <b>🤖 Hermes</b> signature.  Some Teams API paths strip
+            # the hermes_sender property, so fingerprint matching
+            # catches those cases.
+            if not is_own and content and "border-left" in content and "#6264a7" in content.lower():
+                is_own = True
+                logger.debug("TeamsMTK: fingerprint match (border-left:#6264A7) for msg id=%s", msg_id)
+            if not is_own and content and "<b>🤖 Hermes</b>" in content:
+                is_own = True
+                logger.debug("TeamsMTK: fingerprint match (🤖 Hermes signature) for msg id=%s", msg_id)
             if is_own:
                 logger.info("TeamsMTK: skipping own sent message id=%s", msg_id)
                 self._last_message_ids[conv_id] = msg_id
@@ -2817,6 +3058,24 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     continue
 
             logger.info("TeamsMTK: new message from %s: %s", sender, text[:60])
+
+            # ---- C-5 Short-message gating (BUG-5) ----
+            # In groups where require_mention=false, ultra-short casual
+            # messages (e.g. 「好」「OK」「嗯」) waste agent tokens.
+            # Ignore ≤2 chars unless they contain ?？！! or @hermes.
+            # Per-group config `short_message_ignore: false` disables.
+            if is_group and not effective_require_mention and not _is_control_cmd:
+                _short_ignore = _group_cfg.get("short_message_ignore", True)
+                if _short_ignore and len(text.strip()) <= 2:
+                    _has_punct = any(c in text for c in "?？！!？")
+                    _has_mention = self._MENTION_TAG.lower() in text.lower()
+                    if not _has_punct and not _has_mention:
+                        logger.debug(
+                            "TeamsMTK: ignoring short message (%d chars, no ?/!/mention): %r",
+                            len(text.strip()), text,
+                        )
+                        self._last_message_ids[conv_id] = msg_id
+                        continue
 
             # ---- Model picker interception (two-step) ----
             # Per-conversation picker state so multiple conversations
