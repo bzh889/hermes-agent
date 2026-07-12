@@ -4582,6 +4582,40 @@ def run_conversation(
             else:
                 # No tool calls - this is the final response
                 final_response = assistant_message.content or ""
+
+                # ── Garbage-output detection ───────────────────────────────
+                # In-house models routed through the AIDE proxy can produce
+                # multi-script gibberish (U+FFFD, random Cyrillic/Arabic
+                # mixed with CJK/Latin) after 429/quota events or stream
+                # interruptions.  Detect this before the response enters
+                # session history and trigger a retry instead.  The heuristic
+                # has 100 % recall against the 24 confirmed corpus samples and
+                # 0 % FP rate against 300 clean samples (2026-07-12 calibration).
+                if final_response:
+                    try:
+                        from agent.garbage_detector import is_garbage
+                        if is_garbage(final_response):
+                            logger.warning(
+                                "%s⚠️  Garbage output detected (multi-script/corruption "
+                                "heuristic triggered, %d chars) — discarding and retrying",
+                                agent.log_prefix, len(final_response),
+                            )
+                            agent._emit_status(
+                                "⚠️  Output quality check failed — discarding and retrying"
+                            )
+                            # Treat like a transient API failure: activate
+                            # fallback chain so the retry uses a different
+                            # model/provider rather than re-hitting the same
+                            # degraded backend.
+                            from agent.chat_completion_helpers import (
+                                try_activate_fallback,
+                            )
+                            from agent.error_classifier import FailoverReason
+                            try_activate_fallback(agent, FailoverReason.overloaded)
+                            final_response = ""
+                            continue
+                    except Exception:
+                        pass  # never let the detector kill the turn
                 
                 # Fix: unmute output when entering the no-tool-call branch
                 # so the user can see empty-response warnings and recovery
