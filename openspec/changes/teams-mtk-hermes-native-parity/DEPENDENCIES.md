@@ -181,7 +181,7 @@ Backlog
 | 22 | **C-5~7** ✅ CLI 加強 | C-2 | short-msg ✅ / whitelist ✅ / VIP ✅ |
 | 23 | **S1-5** ✅ PKB 即時落地 | S1-1 | on_message_processed hook ✅ |
 | 24 | **S2-4** ✅ 跨 conv 搜尋 | S2-1 | search_all_conversations ✅ |
-| 25 | **S3-2~3** 🟡 行事曆 | S3-1 | schedule + availability |
+| 25 | **S3-2~3** ✅ 行事曆 | S3-1 | _get_schedule + _find_common_availability ✅ |
 | 26 | **WS-7~9** ✅ poll 自適應 | WS-6 穩定 | WS healthy→15s ✅ |
 
 ### Phase 3 — 收尾（低優先）
@@ -206,8 +206,8 @@ Backlog
 
 | 狀態 | 數量 |
 |---|---|
-| ✅ 已完成 | 79 |
-| 🟡 待做（中優先） | 1 |
+| ✅ 已完成 | 81 |
+| 🟡 待做（中優先） | 0 |
 | 🔴 blocked | 2 |
 
 ## 關鍵路徑
@@ -216,5 +216,5 @@ Backlog
 C-1 ✅ → C-3 ✅ → SDK-0 ✅ → SDK-1~2 ✅ → S1~S3 ✅ → REPLACE-1~7 ✅
                          → WS-0 ✅ → WS-1~6 ✅ → WS-7~9 ✅
                          → C-2~C-7 ✅, S4~S10 ✅, REV-3/6 ✅, G15 ✅
-Phase 0 + 1 + 1.5 + Phase 2 完成。待做 = S3-2~3 行事曆 + SDK-3 E2E。
+Phase 0 + 1 + 1.5 + Phase 2 全部完成。待做 = SDK-3 E2E + 已阻止項。
 ```

@@ -2444,6 +2444,30 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception:
             return []
 
+    # ---- G13-B.3 stub: Proactive chat creation (blocked: Chat.Create scope) ----
+
+    async def create_chat(self, topic: str, members: list) -> dict:
+        """Create a new group chat. STUB — requires Chat.Create Graph scope.
+
+        Currently blocked: IT has not granted the Chat.Create application
+        permission. When scope is approved, replace this stub with:
+          Graph POST /chats {chatType: "group", topic, members}
+        """
+        return {"status": "error",
+                "error": "Chat.Create scope not authorized. "
+                         "Request IT to add Chat.Create to the app registration."}
+
+    # ---- G14-2.1 stub: Persona configuration (blocked: P7 incomplete) ----
+
+    def get_persona_config(self) -> dict:
+        """Return the current persona configuration. STUB — P7 incomplete.
+
+        When P7 Persona is completed, this will return the active persona
+        profile (name, tone, style, system_prompt_delta).
+        """
+        return {"status": "stub", "error": "P7 Persona not yet available",
+                "persona": None}
+
     async def send_model_picker(
         self,
         chat_id: str,
