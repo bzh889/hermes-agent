@@ -778,7 +778,6 @@ def _is_anthropic_compatible_host(url: str) -> bool:
     if not url:
         return False
     try:
-        from urllib.parse import urlparse
         host = (urlparse(url).hostname or "").strip().lower().rstrip(".")
         return host in _ANTHROPIC_COMPATIBLE_HOSTS
     except Exception:
@@ -940,7 +939,7 @@ class _CodexCompletionsAdapter:
         # out of cache-key routing entirely — for those hosts, skip it here.
         try:
             from agent.transports.codex import _content_cache_key
-            from utils import base_url_host_matches
+            # base_url_host_matches already imported at module level (line 108).
 
             _host_src = str(getattr(self._client, "base_url", "") or "")
             _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
@@ -2185,8 +2184,7 @@ def _validate_proxy_env_urls() -> None:
     check the OpenAI/httpx client raises a cryptic ``Invalid port``
     error that doesn't name the offending env var.
     """
-    from urllib.parse import urlparse
-
+    # urlparse already imported at module level (line 52).
     normalize_proxy_env_vars()
 
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
@@ -2207,8 +2205,7 @@ def _validate_proxy_env_urls() -> None:
 
 def _validate_base_url(base_url: str) -> None:
     """Reject obviously broken custom endpoint URLs before they reach httpx."""
-    from urllib.parse import urlparse
-
+    # urlparse already imported at module level (line 52).
     candidate = str(base_url or "").strip()
     if not candidate or candidate.startswith("acp://"):
         return

@@ -1348,7 +1348,7 @@ class GatewaySlashCommandsMixin:
         if not entries:
             return t("gateway.commands.none")
 
-        from gateway.config import Platform
+        # Platform already imported at module level (line 34).
         page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
         total_pages = max(1, (len(entries) + page_size - 1) // page_size)
         page = max(1, min(requested_page, total_pages))
@@ -3759,8 +3759,8 @@ class GatewaySlashCommandsMixin:
         branch_name = event.get_command_args().strip()
 
         # Generate the new session ID
-        from datetime import datetime as _dt
-        now = _dt.now()
+        # datetime already imported at module level (line 28).
+        now = datetime.now()
         timestamp_str = now.strftime("%Y%m%d_%H%M%S")
         short_uuid = _uuid.uuid4().hex[:6]
         new_session_id = f"{timestamp_str}_{short_uuid}"
@@ -4477,7 +4477,7 @@ class GatewaySlashCommandsMixin:
         import json
         import shutil
         import subprocess
-        from datetime import datetime
+        # datetime already imported at module level (line 28).
         from hermes_cli.config import is_managed, format_managed_message
 
         # Block non-messaging platforms (API server, webhooks, ACP)

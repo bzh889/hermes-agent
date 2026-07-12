@@ -12826,7 +12826,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
         """
-        from pathlib import Path
+        # Path already imported at module level (line 45).
         from urllib.parse import quote as _quote
 
         try:
@@ -16485,7 +16485,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             name = (source.profile or "").strip() or get_active_profile_name() or "default"
             return get_profile_dir(name)
         except Exception:
-            from hermes_constants import get_hermes_home
+            # get_hermes_home already imported at module level (line 1270).
             return get_hermes_home()
 
     async def _run_agent_inner(

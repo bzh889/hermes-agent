@@ -1766,8 +1766,8 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         return
     try:
         from hermes_cli.config import load_config as _load_full_config
-        from hermes_constants import get_hermes_home as _get_hermes_home
-        _hermes_home_maint = _get_hermes_home()
+        # get_hermes_home already imported at module level (line 170).
+        _hermes_home_maint = get_hermes_home()
 
         # One-time prune of empty TUI ghost sessions.
         try:
@@ -6848,7 +6848,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if not ts:
                 return ""
             try:
-                from datetime import datetime
                 return f"  [{datetime.fromtimestamp(float(ts)).strftime('%H:%M')}]"
             except (ValueError, OSError, TypeError):
                 return ""
@@ -6945,9 +6944,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if getattr(self, "conversation_history", None):
             return False
         try:
-            from hermes_constants import get_hermes_home as _ghh
+            # get_hermes_home already imported at module level (line 170).
             return self._session_db.delete_session_if_empty(
-                session_id, sessions_dir=_ghh() / "sessions"
+                session_id, sessions_dir=get_hermes_home() / "sessions"
             )
         except Exception:
             logger.debug(
@@ -15530,8 +15529,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 # and SQLite history. Ported from google-gemini/gemini-cli#19332.
                 if getattr(self, '_delete_session_on_exit', False):
                     try:
-                        from hermes_constants import get_hermes_home as _ghh
-                        _sessions_dir = _ghh() / "sessions"
+                        # get_hermes_home already imported at module level (line 170).
+                        _sessions_dir = get_hermes_home() / "sessions"
                         _sid = self.agent.session_id
                         if self._session_db.delete_session(_sid, sessions_dir=_sessions_dir):
                             _cprint(f"  {_DIM}✓ Session {_escape(_sid)} deleted{_RST}")

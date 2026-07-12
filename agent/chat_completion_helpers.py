@@ -2961,7 +2961,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # as a content filter" (#32421).
             _content_filter_terminated = False
             try:
-                from agent.error_classifier import classify_api_error, FailoverReason
+                # classify_api_error and FailoverReason are already imported at
+                # module top (lines 30-31).  No local re-import — re-importing
+                # would shadow the module-level binding and risk UnboundLocalError
+                # if either name were referenced before this line executes.
                 _cls = classify_api_error(
                     result["error"],
                     provider=str(getattr(agent, "provider", "") or ""),
