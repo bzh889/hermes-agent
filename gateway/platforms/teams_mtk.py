@@ -83,6 +83,16 @@ _DEFAULT_MSG_BASE = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
 _POLL_INTERVAL = int(os.getenv("MTK_TEAMS_POLL_INTERVAL", "2"))  # seconds
 
 
+def _redact_oid(oid: Optional[str], visible: int = 8) -> str:
+    """G12: Redact AAD Object ID for logging. Keeps first *visible* chars, masks rest.
+
+    Example: ``abc12345-de67-89ab-cdef-0123456789ab`` → ``abc12345****``
+    """
+    if not oid:
+        return "<none>"
+    return oid[:visible] + "****"
+
+
 def check_teams_mtk_requirements() -> bool:
     """Return True if Teams MTK adapter can start."""
     token_cache = Path.home() / ".teams-tokens" / "token_cache.json"
@@ -915,7 +925,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if _vip_cfg and _vip_cfg.get("enabled"):
                 self._vip_config = _vip_cfg
                 logger.info("TeamsMTK: VIP monitor enabled (oids=%s, targets=%s)",
-                            _vip_cfg.get("oids", []), _vip_cfg.get("notify_targets", []))
+                            [_redact_oid(o) for o in _vip_cfg.get("oids", [])],
+                            _vip_cfg.get("notify_targets", []))
         except Exception:
             pass
 
@@ -985,7 +996,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         from_url = m.get("from", "")
                         if "8:orgid:" in from_url:
                             self._user_oid = from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
-                            logger.info("TeamsMTK: user OID: %s", self._user_oid)
+                            logger.info("TeamsMTK: user OID: %s", _redact_oid(self._user_oid))
                             break
                     logger.debug("TeamsMTK: seeded last_message_id=%s for conv=%s", self._last_message_ids[_conv_id], _conv_id[:30])
             except Exception as e:
@@ -2444,6 +2455,105 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception:
             return []
 
+    # ---- G13-A: Read-only conversation lookup (Phase A) ----
+
+    def find_conversation(self, name: str) -> list:
+        """Search known conversations by display name. Read-only (G13 Phase A).
+
+        Only searches conversations Hermes already has in its conversation list.
+        This is naturally bounded by the whitelist — if Hermes hasn't talked
+        to someone, this won't find them.
+        """
+        if not _SDK_AVAILABLE or not self._auth.skype_token():
+            return []
+        try:
+            _svc = _SDKConvs(_SDKAuthAdapter(self._auth))
+            results = _svc.find(name)
+            return results if isinstance(results, list) else []
+        except Exception:
+            return []
+
+    def list_conversations(self, limit: int = 50) -> list:
+        """List all known conversations. Read-only (G13 Phase A).
+
+        Returns normalized dicts with id, title, type, member_names.
+        """
+        if not _SDK_AVAILABLE or not self._auth.skype_token():
+            return self._list_conversations_raw(limit)
+        try:
+            _svc = _SDKConvs(_SDKAuthAdapter(self._auth))
+            raw = _svc.list(limit=limit)
+            if not isinstance(raw, list):
+                return self._list_conversations_raw(limit)
+            results = []
+            for c in raw:
+                props = c.get("threadProperties", {})
+                title = props.get("topic", "") or ""
+                ctype = props.get("threadType", "") or ""
+                members = c.get("members", [])
+                member_names = ", ".join(
+                    m.get("imdisplayname", m.get("friendlyName", ""))
+                    for m in members
+                    if m.get("imdisplayname") or m.get("friendlyName")
+                )
+                results.append({
+                    "id": c.get("id", ""),
+                    "title": title,
+                    "type": ctype,
+                    "member_names": member_names,
+                })
+            return results
+        except Exception:
+            return self._list_conversations_raw(limit)
+
+    def _list_conversations_raw(self, limit: int = 50) -> list:
+        """Raw HTTP fallback for list_conversations when SDK unavailable."""
+        try:
+            import requests as _req
+            skype_token = self._auth.skype_token()
+            url = f"{self._auth.msg_base}/conversations"
+            headers = {"Authentication": f"skypetoken={skype_token}"}
+            session = _req.Session()
+            self._auth._inject_truststore()
+            resp = session.get(url, params={"pageSize": min(limit, 50)}, headers=headers, verify=False, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            convs = data.get("conversations", [])
+            results = []
+            for c in convs[:limit]:
+                props = c.get("threadProperties", {})
+                title = props.get("topic", "") or ""
+                ctype = props.get("threadType", "") or ""
+                members = c.get("members", [])
+                member_names = ", ".join(
+                    m.get("imdisplayname", m.get("friendlyName", ""))
+                    for m in members
+                    if m.get("imdisplayname") or m.get("friendlyName")
+                )
+                results.append({
+                    "id": c.get("id", ""),
+                    "title": title,
+                    "type": ctype,
+                    "member_names": member_names,
+                })
+            return results
+        except Exception:
+            return []
+
+    def _find_conv_by_display_name(self, name: str):
+        """Resolve a display name to a conversation ID (G13-A)."""
+        name = name.strip()
+        if not name:
+            return None
+        convs = self.list_conversations(limit=200)
+        name_lower = name.lower()
+        for c in convs:
+            if name_lower in c.get("title", "").lower():
+                return c["id"]
+            if name_lower in c.get("member_names", "").lower():
+                return c["id"]
+        return None
+
     # ---- G13-B.3 stub: Proactive chat creation (blocked: Chat.Create scope) ----
 
     async def create_chat(self, topic: str, members: list) -> dict:
@@ -3126,7 +3236,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     self._last_message_ids[conv_id] = msg_id
                     logger.info(
                         "TeamsMTK: VIP msg id=%s from oid=%s → %s (buf=%d)",
-                        msg_id, _sender_oid[:12], _action, len(_vip_buf._messages),
+                        msg_id, _redact_oid(_sender_oid), _action, len(_vip_buf._messages),
                     )
                     if _action == "immediate":
                         await self._flush_vip_buffer(conv_id)

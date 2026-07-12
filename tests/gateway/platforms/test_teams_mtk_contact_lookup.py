@@ -40,7 +40,8 @@ def test_list_conversations_parses_title_and_type():
             "members": [],
         }
     ])
-    with patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
          patch("gateway.platforms.teams_mtk._TeamsAuth._inject_truststore"), \
          patch.object(type(adapter._auth), "msg_base", "https://msg.example/v1/users/ME", create=True), \
          patch("requests.Session.get", return_value=fake_resp):
@@ -64,7 +65,8 @@ def test_list_conversations_falls_back_to_member_display_names():
             ],
         }
     ])
-    with patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
          patch("gateway.platforms.teams_mtk._TeamsAuth._inject_truststore"), \
          patch.object(type(adapter._auth), "msg_base", "https://msg.example/v1/users/ME", create=True), \
          patch("requests.Session.get", return_value=fake_resp):
@@ -81,7 +83,8 @@ def test_list_conversations_respects_limit():
         {"id": f"conv{i}", "threadProperties": {"topic": f"T{i}"}, "members": []}
         for i in range(10)
     ])
-    with patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", return_value="tok"), \
          patch("gateway.platforms.teams_mtk._TeamsAuth._inject_truststore"), \
          patch.object(type(adapter._auth), "msg_base", "https://msg.example/v1/users/ME", create=True), \
          patch("requests.Session.get", return_value=fake_resp):
@@ -92,7 +95,8 @@ def test_list_conversations_respects_limit():
 
 def test_list_conversations_returns_empty_on_error():
     adapter = _make_adapter()
-    with patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", side_effect=RuntimeError("boom")), \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("gateway.platforms.teams_mtk._TeamsAuth.skype_token", side_effect=RuntimeError("boom")), \
          patch("gateway.platforms.teams_mtk._TeamsAuth._inject_truststore"):
         convs = adapter.list_conversations(limit=50)
 

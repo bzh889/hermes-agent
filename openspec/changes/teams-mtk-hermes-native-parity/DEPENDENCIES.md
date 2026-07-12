@@ -145,7 +145,7 @@ Backlog
 | 1 | **C-1** ✅ HTML 剝離修復 | 無 | SDK `<at>`/`<blockquote>`/4層附件正確 ✅ → **REV-1 ✅** |
 | 2 | **C-3** ✅ 全量拉取預設 | 無 | SDK `get()` limit=None ✅ → **REV-2 ✅** |
 | 3 | **C-4** ✅ 附件下載 auth | 無 | SDK `_download_with_auth()` ✅ |
-| 4 | **C-2** 🟡 echo guard | C-1（fingerprint 邏輯） | `poll.py` 4道防線 |
+| 4 | **C-2** ✅ echo guard | C-1（fingerprint 邏輯） | 4道防線 + HTML fingerprint ✅ |
 
 ### Phase 1 — SDK 整入 gateway（§7 核心）
 
@@ -189,9 +189,20 @@ Backlog
 | 順序 | 任務 | 依賴 | 產出 |
 |---|---|---|---|
 | 27 | **REV-2** ✅ cold-start 重測 | C-3 + S1-1 | poll bounded fetch limit=30 ✅ |
-| 28 | **REV-3** 🟡 Setup Wizard | SDK-0 | 引導 SDK 安裝 |
-| 29 | **REV-6** 🟡 §15 文件 | Phase 1+2 | 完整文件 |
-| 30 | **G15** 🟡 白名單可見度 | 獨立 | chat-native 查詢 |
+| 28 | **REV-3** ✅ Setup Wizard | SDK-0 | SDK 偵測提示已加入 setup_gateway ✅ |
+| 29 | **REV-6** ✅ §15 文件 | Phase 1+2 | §15-platform-docs.md ✅ |
+| 30 | **G15** ✅ 白名單可見度 | 獨立 | list_whitelisted_groups() ✅ |
+
+### Phase 4 — design.md 缺口清零
+
+| 順序 | 任務 | 依賴 | 產出 |
+|---|---|---|---|
+| 31 | **G5** ✅ Cron delivery platform | 獨立 | _KNOWN_DELIVERY_PLATFORMS 已含 teams_mtk ✅ |
+| 32 | **G6** ✅ send_message tool 路由 | 獨立 | teams_mtk 專用路由+contact:target 已有 ✅ |
+| 33 | **G7** ✅ status.py 顯示 | 獨立 | platforms dict 加 TeamsMTK entry ✅ |
+| 34 | **G8** ✅ connected checker | 獨立 | _PLATFORM_CONNECTED_CHECKERS 已含 TEAMS_MTK ✅ |
+| 35 | **G12** ✅ AAD OID 日誌遮罩 | 獨立 | _redact_oid() + 3 處 log 遮罩 ✅ |
+| 36 | **G13-A** ✅ 唯讀對話查找 | SDK-0 | find_conversation + list_conversations + _find_conv_by_display_name ✅ |
 
 ### Blocked（等外部）
 
@@ -206,7 +217,7 @@ Backlog
 
 | 狀態 | 數量 |
 |---|---|
-| ✅ 已完成 | 81 |
+| ✅ 已完成 | 87 |
 | 🟡 待做（中優先） | 0 |
 | 🔴 blocked | 2 |
 

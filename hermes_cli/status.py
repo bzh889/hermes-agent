@@ -438,6 +438,7 @@ def show_status(args):
         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
         "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
         "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL"),
+        # ── G7: TeamsMTK status display ──
         # TeamsMTK has no separate token var — MTK_TEAMS_CONVERSATION_ID doubles
         # as both the "configured" signal and the home channel (it IS the
         # conversation being monitored; auth lives in the skypetoken cache,
