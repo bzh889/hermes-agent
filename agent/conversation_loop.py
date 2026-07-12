@@ -4610,7 +4610,11 @@ def run_conversation(
                             from agent.chat_completion_helpers import (
                                 try_activate_fallback,
                             )
-                            from agent.error_classifier import FailoverReason
+                            # FailoverReason is already imported at module top (line 33).
+                            # Re-importing it inside this function makes Python treat it
+                            # as a local variable throughout the *entire* function,
+                            # causing UnboundLocalError at line 2472 when the import
+                            # on this line has not been executed yet.
                             try_activate_fallback(agent, FailoverReason.overloaded)
                             final_response = ""
                             continue
