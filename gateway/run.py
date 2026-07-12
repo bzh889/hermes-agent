@@ -163,6 +163,12 @@ def _ensure_windows_gateway_venv_imports() -> None:
     packages installed only in ``venv/Lib/site-packages`` (notably the MCP SDK).
     Patch the live process before MCP discovery so tool injection does not
     depend on every launcher preserving PYTHONPATH perfectly.
+
+    When the interpreter's Python version differs from the venv's (e.g. running
+    under Python 3.14 but venv was created with 3.12), native extension modules
+    (.pyd) in the venv are ABI-incompatible and will fail to load.  In that
+    case we ensure the interpreter's own site-packages appears *before* the
+    venv's so that any available cp{ver} native extensions take precedence.
     """
     if sys.platform != "win32":
         return
@@ -188,6 +194,21 @@ def _ensure_windows_gateway_venv_imports() -> None:
         if not site_packages.exists():
             continue
 
+        # Detect venv/interpreter version mismatch via pyvenv.cfg
+        _venv_version: tuple[int, int] | None = None
+        cfg_path = resolved_venv / "pyvenv.cfg"
+        try:
+            for line in cfg_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.lower().startswith("version"):
+                    _venv_version = tuple(int(x) for x in line.split("=")[-1].strip().split(".")[:2])  # type: ignore[misc]
+                    break
+        except (OSError, ValueError):
+            pass
+        version_mismatch = (
+            _venv_version is not None
+            and _venv_version != sys.version_info[:2]
+        )
+
         project_entry = str(project_root)
         site_entry = str(site_packages)
         if project_entry not in sys.path:
@@ -199,6 +220,20 @@ def _ensure_windows_gateway_venv_imports() -> None:
             sys.path.remove(site_entry)
         insert_at = 1 if sys.path and sys.path[0] == project_entry else 0
         sys.path.insert(insert_at, site_entry)
+
+        # When interpreter differs from venv Python, native extensions (.pyd)
+        # in the venv are incompatible.  Push the interpreter's own
+        # site-packages ahead of the venv entry so compatible .pyd files load.
+        if version_mismatch:
+            interp_sp = str(Path(sys.prefix) / "Lib" / "site-packages")
+            if interp_sp in sys.path:
+                sys.path.remove(interp_sp)
+            # Place interpreter site-packages just before the venv entry
+            try:
+                venv_idx = sys.path.index(site_entry)
+                sys.path.insert(venv_idx, interp_sp)
+            except ValueError:
+                sys.path.insert(insert_at, interp_sp)
 
         os.environ["VIRTUAL_ENV"] = str(resolved_venv)
         pythonpath = [project_entry, site_entry]
@@ -3916,10 +3951,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _relay_adapter_for_dormancy(self):
         """Return the connected RELAY adapter, if any (the one go_dormant targets)."""
-        try:
-            from gateway.platforms.base import Platform
-        except Exception:  # noqa: BLE001
-            return None
         return self.adapters.get(Platform.RELAY)
 
     async def _scale_to_zero_watcher(self, interval: float = 30.0) -> None:
@@ -6816,7 +6847,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "user_name": _user_name,
                     })
                     if _source:
-                        from gateway.platforms.base import MessageEvent, MessageType
                         _event = MessageEvent(
                             text=_debrief_text,
                             message_type=MessageType.TEXT,
@@ -6952,9 +6982,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _process_handoff(self, row: Dict[str, Any]) -> None:
         """Execute one handoff row. Raises on failure (caller marks failed)."""
-        from gateway.config import Platform
-        from gateway.session import SessionSource, build_session_key
-        from gateway.platforms.base import MessageEvent
+        # Platform, SessionSource, build_session_key, MessageEvent are already
+        # imported at module level (lines 1697-1718).  No local re-import —
+        # re-importing would shadow the module-level binding and risk
+        # UnboundLocalError if any name were referenced before this line.
 
         cli_session_id = row["id"]
         platform_name = (row.get("handoff_platform") or "").strip().lower()
@@ -7992,8 +8023,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self, profile_name: str, profile_home: "Path", claimed: Dict[tuple, str]
     ) -> int:
         """Create+connect one profile's adapters under its runtime scope."""
-        from gateway.config import load_gateway_config
-
+        # load_gateway_config already imported at module level (line 1697).
         with _profile_runtime_scope(profile_home):
             profile_cfg = load_gateway_config()
 
@@ -12347,7 +12377,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
         """
-        from pathlib import Path
         from urllib.parse import quote as _quote
 
         try:
@@ -12357,7 +12386,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # send_multiple_images (Telegram sendPhoto recompresses to ~1280px).
             force_document_attachments = "[[as_document]]" in response
 
-            from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+            from gateway.platforms.base import should_send_media_as_audio
+            # BasePlatformAdapter already imported at module level (line 1718).
 
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
@@ -12575,7 +12605,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Extract media files from the response
             if response:
                 media_files, response = adapter.extract_media(response)
-                from gateway.platforms.base import BasePlatformAdapter
+                # BasePlatformAdapter already imported at module level (line 1718).
                 media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
                 images, text_content = adapter.extract_images(response)
 
@@ -14355,7 +14385,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Falling back to the currently active foreground event is what causes
         cross-topic bleed, so don't do that.
         """
-        from gateway.session import SessionSource
+        # SessionSource already imported at module level (line 1705).
 
         session_key = str(evt.get("session_key") or "").strip()
         derived_platform = ""
@@ -15849,6 +15879,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         fresh_final_after_seconds=_fresh_final_secs,
                         transport=_scfg.transport or "edit",
                         chat_type=getattr(source, "chat_type", "") or "",
+                        first_buffer_multiplier=getattr(_scfg, "first_buffer_multiplier", 4),
                     )
                     _stream_consumer = GatewayStreamConsumer(
                         adapter=_adapter,
@@ -16060,7 +16091,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             name = (source.profile or "").strip() or get_active_profile_name() or "default"
             return get_profile_dir(name)
         except Exception:
-            from hermes_constants import get_hermes_home
+            # get_hermes_home already imported at module level (line 1298).
             return get_hermes_home()
 
     async def _run_agent_inner(
@@ -16175,7 +16206,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         progress_grouping = resolve_display_setting(user_config, platform_key, "tool_progress_grouping") or "accumulate"
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
-        from gateway.config import Platform
+        # Platform already imported at module level (line 1697).
         tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
@@ -17068,6 +17099,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             fresh_final_after_seconds=_fresh_final_secs,
                             transport=_scfg.transport or "edit",
                             chat_type=getattr(source, "chat_type", "") or "",
+                            first_buffer_multiplier=getattr(_scfg, "first_buffer_multiplier", 4),
                         )
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,

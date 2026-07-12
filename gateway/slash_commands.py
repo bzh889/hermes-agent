@@ -1077,7 +1077,7 @@ class GatewaySlashCommandsMixin:
         if not entries:
             return t("gateway.commands.none")
 
-        from gateway.config import Platform
+        # Platform already imported at module level (line 34).
         page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
         total_pages = max(1, (len(entries) + page_size - 1) // page_size)
         page = max(1, min(requested_page, total_pages))
@@ -4062,7 +4062,7 @@ class GatewaySlashCommandsMixin:
         import json
         import shutil
         import subprocess
-        from datetime import datetime
+        # datetime already imported at module level (line 28).
         from hermes_cli.config import is_managed, format_managed_message
 
         # Block non-messaging platforms (API server, webhooks, ACP)

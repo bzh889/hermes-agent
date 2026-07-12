@@ -716,7 +716,6 @@ def _is_anthropic_compatible_host(url: str) -> bool:
     if not url:
         return False
     try:
-        from urllib.parse import urlparse
         host = (urlparse(url).hostname or "").strip().lower().rstrip(".")
         return host in _ANTHROPIC_COMPATIBLE_HOSTS
     except Exception:
@@ -2027,8 +2026,6 @@ def _validate_proxy_env_urls() -> None:
     check the OpenAI/httpx client raises a cryptic ``Invalid port``
     error that doesn't name the offending env var.
     """
-    from urllib.parse import urlparse
-
     normalize_proxy_env_vars()
 
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
@@ -2049,8 +2046,6 @@ def _validate_proxy_env_urls() -> None:
 
 def _validate_base_url(base_url: str) -> None:
     """Reject obviously broken custom endpoint URLs before they reach httpx."""
-    from urllib.parse import urlparse
-
     candidate = str(base_url or "").strip()
     if not candidate or candidate.startswith("acp://"):
         return

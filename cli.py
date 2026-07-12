@@ -6610,7 +6610,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if not ts:
                 return ""
             try:
-                from datetime import datetime
                 return f"  [{datetime.fromtimestamp(float(ts)).strftime('%H:%M')}]"
             except (ValueError, OSError, TypeError):
                 return ""

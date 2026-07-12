@@ -1525,7 +1525,7 @@ class SessionStore:
         """
         if max_age_days is None or max_age_days <= 0:
             return 0
-        from datetime import timedelta
+        # timedelta already imported at module level (line 18).
 
         cutoff = _now() - timedelta(days=max_age_days)
         removed_keys: list[str] = []
@@ -1581,7 +1581,7 @@ class SessionStore:
 
         Returns the number of sessions marked resumable.
         """
-        from datetime import timedelta
+        # timedelta already imported at module level (line 18).
 
         cutoff = _now() - timedelta(seconds=max_age_seconds)
         count = 0
