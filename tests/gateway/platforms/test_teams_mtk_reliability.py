@@ -265,13 +265,14 @@ async def test_throttle_per_conv_independent():
         mock_sleep.assert_not_called()
 
 
-# ── §5 echo guard: _sent_message_ids set ─────────────────────────────────
+# ── §5 echo guard: MessageDeduplicator ─────────────────────────────────
 
 async def test_echo_guard_skips_known_sent_id():
-    """Messages whose id is in _sent_message_ids must be skipped."""
+    """Messages whose id is tracked by _sent_dedup must be skipped."""
     adapter = _make_adapter()
-    adapter._sent_message_ids.add("999")
-    assert "999" in adapter._sent_message_ids
+    # Register msg "999" as sent — first call returns False (not duplicate), second returns True
+    adapter._sent_dedup.is_duplicate("999")
+    assert adapter._sent_dedup.is_duplicate("999") is True
 
 
 async def test_at_mention_preserved_in_html_strip():
@@ -360,3 +361,119 @@ async def test_edit_message_throttled_before_send():
         # At minimum, throttle sleep should have been called
         sleep_delays = [c[0][0] for c in mock_sleep.call_args_list]
         assert any(d > 0 for d in sleep_delays), "edit_message should throttle before sending"
+
+
+# ── §8 parallel poll: asyncio.gather actually runs concurrently ───────
+
+async def test_poll_loop_fetches_conversations_in_parallel():
+    """_poll_loop must fetch all conv_ids concurrently (asyncio.gather over
+    run_in_executor), not sequentially. Prove it by making each mocked
+    _fetch_messages block for 0.3s: if fetches were sequential, N=3 convs
+    would take >=0.9s; if parallel, total wall time stays close to 0.3s.
+
+    This directly guards against a future refactor silently reverting to
+    a sequential `for` loop (the pre-fix behavior tasks.md §5.3 replaced).
+    """
+    import time as _time
+
+    adapter = _make_adapter()
+    adapter._conv_ids = ["conv-a", "conv-b", "conv-c"]
+    adapter._running = True
+
+    _FETCH_DELAY = 0.3
+    call_times = []
+
+    def _slow_fetch(conv_id, limit=20):
+        call_times.append(_time.monotonic())
+        _time.sleep(_FETCH_DELAY)
+        return []
+
+    async def _fake_process(conv_id, msgs):
+        return None
+
+    # Run exactly one poll tick then stop the loop (sleep is where the loop
+    # yields between ticks, so stopping there after tick 1 completes is safe).
+    async def _stop_after_one_tick(*a, **kw):
+        adapter._running = False
+
+    with patch.object(adapter, "_fetch_messages", side_effect=_slow_fetch), \
+         patch.object(adapter, "_process_new_messages", side_effect=_fake_process), \
+         patch("gateway.platforms.teams_mtk.asyncio.sleep", side_effect=_stop_after_one_tick):
+        t0 = _time.monotonic()
+        await adapter._poll_loop()
+        elapsed = _time.monotonic() - t0
+
+    # 3 conv_ids x 0.3s each: sequential would take >=0.9s, parallel stays
+    # near 0.3-0.4s (thread-pool dispatch overhead). Assert well below the
+    # sequential floor to catch a regression to the old `for` loop.
+    assert elapsed < _FETCH_DELAY * 2, (
+        f"poll tick took {elapsed:.2f}s for 3 convs @ {_FETCH_DELAY}s each — "
+        f"expected parallel execution (~{_FETCH_DELAY:.1f}s), got sequential-like timing"
+    )
+    assert len(call_times) == 3, "all 3 conv_ids must be fetched"
+    # All three fetches should have started within a tight window of each
+    # other (proving they were dispatched concurrently, not one-after-another).
+    assert max(call_times) - min(call_times) < _FETCH_DELAY, (
+        "fetch start times spread out — convs were not dispatched in parallel"
+    )
+
+
+# ── send_typing (GAP-1) ──────────────────────────────────────────────────
+
+class TestSendTyping:
+    """Verify send_typing() sends Control/Typing via skypetoken."""
+
+    async def test_send_typing_posts_control_typing(self):
+        """send_typing POSTs {"messagetype":"Control/Typing","content":""}."""
+        adapter = _make_adapter()
+        mock_resp = MagicMock(status_code=201, text='{"OriginalArrivalTime":1}')
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        with patch("requests.Session", return_value=mock_session), \
+             patch.object(adapter._auth, "skype_token", return_value="fake-skype-token"), \
+             patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
+             patch.object(adapter._auth, "_inject_truststore"):
+            await adapter.send_typing("19:test@thread.v2")
+
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        url = call_args[0][0]
+        payload = call_args[1]["json"]
+        assert "Control/Typing" == payload["messagetype"]
+        assert payload["content"] == ""
+        assert "skypetoken=fake-skype-token" in call_args[1]["headers"]["Authentication"]
+        assert "19:test@thread.v2" in url
+
+    async def test_send_typing_non_201_logs_warning(self):
+        """send_typing logs warning on non-201 but does not raise."""
+        adapter = _make_adapter()
+        mock_resp = MagicMock(status_code=403, text="forbidden")
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        with patch("requests.Session", return_value=mock_session), \
+             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+             patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
+             patch.object(adapter._auth, "_inject_truststore"):
+            # Should not raise even on 403
+            await adapter.send_typing("19:test@thread.v2")
+
+    async def test_send_typing_exception_does_not_raise(self):
+        """send_typing swallows exceptions (logging only) so _keep_typing stays alive."""
+        adapter = _make_adapter()
+        mock_session = MagicMock()
+        mock_session.post.side_effect = ConnectionError("network down")
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        with patch("requests.Session", return_value=mock_session), \
+             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+             patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
+             patch.object(adapter._auth, "_inject_truststore"):
+            # Must not raise — _keep_typing depends on this
+            await adapter.send_typing("19:test@thread.v2")

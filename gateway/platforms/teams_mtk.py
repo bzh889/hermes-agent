@@ -414,7 +414,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._user_oid: Optional[str] = None  # set during connect from first poll
         self._last_sent_message_id: Optional[str] = None  # id of last message WE sent (echo guard)
         self._last_sent_message_html: Optional[str] = None  # HTML cache for trailing-footer merge
-        self._sent_message_ids: set = set()  # all message IDs we sent (echo guard — superset of _last_sent_message_id)
+        # TTL-based echo-guard cache — replaces a raw growing set() so sent
+        # message ids expire instead of accumulating forever across a
+        # long-lived gateway process. See gateway/platforms/helpers.py.
+        from gateway.platforms.helpers import MessageDeduplicator
+        self._sent_dedup = MessageDeduplicator()
 
         # Per-conversation last-seen message id (avoids replay on startup).
         self._last_message_ids: Dict[str, str] = {cid: None for cid in self._conv_ids}
@@ -680,7 +684,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
                 self._last_sent_message_id = str(msg_id)
-                self._sent_message_ids.add(str(msg_id))
+                self._sent_dedup.is_duplicate(str(msg_id))  # register as seen
                 # Cache the HTML for potential trailing-footer merge
                 if html_content:
                     self._last_sent_message_html = html_content
@@ -851,6 +855,34 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", e)
             return SendResult(success=False, error=str(e))
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """Send a one-shot typing indicator via the Skype chat service.
+
+        Posts {"messagetype": "Control/Typing", "content": ""} — the Skype
+        consumer messaging protocol's typing-indicator message type. Callers
+        (BasePlatformAdapter._keep_typing) invoke this on a repeating timer
+        while an agent turn is in flight, so any failure here (network,
+        auth, rate limit) must be swallowed rather than raised — a dropped
+        typing ping is invisible to the user, but an unhandled exception
+        would kill the keep-typing loop for the rest of the turn.
+        """
+        try:
+            self._auth._inject_truststore()
+            import requests
+            skype_token = self._auth.skype_token()
+            url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+            payload = {"messagetype": "Control/Typing", "content": ""}
+            headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
+            with requests.Session() as session:
+                resp = session.post(url, json=payload, headers=headers, verify=False, timeout=10)
+            if resp.status_code != 201:
+                logger.warning(
+                    "TeamsMTK: send_typing got status %s for conv=%s: %s",
+                    resp.status_code, chat_id[:30], (resp.text or "")[:200],
+                )
+        except Exception as e:
+            logger.debug("TeamsMTK: send_typing failed (non-fatal): %s", e)
 
     # ---- G-MEDIA: image / document / adaptive card sending ----
 
@@ -1861,7 +1893,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 is_own = True
             if self._last_sent_message_id and str(msg_id) == str(self._last_sent_message_id):
                 is_own = True
-            if str(msg_id) in self._sent_message_ids:
+            if self._sent_dedup.is_duplicate(str(msg_id)):
                 is_own = True
             if is_own:
                 logger.info("TeamsMTK: skipping own sent message id=%s", msg_id)
