@@ -57,20 +57,26 @@
 > | 測項名稱 | 對應功能 | 上次驗證 |
 > |---------|---------|---------|
 > | `dm-echo-guard` | BUG-1 echo guard | 2026-07-11 |
-> | `mention-gating-ignore` | G6 mention gating | 2026-07-11 |
-> | `mention-gating-process` | G6 mention gating | 2026-07-11 |
+> | `mention-gating-ignore` | G6 mention gating | 2026-07-13（regex bug 修復：`E2E_AUTO` → `E2E.*AUTO` 容忍 markdown escape）|
+> | `mention-gating-process` | G6 mention gating | 2026-07-13（假測項訂正：舊版只檢查 inbound log 被記錄，跟 mention gating 是否生效無關；改為讀回真實對話確認 bot 有回覆）|
 > | `model-picker` | G23 model picker | 2026-07-11 |
-> | `restart-no-replay` | G8 echo guard 重啟 | 2026-07-11 |
+> | `restart-no-replay` | G8 echo guard 重啟 | 2026-07-13（**假測項訂正**：舊版最終無條件 `return True`，不管前面任何檢查結果；改為真送 marker 訊息比對 watermark id）|
 > | `send-text` | SDK-3a send | 2026-07-11 |
 > | `edit-message` | SDK-3a edit | 2026-07-11 |
-> | `download-attachment` | C-4 附件下載 | 2026-07-11 |
-> | `send-image-file` | G-MEDIA-1 | ⚠️ mock only (07-12 重建後未補跑) |
-> | `send-document` | G-MEDIA-2 | ⚠️ mock only (07-12 重建後未補跑) |
-> | `send-adaptive-card` | G-MEDIA-4 | ⚠️ mock only (07-12 重建後未補跑) |
-> | `send-typing` | G4 send_typing | 2026-07-10 |
-> | `list-conversations` | G13-A.1 | ⚠️ mock only (07-12 重建後未補跑) |
-> | `find-conv-by-display-name` | G13-A.2 | ⚠️ mock only (07-12 重建後未補跑) |
-> | `standalone-sender-fn` | cron deliver | 2026-07-12 (execution_success only，Teams 收訊待確認) |
+> | `download-attachment` | C-4 附件下載 | 2026-07-13（**假測項訂正**：舊版 OR 條件含「嘗試下載即可算過」，這正是 asyncgw 403 bug 長期未被抓到的原因；改為只接受成功信號，並在 `_download_attachment()` 補統一成功 log）|
+> | `send-image-file` | G-MEDIA-1 | 2026-07-13（**假測項訂正**：舊版只驗證方法存在，不管是否真的送達；改為真呼叫 + 讀回確認 `<img>` 落地）|
+> | `send-document` | G-MEDIA-2 | 2026-07-13（**假測項訂正**：舊版只驗證方法存在；改為真呼叫 + 讀回確認分享連結出現在 `properties.files`（SDK 真實編碼位置，非 content）或 content）|
+> | `send-adaptive-card` | G-MEDIA-4 | 2026-07-13（**假測項訂正**：舊版只驗證方法存在，且文件誤寫「預設 disabled」——實際 config 是 `enabled: true`；改為讀真實 config 狀態並驗證對應路徑：enabled 走 `properties.cards`，disabled 走 fallback 文字）|
+> | `send-typing` | G4 send_typing | 2026-07-13（**假測項訂正**：舊版是「不拋例外」檢查，但 send_typing 本身是 best-effort 吞掉所有例外，等於必過；在 `send_typing()` 補成功 log `TeamsMTK: send_typing ok` 後改為讀 log 驗證真實 POST 成功）|
+> | `list-conversations` | G13-A.1 | 2026-07-13（**假測項訂正**：舊版空清單也算 PASS（「token may be expired」），這種真實故障會被綠燈掩蓋；改為要求非空清單 + log 成功信號，並在 `list_conversations()` 兩個實作（`TeamsMTKAdapter` + `_TeamsAuth`）都補上成功/失敗 log）|
+> | `find-conv-by-display-name` | G13-A.2 | 2026-07-13（**假測項訂正**：舊版 `list_conversations` 回空清單時靜默通過；改為要求真實解析到已知對話 id，空清單直接 FAIL）|
+> | `standalone-sender-fn` | cron deliver | 2026-07-12（execution_success only，Teams 收訊待確認） |
+>
+> **2026-07-13 全量重跑**：20/20 real gateway E2E PASS + `scripts/run_tests.sh` 288/288 pytest PASS。
+> `test_send_typing`/`test_list_conversations`/`test_find_conv_by_display_name` 三項的訂正
+> 順帶在 `teams_mtk.py` 補上了原本缺失的成功/失敗 log（`send_typing ok`、
+> `list_conversations...ok, N convs`），這是撰寫真測項過程中發現的可觀測性 gap，
+> 不只是測試腳本本身的問題。
 >
 > ### 缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
 > | 功能 | Task ID | 需新增測項名稱 |

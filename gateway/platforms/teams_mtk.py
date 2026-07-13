@@ -1496,6 +1496,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "TeamsMTK: send_typing got status %s for conv=%s: %s",
                     resp.status_code, chat_id[:30], (resp.text or "")[:200],
                 )
+            else:
+                logger.info("TeamsMTK: send_typing ok conv=%s", chat_id[:30])
         except Exception as e:
             logger.debug("TeamsMTK: send_typing failed (non-fatal): %s", e)
 
@@ -1893,6 +1895,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "type": conv.get("type", ""),
                         "member_names": conv.get("title", ""),  # SDK doesn't return members in list()
                     })
+                logger.info("TeamsMTK: list_conversations SDK ok, %d convs", len(results))
                 return results
             except Exception as _sdk_err:
                 logger.warning(
@@ -1935,6 +1938,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "type": conv_type,
                 "member_names": member_names,
             })
+        logger.info("TeamsMTK: list_conversations raw HTTP ok, %d convs", len(results))
         return results
 
     def _find_conv_by_display_name(self, name: str) -> Optional[str]:
@@ -2620,8 +2624,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "type": ctype,
                     "member_names": member_names,
                 })
+            logger.info("TeamsMTK: _TeamsAuth list_conversations SDK ok, %d convs", len(results))
             return results
         except Exception:
+            logger.warning("TeamsMTK: _TeamsAuth list_conversations SDK failed, falling back to raw")
             return self._list_conversations_raw(limit)
 
     def _list_conversations_raw(self, limit: int = 50) -> list:
@@ -2654,8 +2660,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "type": ctype,
                     "member_names": member_names,
                 })
+            logger.info("TeamsMTK: _TeamsAuth list_conversations raw ok, %d convs", len(results))
             return results
         except Exception:
+            logger.warning("TeamsMTK: _TeamsAuth list_conversations raw failed")
             return []
 
     def _find_conv_by_display_name(self, name: str):
@@ -3258,12 +3266,16 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             _ext = ".gif"
                         elif ".webp" in url.lower():
                             _ext = ".webp"
-                        return cache_image_from_bytes(data, _ext)
+                        _path = cache_image_from_bytes(data, _ext)
+                        logger.info("TeamsMTK: cached %d bytes from %.60s -> %s", len(data), url, _path)
+                        return _path
                     else:
                         if not filename:
                             _parts = url.rsplit("/", 1)
                             filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
-                        return cache_document_from_bytes(data, filename)
+                        _path = cache_document_from_bytes(data, filename)
+                        logger.info("TeamsMTK: cached %d bytes from %.60s -> %s", len(data), url, _path)
+                        return _path
                 except Exception as exc:
                     logger.warning("TeamsMTK: attachment cache error: %s", exc)
                     return None

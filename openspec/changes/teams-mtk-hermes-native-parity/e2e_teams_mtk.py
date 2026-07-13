@@ -390,15 +390,34 @@ def test_mention_gating_ignore(log_path: str, baseline: int) -> tuple[bool, str]
 
 
 def test_mention_gating_process(log_path: str, baseline: int) -> tuple[bool, str]:
-    """Group: message with @hermes is processed when require_mention=true."""
-    content = '<at id="0">Hermes</at>&nbsp;E2E_AUTO with mention — should be processed'
-    msg_id = send_chat_message(GROUP_CHAT_ID, content)
+    """Group: message with @hermes is processed when require_mention=true.
 
-    found, evidence = wait_and_check_log(
-        log_path, baseline,
-        [r"new message from.*mention.*should be processed", r"new message from.*E2E.?AUTO.*mention"],
-    )
-    return found, evidence
+    Real behavioral test: the old version only checked that the inbound
+    message was logged ("new message from...") — that log line fires for
+    EVERY inbound message regardless of mention gating, so it never
+    actually proved the agent was triggered.  This reads back the real
+    conversation and asserts a genuine bot reply (border-left signature)
+    landed after our @mention message.
+    """
+    baseline_msgs = get_messages_raw(GROUP_CHAT_ID, page_size=5)
+    baseline_ids = {m.get("id") for m in baseline_msgs}
+
+    content = '<at id="0">Hermes</at>&nbsp;E2E_AUTO with mention — should be processed'
+    send_chat_message(GROUP_CHAT_ID, content)
+
+    time.sleep(30)
+    msgs = get_messages_raw(GROUP_CHAT_ID, page_size=15)
+    new_bot_replies = [
+        m for m in msgs
+        if m.get("id") not in baseline_ids
+        and "border-left" in (m.get("content") or "")
+    ]
+    if not new_bot_replies:
+        return False, (
+            f"No bot reply found in group after @mention message "
+            f"(checked {len(msgs)} recent messages)"
+        )
+    return True, f"Bot reply landed after @mention: id={new_bot_replies[0].get('id')}"
 
 
 def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -430,18 +449,230 @@ def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
 def test_restart_no_replay(log_path: str, baseline: int) -> tuple[bool, str]:
     """After restart, old messages are not replayed.
 
-    This is a design-check test: verifies that _last_message_ids
-    seeding prevents replay.  Cannot auto-restart gateway, so this
-    checks the startup log for the seed watermark pattern.
+    Real behavioral test: send a marker message, poll the gateway's
+    _last_message_ids seeding logic via a short-lived adapter instance
+    (mirrors connect()'s seed step), then verify the seeded watermark
+    equals the max message id currently in the conversation — i.e. a
+    fresh adapter instance would treat everything up to and including
+    our marker as already-seen and NOT replay it.
     """
-    log_text = tail_log(log_path, baseline)
-    # Look for startup + seed evidence
-    if "Starting Hermes Gateway" in log_text:
-        if "seeded last_message_id" in log_text or "poll conv" in log_text:
-            # If gateway started but no "new message from" in startup → good
-            if "new message from" not in log_text.split("Starting Hermes Gateway")[-1].split("Gateway running")[0]:
-                return True, "Startup section has no 'new message from' — no replay"
-    return True, "Design check: connect() seeds watermark (L658-673)"
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    marker = f"E2E_AUTO restart-no-replay marker {int(time.time())}"
+    marker_id = send_chat_message(DM_CHAT_ID, marker)
+    time.sleep(2)  # give MSG API a moment to persist before read-back
+
+    adapter = TeamsMTKAdapter(None)
+    try:
+        msgs = adapter._fetch_messages(conv_id=DM_CHAT_ID, limit=5)
+    except Exception as e:
+        return False, f"_fetch_messages raised: {e}"
+
+    if not msgs:
+        return False, "_fetch_messages returned no messages to seed from"
+
+    seeded_id = max((m.get("id", "") for m in msgs if m.get("id")), default="")
+    if not seeded_id:
+        return False, f"Could not compute seeded id from fetched messages: {msgs[:2]}"
+
+    # The seeded watermark must be >= our marker's id (as strings of digits,
+    # Skype message ids are monotonic epoch-ms timestamps so string/int
+    # comparison agree once compared numerically).
+    try:
+        seeded_int = int(seeded_id)
+        marker_int = int(marker_id)
+    except (TypeError, ValueError):
+        return False, f"Non-numeric ids: seeded={seeded_id!r} marker={marker_id!r}"
+
+    if seeded_int < marker_int:
+        return False, (
+            f"Seeded watermark {seeded_int} is OLDER than marker {marker_int} — "
+            f"a restart would replay the marker message"
+        )
+    return True, f"Seeded watermark id={seeded_int} >= marker id={marker_int} — marker would not be replayed"
+
+
+def test_send_image_file(log_path: str, baseline: int) -> tuple[bool, str]:
+    """DM: send_image_file() actually uploads to AMS and sends inline (G-MEDIA-1).
+
+    Real behavioral test: creates a temp PNG, calls the adapter's
+    send_image_file() directly against the real DM chat, and asserts
+    SendResult.success is True with a real message_id — not just that
+    the method exists.  Then reads back the conversation to confirm a
+    new message landed.
+    """
+    import base64, tempfile, os, asyncio
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    png_data = bytes([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+        0xDE, 0x00, 0x00, 0x00, 0x08, 0x49, 0x44, 0x41,
+        0x54, 0x08, 0xD7, 0x63, 0x00, 0x00, 0x00, 0x02,
+        0x00, 0x01, 0xE5, 0x55, 0x9D, 0x73, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
+        0x60, 0x82,
+    ])
+    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
+    baseline_ids = {m.get("id") for m in baseline_msgs}
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(png_data)
+        temp_path = f.name
+
+    try:
+        adapter = TeamsMTKAdapter(None)
+
+        async def _call():
+            return await adapter.send_image_file(DM_CHAT_ID, temp_path, caption="E2E_AUTO image test")
+
+        result = asyncio.run(_call())
+
+        if not result.success:
+            return False, f"send_image_file returned success=False error={result.error!r}"
+        if not result.message_id:
+            return False, f"send_image_file succeeded but returned no message_id: {result!r}"
+
+        # Read back the conversation to confirm the image actually landed.
+        time.sleep(3)
+        msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
+        new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
+        has_image = any("<img" in (m.get("content") or "") for m in new_msgs)
+        if not has_image:
+            return False, (
+                f"send_image_file returned success=True message_id={result.message_id} "
+                f"but read-back found no new <img> message (new_msgs={len(new_msgs)})"
+            )
+        return True, f"send_image_file succeeded, message_id={result.message_id}, verified via read-back"
+    finally:
+        os.unlink(temp_path)
+
+
+def test_send_document(log_path: str, baseline: int) -> tuple[bool, str]:
+    """DM: send_document() actually uploads to OneDrive and shares a link (G-MEDIA-2).
+
+    Real behavioral test: writes a temp text file, calls send_document()
+    against the real DM chat, and asserts SendResult.success with a real
+    message_id — then reads back the conversation for a share link.
+    """
+    import tempfile, os, asyncio
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
+    baseline_ids = {m.get("id") for m in baseline_msgs}
+
+    with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False, encoding="utf-8") as f:
+        f.write("E2E_AUTO send_document test content\n")
+        temp_path = f.name
+
+    try:
+        adapter = TeamsMTKAdapter(None)
+
+        async def _call():
+            return await adapter.send_document(DM_CHAT_ID, temp_path, caption="E2E_AUTO doc test")
+
+        result = asyncio.run(_call())
+
+        if not result.success:
+            return False, f"send_document returned success=False error={result.error!r}"
+        if not result.message_id:
+            return False, f"send_document succeeded but returned no message_id: {result!r}"
+
+        time.sleep(3)
+        msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
+        new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
+        # The SDK path encodes the share link in properties.files (a
+        # JSON-stringified file schema with fileUrl/shareUrl), NOT in the
+        # message content itself (content stays as the plain caption).
+        # Check both the content (legacy/raw-HTTP <a href> path) and
+        # properties (SDK path) so this test works regardless of which
+        # code path handled the send.
+        has_link = any(
+            ("sharepoint.com" in (m.get("content") or "") or "1drv.ms" in (m.get("content") or "")
+             or "<a " in (m.get("content") or "")
+             or "sharepoint.com" in json.dumps(m.get("properties", {}) or {})
+             or "1drv.ms" in json.dumps(m.get("properties", {}) or {}))
+            for m in new_msgs
+        )
+        if not has_link:
+            return False, (
+                f"send_document returned success=True message_id={result.message_id} "
+                f"but read-back found no share link in content or properties.files "
+                f"(new_msgs={len(new_msgs)})"
+            )
+        return True, f"send_document succeeded, message_id={result.message_id}, verified via read-back"
+    finally:
+        os.unlink(temp_path)
+
+
+def test_send_adaptive_card(log_path: str, baseline: int) -> tuple[bool, str]:
+    """send_adaptive_card() behavior matches the real config state — G-MEDIA-4.
+
+    Real behavioral test, not existence check.  Reads the ACTUAL
+    gateway.teams_mtk.adaptive_cards.enabled config value (don't assume
+    disabled-by-default — a deployment may have opted in) and verifies
+    the correct path for that state:
+      - enabled=false: fallback_text is sent as plain text
+      - enabled=true:  the card payload lands in properties.cards
+    Either way requires SendResult.success=True with a real message_id,
+    verified via read-back — not just "didn't raise".
+    """
+    import asyncio
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+    from hermes_cli.config import load_config_readonly
+
+    try:
+        cfg = load_config_readonly()
+    except Exception:
+        cfg = {}
+    enabled = bool(
+        (cfg.get("gateway", {}) or {}).get("teams_mtk", {}).get("adaptive_cards", {}).get("enabled", False)
+    )
+
+    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
+    baseline_ids = {m.get("id") for m in baseline_msgs}
+
+    fallback_marker = f"E2E_AUTO adaptive-card-fallback {int(time.time())}"
+    card_marker = f"E2E_AUTO_CARD_{int(time.time())}"
+    adapter = TeamsMTKAdapter(None)
+
+    async def _call():
+        return await adapter.send_adaptive_card(
+            DM_CHAT_ID,
+            card={"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": card_marker}]},
+            fallback_text=fallback_marker,
+        )
+
+    result = asyncio.run(_call())
+
+    if not result.success:
+        return False, f"send_adaptive_card (adaptive_cards.enabled={enabled}) returned success=False error={result.error!r}"
+
+    time.sleep(3)
+    msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
+    new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
+
+    if not enabled:
+        has_fallback = any(fallback_marker in (m.get("content") or "") for m in new_msgs)
+        if not has_fallback:
+            return False, (
+                f"adaptive_cards disabled: expected fallback_text delivered as plain "
+                f"message, found none (new_msgs={len(new_msgs)})"
+            )
+        return True, "Disabled path verified: fallback_text delivered as plain message"
+    else:
+        has_card = any(
+            card_marker in json.dumps(m.get("properties", {}) or {})
+            for m in new_msgs
+        )
+        if not has_card:
+            return False, (
+                f"adaptive_cards enabled: expected card marker in properties.cards, "
+                f"found none (new_msgs={len(new_msgs)})"
+            )
+        return True, f"Enabled path verified: card payload landed in properties.cards, message_id={result.message_id}"
 
 
 def test_send_text(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -479,14 +710,14 @@ def test_edit_message(log_path: str, baseline: int) -> tuple[bool, str]:
 
 
 def test_download_attachment(log_path: str, baseline: int) -> tuple[bool, str]:
-    """DM: upload a real image via Graph API, gateway processes it.
+    """DM: upload a real image via Graph API, gateway processes AND downloads it.
 
     Uses Graph API hostedContents to upload a real 1x1 PNG inline image.
-    Gateway should poll and encounter the inline image.  Download may fail
-    due to AMS auth complexity — the test verifies the pipeline is exercised.
-
-    Success criteria: gateway log shows the message was processed AND
-    either download succeeded OR download was attempted (even if failed).
+    Real behavioral test: the old version accepted "download was attempted
+    (even if failed)" as a pass — that OR-list is exactly why the 07-13
+    as-prod.asyncgw.teams.microsoft.com domain-routing 401 bug went
+    undetected for so long.  This now REQUIRES the success signal
+    (cache_image_from_bytes / cached bytes) — a mere attempt is a FAIL.
     """
     import base64
 
@@ -528,194 +759,112 @@ def test_download_attachment(log_path: str, baseline: int) -> tuple[bool, str]:
     if not msg_id:
         return False, "No message ID in Graph response"
 
-    # Gateway should now poll and process the message with inline image
-    # Check for processing in log (gateway saw the image reference)
+    # REQUIRE the success signal — a mere download attempt is not enough.
+    # Also check for an explicit failure signal so a timeout doesn't
+    # silently pass through to the generic "not found" message.
     found, evidence = wait_and_check_log(
         log_path, baseline,
         [
-            r"hostedContents",                 # Gateway logged the hosted content reference
-            r"cache_image_from_bytes",         # Full success: image downloaded + cached
-            r"cached .* bytes from .* imgpsh", # Legacy download succeeded
-            r"attachment download",            # Download attempted (success or fail)
-            r"_download_attachment",           # Download function called
-            r"as-api\.asm\.skype\.com",        # AMS URL encountered in log
+            r"TeamsMTK: cached \d+ bytes from",  # New unified success log (both SDK + aiohttp paths)
         ],
         wait_seconds=20,
     )
+    if not found:
+        fail_found, fail_evidence = wait_and_check_log(
+            log_path, baseline,
+            [r"attachment download failed", r"attachment download error", r"SDK download failed"],
+            wait_seconds=1,
+        )
+        if fail_found:
+            return False, f"Download explicitly failed: {fail_evidence}"
+        return False, f"No download-success signal within timeout; last log: {evidence[-300:]}"
     return found, evidence
 
 
-def test_send_image_file(log_path: str, baseline: int) -> tuple[bool, str]:
-    """DM: send a local image file via gateway send_image_file method.
-
-    Creates a 1x1 PNG, calls send_image_file() directly (simulating agent usage),
-    and verifies gateway.log shows the AMS upload + send confirmation.
-
-    This tests G-MEDIA-1: send_image_file functionality.
-    """
-    import base64, tempfile, os
-    from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import asyncio
-
-    # Create minimal PNG
-    png_data = bytes([
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-        0xDE, 0x00, 0x00, 0x00, 0x08, 0x49, 0x44, 0x41,
-        0x54, 0x08, 0xD7, 0x63, 0x00, 0x00, 0x00, 0x02,
-        0x00, 0x01, 0xE5, 0x55, 0x9D, 0x73, 0x00, 0x00,
-        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-        0x60, 0x82,
-    ])
-
-    # Write to temp file
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(png_data)
-        temp_path = f.name
-
-    try:
-        # This test verifies the method EXISTS and can be called
-        # Full E2E (actual AMS upload + Teams send) requires running gateway
-        # and is tested via manual/CLI integration, not this automated test.
-        #
-        # For automated E2E, we verify the method signature and that it
-        # attempts AMS upload (log pattern).
-        found, evidence = wait_and_check_log(
-            log_path, baseline,
-            [
-                r"send_image_file",              # Method was called (log includes method name)
-                r"AMS.*upload",                  # AMS upload initiated
-                r"ams_id=",                      # AMS object created
-                r"send_image_file ams_id=",      # Full success log
-            ],
-            wait_seconds=5,  # Short wait - just checking method exists in code path
-        )
-        # For now, just verify the method exists (static check)
-        # Real E2E requires agent to call send_image_file, which is hard to automate
-        return True, "send_image_file method exists (L1045) and is callable"
-    finally:
-        os.unlink(temp_path)
-
-
-def test_send_document(log_path: str, baseline: int) -> tuple[bool, str]:
-    """Verify send_document method exists (G-MEDIA-2).
-
-    Full E2E requires OneDrive upload + Graph API share link generation,
-    which is complex to automate. This test confirms the method signature
-    and existence for now.
-    """
-    from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import inspect
-
-    if hasattr(TeamsMTKAdapter, "send_document"):
-        sig = inspect.signature(getattr(TeamsMTKAdapter, "send_document"))
-        return True, f"send_document exists (L1265): {sig}"
-    return False, "send_document NOT FOUND"
-
-
-def test_send_adaptive_card(log_path: str, baseline: int) -> tuple[bool, str]:
-    """Verify send_adaptive_card method exists (G-MEDIA-4).
-
-    Full E2E requires adaptive card payload construction and validation.
-    This test confirms the method signature and existence for now.
-    """
-    from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import inspect
-
-    if hasattr(TeamsMTKAdapter, "send_adaptive_card"):
-        sig = inspect.signature(getattr(TeamsMTKAdapter, "send_adaptive_card"))
-        return True, f"send_adaptive_card exists (L1400): {sig}"
-    return False, "send_adaptive_card NOT FOUND"
-
-
 def test_send_typing(log_path: str, baseline: int) -> tuple[bool, str]:
-    """DM: send_typing 方法存在且可被呼叫（G4）。
+    """send_typing() actually delivers a typing indicator to Teams — G4.
 
-    直接建立一個暫時 adapter 並對 DM_CHAT_ID 呼叫 send_typing()。
-    send_typing() 設計為 best-effort（任何失敗都靜默吞掉），所以只要：
-    1. 方法存在 (hasattr)
-    2. 呼叫不拋例外（非 best-effort 的外層例外，如 import error）
-    3. 如果 gateway 正在跑，log 裡會出現 Control/Typing 或 send_typing 字樣
-
-    驗收：inspect + asyncio 呼叫不拋例外 → PASS。
-    gateway.log 裡有 send_typing 跡象是加分（非必要，因為 best-effort 靜默）。
+    Real behavioral test: the old version was a "didn't raise" check
+    (existence + no-exception), but send_typing is best-effort by
+    design — it swallows ALL exceptions, so "didn't raise" is trivially
+    true regardless of whether the typing indicator actually landed.
+    This version calls send_typing with a real adapter, then checks
+    gateway.log for the success signal we just added
+    ("TeamsMTK: send_typing ok").  A failure signal or timeout = FAIL.
     """
+    import asyncio
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import asyncio, inspect
 
-    # 1. 方法存在性檢查
-    if not hasattr(TeamsMTKAdapter, "send_typing"):
-        return False, "send_typing method NOT FOUND on TeamsMTKAdapter"
+    adapter = TeamsMTKAdapter(None)
 
-    sig = inspect.signature(TeamsMTKAdapter.send_typing)
-    params = list(sig.parameters.keys())
-    # 基底契約要求 (self, chat_id, metadata=None)
-    if "chat_id" not in params:
-        return False, f"send_typing signature missing chat_id: {sig}"
-    if "metadata" not in params:
-        return False, f"send_typing signature missing metadata=None: {sig}"
+    async def _call():
+        await adapter.send_typing(DM_CHAT_ID, metadata=None)
 
-    # 2. 實際呼叫不拋例外
-    # 注意：send_typing 內部對任何例外都 swallow，所以呼叫本身幾乎一定成功
     try:
-        adapter = TeamsMTKAdapter(None)
-
-        async def _call():
-            await adapter.send_typing(DM_CHAT_ID, metadata=None)
-
         asyncio.run(_call())
     except Exception as e:
         return False, f"send_typing raised unexpected exception: {e}"
 
-    # 3. 檢查 gateway.log 是否有 typing indicator 跡象（加分項，非必要）
-    new_log = tail_log(log_path, baseline)
-    typing_evidence = ""
-    for line in new_log.splitlines():
-        if "send_typing" in line or "Control/Typing" in line:
-            typing_evidence = line.strip()
-            break
-
-    evidence = f"send_typing(chat_id, metadata=None) called without exception; sig={sig}"
-    if typing_evidence:
-        evidence += f" | log: {typing_evidence}"
+    # The real evidence: did the POST succeed?
+    found, evidence = wait_and_check_log(
+        log_path, baseline,
+        [r"TeamsMTK: send_typing ok"],
+        wait_seconds=5,
+    )
+    if not found:
+        fail_found, fail_ev = wait_and_check_log(
+            log_path, baseline,
+            [r"send_typing got status", r"send_typing failed"],
+            wait_seconds=1,
+        )
+        if fail_found:
+            return False, f"send_typing POST failed: {fail_ev}"
+        return False, f"No send_typing success signal in log; evidence: {evidence[-200:]}"
     return True, evidence
 
 
 def test_list_conversations(log_path: str, baseline: int) -> tuple[bool, str]:
-    """G13-A.1: list_conversations() 呼叫 Skype chat service 回傳對話清單。
+    """G13-A.1: list_conversations() calls Skype chat service and returns real convs.
 
-    直接呼叫 TeamsMTKAdapter.list_conversations()（同步方法，不需 asyncio），
-    驗收條件：
-    1. 方法存在
-    2. 回傳 list（即使空清單也算通過——空清單說明 API 呼叫成功但無結果）
-    3. 若有結果，第一筆須含 'id' 欄位
+    Real behavioral test: the old version let empty list = PASS ("token
+    may be expired or no convs").  That's exactly the failure mode this
+    test should CATCH — if the skype token is expired, list_conversations
+    must not silently return [].  This version checks the gateway.log
+    for an explicit success signal ("list_conversations...ok, N convs")
+    AND that the returned list is non-empty (this is a real Teams account
+    with at least the E2E test DM + group convs — 0 results means
+    something is broken).
     """
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import inspect
 
-    # 方法存在性
-    if not hasattr(TeamsMTKAdapter, "list_conversations"):
-        return False, "list_conversations NOT FOUND on TeamsMTKAdapter"
-
-    sig = inspect.signature(TeamsMTKAdapter.list_conversations)
-
-    # 建立暫時 adapter 並呼叫
-    try:
-        adapter = TeamsMTKAdapter(None)
-        convs = adapter.list_conversations(limit=10)
-    except Exception as e:
-        return False, f"list_conversations raised: {e}"
+    adapter = TeamsMTKAdapter(None)
+    convs = adapter.list_conversations(limit=10)
 
     if not isinstance(convs, list):
         return False, f"list_conversations returned non-list: {type(convs)}"
 
-    if len(convs) == 0:
-        # 空清單：API 可能真的沒有對話，或 token 無效——視為通過但附記
-        return True, "list_conversations returned [] (empty — token may be expired or no convs)"
+    # Check for the success signal in the log
+    found, evidence = wait_and_check_log(
+        log_path, baseline,
+        [r"TeamsMTK: list_conversations.*ok, \d+ convs", r"TeamsMTK: _TeamsAuth list_conversations.*ok, \d+ convs"],
+        wait_seconds=3,
+    )
+    if not found:
+        fail_found, fail_ev = wait_and_check_log(
+            log_path, baseline,
+            [r"list_conversations failed", r"list_conversations raw failed"],
+            wait_seconds=1,
+        )
+        if fail_found:
+            return False, f"list_conversations API failed: {fail_ev}"
+        # No success OR failure log — the call returned before this test's baseline
+        # (adapter was just constructed, no gateway event loop). Check result count.
+        if len(convs) == 0:
+            return False, "list_conversations returned [] with no success log — likely token expired or API failure swallowed"
 
-    # 驗證第一筆結構
+    if len(convs) == 0:
+        return False, "list_conversations returned [] — expected at least the E2E test DM/group convs"
+
     first = convs[0]
     if "id" not in first:
         return False, f"list_conversations first entry missing 'id': {first}"
@@ -727,68 +876,63 @@ def test_list_conversations(log_path: str, baseline: int) -> tuple[bool, str]:
 
 
 def test_find_conv_by_display_name(log_path: str, baseline: int) -> tuple[bool, str]:
-    """G13-A.2: _find_conv_by_display_name() 依顯示名稱搜尋對話。
+    """G13-A.2: _find_conv_by_display_name() resolves a name to a conv ID.
 
-    驗收條件：
-    1. 方法存在
-    2. 傳入空字串回傳 None（邊界條件）
-    3. 傳入不可能存在的隨機名稱回傳 None（未知名稱正確回傳 None）
-    4. 若 list_conversations 有結果，取第一筆 title 部分比對應找到對應的 conv_id
+    Real behavioral test: the old version let list_conversations=[]
+    silently pass through ("token may be expired").  This version
+    requires that:
+      1. empty-string → None (boundary, unchanged)
+      2. nonexistent name → None (unchanged)
+      3. A known conversation is actually resolvable
+    If list_conversations returns [] we FAIL (not silently pass), because
+    this test DM+group are known to exist in this account.
     """
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
-    import inspect
 
-    # 方法存在性
-    if not hasattr(TeamsMTKAdapter, "_find_conv_by_display_name"):
-        return False, "_find_conv_by_display_name NOT FOUND on TeamsMTKAdapter"
+    adapter = TeamsMTKAdapter(None)
 
-    sig = inspect.signature(TeamsMTKAdapter._find_conv_by_display_name)
+    # Boundary 1: empty string → None
+    result_empty = adapter._find_conv_by_display_name("")
+    if result_empty is not None:
+        return False, f"_find_conv_by_display_name('') returned {result_empty!r} (expected None)"
 
-    try:
-        adapter = TeamsMTKAdapter(None)
+    # Boundary 2: nonexistent name → None
+    result_unknown = adapter._find_conv_by_display_name("__E2E_NONEXISTENT_CONV_XYZZY__")
+    if result_unknown is not None:
+        return False, f"_find_conv_by_display_name(unknown) returned {result_unknown!r} (expected None)"
 
-        # 邊界條件 1：空字串應回傳 None
-        result_empty = adapter._find_conv_by_display_name("")
-        if result_empty is not None:
-            return False, f"_find_conv_by_display_name('') returned {result_empty!r} (expected None)"
+    # Real test: resolve an actual conversation
+    convs = adapter.list_conversations(limit=50)
+    if len(convs) == 0:
+        return False, "list_conversations returned [] — cannot test name resolution; likely token expired"
 
-        # 邊界條件 2：不存在的名稱應回傳 None
-        result_unknown = adapter._find_conv_by_display_name("__E2E_NONEXISTENT_CONV_XYZZY__")
-        if result_unknown is not None:
-            return False, (
-                f"_find_conv_by_display_name(unknown) returned {result_unknown!r} "
-                f"(expected None)"
-            )
+    # Find a conv with a usable title
+    target_conv = None
+    for c in convs:
+        title = (c.get("title") or "").strip()
+        if len(title) >= 4:
+            target_conv = c
+            break
 
-        # 實際比對：取 list_conversations 第一筆，截取前 5 字元做 substring 搜尋
-        convs = adapter.list_conversations(limit=10)
-        if convs:
-            first_title = (convs[0].get("title") or "").strip()
-            first_id = convs[0].get("id", "")
-            if first_title and len(first_title) >= 4:
-                needle = first_title[:5]  # 前 5 字元足以唯一辨識
-                found_id = adapter._find_conv_by_display_name(needle)
-                if found_id is None:
-                    return False, (
-                        f"_find_conv_by_display_name({needle!r}) returned None "
-                        f"(expected conv_id matching {first_id[:40]!r})"
-                    )
-                return True, (
-                    f"empty→None ✓, unknown→None ✓, "
-                    f"needle={needle!r} → id={found_id[:40]!r} ✓"
-                )
-            else:
-                # 無可用 title（空 title 對話）——僅驗邊界條件
-                return True, (
-                    f"empty→None ✓, unknown→None ✓; "
-                    f"first conv has no title, substring match skipped"
-                )
-        else:
-            # list_conversations 回傳空清單
-            return True, "empty→None ✓, unknown→None ✓; list_conversations empty (token may be expired)"
+    if target_conv is None:
+        # No conv with usable title — verify boundary conditions passed at least
+        conv_ids = [c.get("id", "")[:20] for c in convs[:5]]
+        return False, (
+            f"No conversation with usable title (≥4 chars) found for "
+            f"substring-resolution test. conv_ids={conv_ids}"
+        )
 
-    except Exception as e:
-        return False, f"_find_conv_by_display_name raised: {e}"
+    needle = target_conv["title"][:5]
+    found_id = adapter._find_conv_by_display_name(needle)
+    if found_id is None:
+        return False, (
+            f"_find_conv_by_display_name({needle!r}) returned None "
+            f"(expected conv_id matching {target_conv.get('id', '')[:40]!r})"
+        )
+    return True, (
+        f"empty→None ✓, unknown→None ✓, "
+        f"needle={needle!r} → id={found_id[:40]!r} ✓"
+    )
 
 
 def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
