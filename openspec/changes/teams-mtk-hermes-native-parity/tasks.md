@@ -15,7 +15,45 @@
 >   `openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py` 新增
 >   對應 `test_<name>` 函式並加入 `NAMED_TESTS`，否則不得標記為完成。
 >
-> ### 現有 E2E 測項清單（2026-07-12 基準，`NAMED_TESTS` 實際存在）
+> ### ⚠️ 2026-07-13 追加：Verdict Tier 分級（防止「log 有字串就過」的假通過）
+>
+> **背景**：2026-07-13 一次會話中連續發現 5 個真實 bug（streaming echo 重複、
+> markdown 殘留、圖片下載 domain routing、480b fallback 撞 403、garbage
+> detector 誤判疑慮），**全部都是既有 log-pattern 測項無法偵測的**——log 顯示
+> `Turn ended: success` 或 `sent message id=` 不代表使用者實際看到的內容是對的。
+> 這暴露了現有 E2E 測項只做了「有沒有執行到某段 code path」，沒做「使用者最終
+> 看到的東西對不對」。
+>
+> **兩層 Verdict Tier，缺一不可**：
+>
+> | Tier | 驗證什麼 | 適用場景 | 侷限 |
+> |------|---------|---------|------|
+> | **Tier 1 — Log Pattern** | 某段 code path 是否被執行到（`sent message id=`、`edited message`、方法簽名存在） | 確認功能存在/被呼叫、確認 429 backoff 等基礎設施行為 | **無法偵測輸出內容品質問題**——log 說「成功」不代表內容對 |
+> | **Tier 2 — Content** | 讀回 `get_messages_raw()`（Skype MSG API）取得**使用者實際看到的 HTML**，用正則/結構比對驗證格式、重複、殘留語法 | 任何跟「輸出品質」「格式轉換」「重複發送」有關的 bug | 較慢（需真實 API 往返 + 等待 agent turn 完成，30-90s/測項） |
+>
+> **判斷準則**：若這個 bug 的症狀是「使用者在 Teams 畫面上看到不對的東西」
+> （殘留語法、重複訊息、格式跑掉、亂碼），**必須寫 Tier 2 測項**，Tier 1
+> 的字串比對永遠無法真正證明修復生效。若症狀是「某功能完全沒被呼叫/報錯」，
+> Tier 1 已足夠。
+>
+> **教訓（2026-07-13 撰寫 Tier 2 測項時踩到的坑）**：`send_via_sdk()`
+> （用 bot 自己的 skype_token 發送）看起來像模擬使用者發訊息，但實際上
+> gateway 的 echo guard 會把這當成「自己發的訊息」直接 skip，訊息根本不會
+> 觸發 agent 處理——測項會靜默讀到*舊*回覆而非新回覆，造成誤判。
+> **Tier 2 測項必須用 `send_chat_message()`（Graph API + 真實使用者
+> token）模擬使用者輸入**，`send_via_sdk()` 只能用在故意測「echo guard
+> 本身」的場景（如 `dm-echo-guard` 測項）。
+>
+> ### 2026-07-13 新增 Tier 2 測項（真實 gateway 驗證通過）
+> | 測項名稱 | Tier | 對應 bug | 驗證方式 | 上次驗證 |
+> |---------|------|---------|---------|---------|
+> | `streaming-no-echo-duplication` | 2 | Streaming edit echo 重複發送（`OriginalArrivalTime` vs `id`） | 讀回真實對話，比對近似重複訊息 body | ✅ 2026-07-13 PASS |
+> | `no-residual-markdown-in-reply` | 2 | `**`/`` ` ``/`[url]`/`- `/pipe table 殘留未轉 HTML | 讀回真實 HTML，正則檢查殘留語法 | ✅ 2026-07-13 PASS |
+> | `no-disallowed-fallback-models` | 1 | 480b fallback 撞 403 浪費 retry | 檢查 config.yaml provider 清單 | ✅ 2026-07-13 PASS |
+> | `attachment-domain-routing-covers-asyncgw` | 1 | 圖片下載 domain routing 漏 `asyncgw.teams.microsoft.com` | 靜態檢查 domain match 邏輯涵蓋子網域 | ✅ 2026-07-13 PASS |
+> | `garbage-detector-no-false-positive` | 2 | Garbage detector 誤判疑慮 | 真實訊息確認有送達 + 記錄 discard 次數（非零仍算過，因 retry 成功） | ✅ 2026-07-13 PASS |
+>
+
 > | 測項名稱 | 對應功能 | 上次驗證 |
 > |---------|---------|---------|
 > | `dm-echo-guard` | BUG-1 echo guard | 2026-07-11 |

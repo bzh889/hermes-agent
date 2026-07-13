@@ -990,7 +990,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             try:
                 msgs = self._fetch_messages(conv_id=_conv_id, limit=5)
                 if msgs:
-                    self._last_message_ids[_conv_id] = msgs[-1].get("id")
+                    # After reverse(), msgs are oldest-first; max id = newest.
+                    # Use the max id so we skip all historical messages.
+                    _max_id = max(m.get("id", "") for m in msgs if m.get("id"))
+                    self._last_message_ids[_conv_id] = _max_id
                     # Extract user OID from first message's "from" URL
                     for m in msgs:
                         from_url = m.get("from", "")
@@ -1116,7 +1119,24 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         is_html=True,
                         return_context=False,
                     )
+                    # SDK now returns OriginalArrivalTime as "id" when MSG API
+                    # omits the "id" key (which happens in both 1:1 DMs and
+                    # groups).  Fallback: read-back latest messages.
                     msg_id = result.get("id")
+                    if not msg_id:
+                        try:
+                            recent = self._fetch_messages(chat_id, limit=3)
+                            for m in recent:
+                                _props = m.get("properties", {})
+                                _raw = m.get("_raw_properties", {})
+                                _sender = _props.get("hermes_sender") or _raw.get("hermes_sender")
+                                if _sender in ("agent", "bot"):
+                                    msg_id = m.get("id", "")
+                                    break
+                            if msg_id:
+                                logger.info("TeamsMTK: recovered msg id=%s from read-back", msg_id)
+                        except Exception:
+                            logger.debug("TeamsMTK: msg-id read-back failed", exc_info=True)
                     if msg_id:
                         self._last_sent_message_id = str(msg_id)
                         self._sent_dedup.is_duplicate(str(msg_id))
@@ -1174,6 +1194,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             resp.raise_for_status()
             data = resp.json()
+            # MSG API returns the message ID as "OriginalArrivalTime"
+            # (not under "id").  This IS the real message ID usable for
+            # edit/delete, not a timestamp.
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
                 self._last_sent_message_id = str(msg_id)
@@ -1191,6 +1214,75 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "group" if "@thread" in chat_id else "dm", "chat_id": chat_id}
+
+    @staticmethod
+    def _inline_md_to_html(text: str) -> str:
+        """Convert inline markdown (bold/code/bullets/headers) to HTML.
+
+        Runs BEFORE table extraction so bold/code inside table cells also
+        gets converted. Safe to run on content that already has real HTML
+        tags mixed in — it only targets literal markdown syntax
+        (``**``, `` ` ``, leading ``- ``/``# ``), not existing tags.
+        """
+        # Headers: "### Foo" -> "<b>Foo</b>" (line-anchored, 1-6 #'s)
+        text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+        # Bold: **foo** -> <b>foo</b> (non-greedy, single line)
+        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        # Inline code: `foo` -> <code>foo</code>
+        text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
+        # Markdown links: [text](url) -> <a href="url">text</a>
+        text = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', r'<a href="\2">\1</a>', text)
+        # Bullet lines: "- foo" / "* foo" -> "• foo" (skip pipe-table rows)
+        text = re.sub(r'^[ \t]*[-*][ \t]+(?!\|)(.+)$', r'• \1', text, flags=re.MULTILINE)
+        return text
+
+    @staticmethod
+    def _md_tables_to_html(text: str) -> str:
+        """Convert markdown pipe tables in *text* to HTML <table border="1">.
+
+        Handles mixed content where some sections are already HTML
+        (e.g. <h3>, <ul>) and others are markdown pipe-tables.
+        Non-table lines just get ``\\n → <br>`` replacement.
+        """
+        lines = text.split('\n')
+        result: list[str] = []
+        in_table = False
+        table_rows: list[list[str]] = []
+        is_header_row = True
+
+        def _flush_table() -> None:
+            nonlocal in_table, table_rows, is_header_row
+            if not table_rows:
+                return
+            html = '<table border="1" style="border-collapse:collapse">'
+            for ri, row in enumerate(table_rows):
+                tag = 'th' if ri == 0 else 'td'
+                html += '<tr>' + ''.join(f'<{tag}>{cell.strip()}</{tag}>' for cell in row) + '</tr>'
+            html += '</table>'
+            result.append(html)
+            table_rows = []
+            is_header_row = True
+            in_table = False
+
+        for ln in lines:
+            stripped = ln.strip()
+            # Detect pipe-table row: starts and ends with |
+            if '|' in stripped and stripped.startswith('|') and stripped.endswith('|'):
+                cells = [c for c in stripped.split('|')[1:-1]]
+                # Skip separator rows (|---|---|)
+                if all(re.fullmatch(r'[-:]+', c.strip()) for c in cells):
+                    is_header_row = False
+                    continue
+                in_table = True
+                table_rows.append(cells)
+            else:
+                if in_table:
+                    _flush_table()
+                result.append(ln.replace('\n', '<br>') if '\n' in ln else ln)
+
+        _flush_table()
+        # Replace remaining newlines (outside tables) with <br>
+        return '<br>'.join(result)
 
     def _build_html(self, content: str, _skip_footer_extract: bool = False) -> tuple:
         """Shared HTML builder for send() and edit_message().
@@ -1235,9 +1327,21 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             content = content[:_inline.start()].rstrip()
 
         # Convert (footer-stripped) content to Teams-compatible HTML
-        if re.search(r'<(b|i|a|br|h[1-6]|ul|ol|li|pre|code|strong|em)\b', content):
+        has_html_tags = bool(re.search(r'<(b|i|a|br|h[1-6]|ul|ol|li|pre|code|strong|em|table|thead|tbody|tr|th|td)\b', content))
+        has_md_tables = bool(re.search(r'^\s*\|.+\|\s*$', content, re.MULTILINE))
+        has_inline_md = bool(re.search(r'\*\*.+?\*\*|`[^`\n]+?`|^#{1,6}\s|^[ \t]*[-*][ \t]+(?!\|)|\[[^\]]+\]\(https?://[^\s)]+\)', content, re.MULTILINE))
+
+        if has_html_tags and (has_md_tables or has_inline_md):
+            # Mixed mode: content has real HTML tags AND leftover markdown
+            # syntax (bold/code/bullets/headers/pipe-tables) that a model
+            # emitted alongside them. Convert markdown pieces to HTML first,
+            # then collapse remaining newlines.
+            body_html = self._md_tables_to_html(self._inline_md_to_html(content))
+        elif has_html_tags:
+            # Pure HTML-ish content — just replace newlines
             body_html = content.replace('\n', '<br>')
         else:
+            # Pure markdown — full conversion
             body_html = markdown.markdown(
                 content,
                 extensions=['fenced_code', 'tables', 'nl2br', 'md_in_html'],
@@ -2172,7 +2276,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _svc = _SDKReactions(_SDKGraphAdapter(self._auth.graph_token()))
+                _adapter = _SDKAuthAdapter(self._auth)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _svc = _SDKReactions(_http)
                 result = _svc.send(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, message_id)
                 return result
@@ -2194,7 +2300,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _svc = _SDKReactions(_SDKGraphAdapter(self._auth.graph_token()))
+                _adapter = _SDKAuthAdapter(self._auth)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _svc = _SDKReactions(_http)
                 result = _svc.remove(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, message_id)
                 return result
@@ -2219,7 +2327,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """
         try:
             if _SDK_AVAILABLE and self._auth.skype_token():
-                _svc = _SDKMessages(_SDKAuthAdapter(self._auth))
+                _adapter = _SDKAuthAdapter(self._auth)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _svc = _SDKMessages(_http)
                 result = _svc.delete(chat_id, message_id)
                 logger.info("TeamsMTK: deleted msg=%s in conv=%s", message_id, chat_id[:30])
                 return result
@@ -2247,7 +2357,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not _SDK_AVAILABLE or not self._auth.skype_token():
             return [{"error": "SDK or auth unavailable"}]
         try:
-            _svc = _SDKActivity(_SDKAuthAdapter(self._auth))
+            _adapter = _SDKAuthAdapter(self._auth)
+            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+            _svc = _SDKActivity(_http)
             _method_map = {
                 "spaces": _svc.list_spaces,
                 "notes": _svc.list_notes,
@@ -2289,7 +2401,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "error": f"Target conversation not in allowed list"}
         try:
             if _SDK_AVAILABLE and self._auth.skype_token():
-                _svc = _SDKMessages(_SDKAuthAdapter(self._auth))
+                _adapter = _SDKAuthAdapter(self._auth)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _svc = _SDKMessages(_http)
                 result = _svc.forward(source_conv, message_id, target_conv)
                 logger.info("TeamsMTK: forwarded msg=%s %s→%s", message_id,
                             source_conv[:20], target_conv[:20])
@@ -2467,7 +2581,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not _SDK_AVAILABLE or not self._auth.skype_token():
             return []
         try:
-            _svc = _SDKConvs(_SDKAuthAdapter(self._auth))
+            _adapter = _SDKAuthAdapter(self._auth)
+            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+            _svc = _SDKConvs(_http)
             results = _svc.find(name)
             return results if isinstance(results, list) else []
         except Exception:
@@ -2481,7 +2597,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not _SDK_AVAILABLE or not self._auth.skype_token():
             return self._list_conversations_raw(limit)
         try:
-            _svc = _SDKConvs(_SDKAuthAdapter(self._auth))
+            _adapter = _SDKAuthAdapter(self._auth)
+            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+            _svc = _SDKConvs(_http)
             raw = _svc.list(limit=limit)
             if not isinstance(raw, list):
                 return self._list_conversations_raw(limit)
