@@ -788,9 +788,8 @@ def test_send_typing(log_path: str, baseline: int) -> tuple[bool, str]:
     (existence + no-exception), but send_typing is best-effort by
     design — it swallows ALL exceptions, so "didn't raise" is trivially
     true regardless of whether the typing indicator actually landed.
-    This version calls send_typing with a real adapter, then checks
-    gateway.log for the success signal we just added
-    ("TeamsMTK: send_typing ok").  A failure signal or timeout = FAIL.
+    This version calls send_typing with a real adapter and verifies
+    the return value (True = POST 201, False = failure).
     """
     import asyncio
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
@@ -798,29 +797,16 @@ def test_send_typing(log_path: str, baseline: int) -> tuple[bool, str]:
     adapter = TeamsMTKAdapter(None)
 
     async def _call():
-        await adapter.send_typing(DM_CHAT_ID, metadata=None)
+        return await adapter.send_typing(DM_CHAT_ID, metadata=None)
 
     try:
-        asyncio.run(_call())
+        result = asyncio.run(_call())
     except Exception as e:
         return False, f"send_typing raised unexpected exception: {e}"
 
-    # The real evidence: did the POST succeed?
-    found, evidence = wait_and_check_log(
-        log_path, baseline,
-        [r"TeamsMTK: send_typing ok"],
-        wait_seconds=5,
-    )
-    if not found:
-        fail_found, fail_ev = wait_and_check_log(
-            log_path, baseline,
-            [r"send_typing got status", r"send_typing failed"],
-            wait_seconds=1,
-        )
-        if fail_found:
-            return False, f"send_typing POST failed: {fail_ev}"
-        return False, f"No send_typing success signal in log; evidence: {evidence[-200:]}"
-    return True, evidence
+    if result is True:
+        return True, "send_typing returned True (POST 201)"
+    return False, f"send_typing returned {result!r} (expected True = POST 201)"
 
 
 def test_list_conversations(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -935,6 +921,59 @@ def test_find_conv_by_display_name(log_path: str, baseline: int) -> tuple[bool, 
     )
 
 
+def test_find_conversation(log_path: str, baseline: int) -> tuple[bool, str]:
+    """find_conversation() — SDK ConversationsService.find() search path.
+
+    Previously covered by NO E2E test at all (design.md/DEPENDENCIES.md
+    marked it "✅ 已實作" but zero automated coverage ever exercised it).
+    This method shares the exact same class of bug just fixed in
+    list_conversations/_find_conv_by_display_name — a missing SDK
+    constructor arg (_SDKConvs(_http) instead of _SDKConvs(_http,
+    _msg_svc)) that silently raised TypeError and was swallowed by a
+    bare `except Exception: return []`. Without this test, a regression
+    of that exact bug would ship silently (empty list looks identical to
+    "no matches found").
+
+    Real behavioral test: resolves a known conversation via a real
+    substring search and requires a non-empty result with 'id' present.
+    """
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    adapter = TeamsMTKAdapter(None)
+
+    # Get a real conversation to search for
+    convs = adapter.list_conversations(limit=50)
+    if len(convs) == 0:
+        return False, "list_conversations returned [] — cannot test find_conversation; likely token expired"
+
+    target_conv = None
+    for c in convs:
+        title = (c.get("title") or "").strip()
+        # Skip placeholder titles the SDK's cache layer deliberately excludes
+        # from find() results (cache.py add_conversation() skips "Untitled"/
+        # "Unknown"/"" by design — these are 1:1 chats where the SDK couldn't
+        # resolve a display name). Picking one here would make find()
+        # correctly return [] and cause a false test failure.
+        if len(title) >= 4 and title not in ("Untitled", "Unknown"):
+            target_conv = c
+            break
+    if target_conv is None:
+        return False, "No conversation with a usable (non-placeholder) title found for find_conversation test"
+
+    needle = target_conv["title"][:5]
+    results = adapter.find_conversation(needle)
+    if not isinstance(results, list):
+        return False, f"find_conversation returned non-list: {type(results)}"
+    if len(results) == 0:
+        return False, (
+            f"find_conversation({needle!r}) returned [] — expected at least one match "
+            f"(this exact bug class silently returns [] on SDK TypeError)"
+        )
+    if "id" not in results[0]:
+        return False, f"find_conversation first result missing 'id': {results[0]}"
+    return True, f"find_conversation({needle!r}) returned {len(results)} result(s), first id={results[0].get('id','')[:40]!r}"
+
+
 def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
     """G5 + standalone_sender_fn: _standalone_send 已在 platform_registry 中註冊。
 
@@ -1025,6 +1064,7 @@ NAMED_TESTS = {
     "send-typing": test_send_typing,
     "list-conversations": test_list_conversations,
     "find-conv-by-display-name": test_find_conv_by_display_name,
+    "find-conversation": test_find_conversation,
     "standalone-sender-fn": test_standalone_sender_fn,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
     "streaming-no-echo-duplication": test_streaming_no_echo_duplication,

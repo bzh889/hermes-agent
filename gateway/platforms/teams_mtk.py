@@ -1471,7 +1471,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", e)
             return SendResult(success=False, error=str(e))
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:
+    async def send_typing(self, chat_id: str, metadata=None) -> bool:
         """Send a one-shot typing indicator via the Skype chat service.
 
         Posts {"messagetype": "Control/Typing", "content": ""} — the Skype
@@ -1481,6 +1481,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         auth, rate limit) must be swallowed rather than raised — a dropped
         typing ping is invisible to the user, but an unhandled exception
         would kill the keep-typing loop for the rest of the turn.
+
+        Returns True if the POST returned 201, False otherwise.
         """
         try:
             self._auth._inject_truststore()
@@ -1496,10 +1498,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "TeamsMTK: send_typing got status %s for conv=%s: %s",
                     resp.status_code, chat_id[:30], (resp.text or "")[:200],
                 )
+                return False
             else:
                 logger.info("TeamsMTK: send_typing ok conv=%s", chat_id[:30])
+                return True
         except Exception as e:
             logger.debug("TeamsMTK: send_typing failed (non-fatal): %s", e)
+            return False
 
     # ---- G-MEDIA: image / document / adaptive card sending ----
 
