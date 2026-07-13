@@ -2587,98 +2587,24 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         try:
             _adapter = _SDKAuthAdapter(self._auth)
             _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
-            _svc = _SDKConvs(_http)
+            _msg_svc = _SDKMessages(_http)
+            _svc = _SDKConvs(_http, _msg_svc)
             results = _svc.find(name)
             return results if isinstance(results, list) else []
         except Exception:
             return []
 
-    def list_conversations(self, limit: int = 50) -> list:
-        """List all known conversations. Read-only (G13 Phase A).
-
-        Returns normalized dicts with id, title, type, member_names.
-        """
-        if not _SDK_AVAILABLE or not self._auth.skype_token():
-            return self._list_conversations_raw(limit)
-        try:
-            _adapter = _SDKAuthAdapter(self._auth)
-            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
-            _svc = _SDKConvs(_http)
-            raw = _svc.list(limit=limit)
-            if not isinstance(raw, list):
-                return self._list_conversations_raw(limit)
-            results = []
-            for c in raw:
-                props = c.get("threadProperties", {})
-                title = props.get("topic", "") or ""
-                ctype = props.get("threadType", "") or ""
-                members = c.get("members", [])
-                member_names = ", ".join(
-                    m.get("imdisplayname", m.get("friendlyName", ""))
-                    for m in members
-                    if m.get("imdisplayname") or m.get("friendlyName")
-                )
-                results.append({
-                    "id": c.get("id", ""),
-                    "title": title,
-                    "type": ctype,
-                    "member_names": member_names,
-                })
-            logger.info("TeamsMTK: _TeamsAuth list_conversations SDK ok, %d convs", len(results))
-            return results
-        except Exception:
-            logger.warning("TeamsMTK: _TeamsAuth list_conversations SDK failed, falling back to raw")
-            return self._list_conversations_raw(limit)
-
-    def _list_conversations_raw(self, limit: int = 50) -> list:
-        """Raw HTTP fallback for list_conversations when SDK unavailable."""
-        try:
-            import requests as _req
-            skype_token = self._auth.skype_token()
-            url = f"{self._auth.msg_base}/conversations"
-            headers = {"Authentication": f"skypetoken={skype_token}"}
-            session = _req.Session()
-            self._auth._inject_truststore()
-            resp = session.get(url, params={"pageSize": min(limit, 50)}, headers=headers, verify=False, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            convs = data.get("conversations", [])
-            results = []
-            for c in convs[:limit]:
-                props = c.get("threadProperties", {})
-                title = props.get("topic", "") or ""
-                ctype = props.get("threadType", "") or ""
-                members = c.get("members", [])
-                member_names = ", ".join(
-                    m.get("imdisplayname", m.get("friendlyName", ""))
-                    for m in members
-                    if m.get("imdisplayname") or m.get("friendlyName")
-                )
-                results.append({
-                    "id": c.get("id", ""),
-                    "title": title,
-                    "type": ctype,
-                    "member_names": member_names,
-                })
-            logger.info("TeamsMTK: _TeamsAuth list_conversations raw ok, %d convs", len(results))
-            return results
-        except Exception:
-            logger.warning("TeamsMTK: _TeamsAuth list_conversations raw failed")
-            return []
-
-    def _find_conv_by_display_name(self, name: str):
-        """Resolve a display name to a conversation ID (G13-A)."""
-        name = name.strip()
-        if not name:
-            return None
-        convs = self.list_conversations(limit=200)
-        name_lower = name.lower()
-        for c in convs:
-            if name_lower in c.get("title", "").lower():
-                return c["id"]
-            if name_lower in c.get("member_names", "").lower():
-                return c["id"]
-        return None
+    # NOTE 2026-07-13: list_conversations()/_find_conv_by_display_name()
+    # were previously ALSO defined here (duplicate of the L1874/L1944
+    # definitions above). Python lets a later same-name method silently
+    # shadow an earlier one in the same class body, so THIS duplicate
+    # (whose SDK path called `_SDKConvs(_http)` — missing the required
+    # `messages` arg) was the version that actually ran, while the correct
+    # L1874 definition sat dead. Every SDK-path call raised TypeError and
+    # silently fell back to raw HTTP — masked because the raw-HTTP
+    # fallback also succeeds, so the bug was invisible until real E2E
+    # checked which code path actually fired. Removed the duplicate;
+    # the L1874/L1944 definitions are now the only implementation.
 
     # ---- G13-B.3 stub: Proactive chat creation (blocked: Chat.Create scope) ----
 
