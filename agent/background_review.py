@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.thread_scoped_output import thread_scoped_silence
@@ -580,6 +581,27 @@ def _run_review_in_thread(
     review prompt, and surfaces a compact action summary back to the user
     via ``agent._safe_print`` and ``agent.background_review_callback``.
     """
+    # Skip entirely when the parent's primary provider is in an active
+    # fallback/rate-limit cooldown (e.g. AIDE daily quota exhausted).
+    # The review fork inherits the parent's LIVE runtime + shares the
+    # same credential_pool (see _resolve_review_runtime / AIAgent(...)
+    # below), so firing it during a quota-exhausted window means two
+    # threads (main loop + this daemon thread) race to mutate the same
+    # mutable agent attributes (model/provider/base_url/_fallback_index)
+    # via try_activate_fallback() and hammer the same already-empty
+    # credential pool. That race is what produced the ~72 terminal calls
+    # in one 120s fallback window during a real incident (2026-07-11) —
+    # the review's own retry/fallback churn compounded with the main
+    # loop's empty-response nudge + context-compression recovery path.
+    # Bailing out here costs nothing: the review is best-effort and the
+    # next successful turn will retrigger it once the cooldown clears.
+    if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+        logger.info(
+            "Skipping background review: primary provider is in fallback/"
+            "rate-limit cooldown until %.0f (now=%.0f)",
+            getattr(agent, "_rate_limited_until", 0), time.monotonic(),
+        )
+        return
     # Local import to avoid a hard circular dep at module load.
     from run_agent import AIAgent
     from tools.terminal_tool import set_approval_callback as _set_approval_callback

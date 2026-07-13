@@ -97,16 +97,27 @@ def _garbage_score(text: str) -> float:
     # Garbage has almost no multi-word English phrases.  Only evaluated
     # against Latin words — CJK text naturally has no "runs of 5 Latin words"
     # so checking CJK would generate false positives on Chinese replies.
+    # Require ≥40 Latin words (raised from 20) to avoid triggering on
+    # bilingual content where isolated technical terms (variable names,
+    # CR IDs, bug IDs) push past the old 20-word floor but are not
+    # part of coherent English prose.
     latin_words = re.findall(r"[A-Za-z]+", text)
-    if len(latin_words) >= 20:
+    if len(latin_words) >= 40:
         long_runs = len(re.findall(r"(?:[A-Za-z]+\s+){4,}[A-Za-z]+", text))
         run_density = long_runs / (len(latin_words) / 20)
         if run_density < 0.2:
             score += (0.2 - run_density) * 8
 
     # ── Signal 4: High stray-symbol density ──────────────────────────────
-    # Threshold set at 6 % (above normal markdown / code block density).
-    symbol_ratio = sum(1 for ch in text if ch in _SYMBOL_SET) / n
+    # Strip HTML tags first so that <td>, <tr>, <div>, style attrs etc. don't
+    # inflate the symbol count on legitimate formatted output (HTML tables,
+    # branded message wrappers).  Only the *text* content is scored.
+    _stripped = re.sub(r"<[^>]+>", "", text)
+    _sn = len(_stripped) if _stripped else 1
+    if _sn >= _MIN_CHARS:
+        symbol_ratio = sum(1 for ch in _stripped if ch in _SYMBOL_SET) / _sn
+    else:
+        symbol_ratio = sum(1 for ch in text if ch in _SYMBOL_SET) / n
     if symbol_ratio > 0.06:
         score += (symbol_ratio - 0.06) * 40
 

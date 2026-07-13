@@ -4,6 +4,11 @@
 /_pycache/
 *.pyc*
 __pycache__/
+# teams_skype_sdk dev SDK checkout — contains real user OID/name cache.json
+# (PII) that must never be committed. The SDK itself is a local pip install
+# path (pyproject.toml `teams` extra → `teams_skype_sdk` package name), not
+# vendored source; each dev checks it out separately.
+lib/
 .venv/
 .venv
 .vscode/

@@ -1,0 +1,326 @@
+{
+  "mtk/wfm-pro-glm5-1-744b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 21.2,
+      "output_chars": 580,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "The architecture of modern real-time communication systems fundamentally relies on the ability to push information from servers to clients with minimal latency. While WebSockets provide a fully duplex"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 21.4,
+      "output_chars": 0,
+      "garbage": {
+        "score": 0.0,
+        "reasons": [
+          "empty"
+        ]
+      },
+      "sample": ""
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 21.0,
+      "output_chars": 761,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "HTTP long-polling is a technique used to emulate a persistent, real-time connection between a client and a server over the inherently stateless and request-response-based HTTP protocol. In a tradition"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 20.0,
+      "output_chars": 1594,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "The evolution of real-time web communication has necessitated ingenious adaptations of the underlying HTTP protocol, which was fundamentally designed for stateless, short-lived document retrieval. Amo"
+    }
+  ],
+  "mtk/glm-5-1 (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 37.3,
+      "output_chars": 1689,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "To understand the mechanics, limitations, and resilient design patterns of HTTP long-polling, one must first examine the foundational principles of the Hypertext Transfer Protocol and how it has been "
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 70.1,
+      "output_chars": 1461,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "The landscape of distributed systems and real-time communication frequently necessitates the delivery of asynchronous updates from servers to clients over networks fundamentally designed for stateless"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 31.5,
+      "output_chars": 596,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "In the modern landscape of distributed systems and real-time communications, maintaining a reliable flow of information between clients and servers is a paramount concern. This challenge is particular"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 29.2,
+      "output_chars": 554,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "To fully understand the intricacies of real-time communication over the web, one must delve into the mechanisms that allow servers to push information to clients despite the request-response nature of"
+    }
+  ],
+  "mtk/qwen3-5-397b-a17b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 12.3,
+      "output_chars": 1370,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n### Introduction to Real-Time Communication Mechanisms in Constrained Networks\n\nIn the landscape of modern distributed systems, maintaining real-time communication channels between clients and serve"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 13.4,
+      "output_chars": 81,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Technical Summary: HTTP Long-Polling Architecture and Resilience Patterns\n\n##"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 14.0,
+      "output_chars": 2919,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Technical Summary of HTTP Long-Polling Architecture and Resilience Patterns\n\n## Introduction to Server-Client Real-Time Communication\n\nIn the modern landscape of distributed systems and web applic"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 11.2,
+      "output_chars": 2007,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Technical Summary of HTTP Long-Polling Architecture and Resilience Patterns\n\n## Introduction to Real-Time Communication Challenges\n\nIn modern distributed systems, maintaining a real-time flow of i"
+    }
+  ],
+  "mtk/qwen3-5-122b-a10b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 8.3,
+      "output_chars": 10820,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "# Comprehensive Technical Analysis of HTTP Long-Polling, Proxy Intermediaries, and Resilient Retry Architectures\n\n## Introduction\n\nIn the modern landscape of distributed systems and real-time communic"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 7.7,
+      "output_chars": 10862,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "The architectural landscape of modern real-time communication systems relies heavily on mechanisms that allow servers to push data to clients with minimal latency while maintaining efficient resource "
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 7.9,
+      "output_chars": 10464,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "### Comprehensive Technical Analysis of HTTP Long-Polling, Proxy Failures, and Resilient Retry Architectures\n\nIn the realm of modern distributed system architecture, the necessity for real-time commun"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 8.0,
+      "output_chars": 10857,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "# Comprehensive Technical Analysis of HTTP Long-Polling, Corporate Network Challenges, and Robust Retry Architectures\n\n## Introduction to Real-Time Communication Patterns in Distributed Systems\n\nIn th"
+    }
+  ],
+  "mtk/wfm-reasoning-oa-qwen3-thinking-235b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 17.5,
+      "output_chars": 7295,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Comprehensive Technical Analysis of HTTP Long-Polling Systems: Implementation, Failure Modes, and Resilient Retry Strategies\n\n## 1. Understanding HTTP Long-Polling Mechanism\n\nHTTP long-polling rep"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 17.1,
+      "output_chars": 9812,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Comprehensive Technical Analysis of HTTP Long-Polling Systems: Mechanics, Failure Modes, and Resilient Design Patterns\n\n## Introduction\n\nHTTP long-polling represents a critical pattern in modern w"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 17.1,
+      "output_chars": 9890,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Comprehensive Technical Analysis of HTTP Long-Polling Systems: Mechanisms, Failure Modes, and Resilient Implementation Strategies\n\n## Introduction\n\nHTTP long-polling represents a critical communic"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 17.1,
+      "output_chars": 9865,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "\n\n# Comprehensive Technical Analysis of HTTP Long-Polling Systems: Implementation, Failure Modes, and Resilience Strategies\n\n## Introduction to HTTP Long-Polling Architecture\n\nHTTP long-polling repres"
+    }
+  ],
+  "mtk/gpt-oss-120b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 12.7,
+      "output_chars": 8611,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – HTTP Long‑Polling, Failure Modes Behind Corporate Proxies, and a Robust Retry/Back‑off Design**  \n*(≈ 1 800 words)*  \n\n---\n\n## 1. Introduction  \n\nReal‑time or near‑real‑time comm"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 11.2,
+      "output_chars": 8387,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – HTTP Long‑Polling, Failure Modes Behind Corporate Proxies, and a Robust Retry / Back‑off Design**  \n*(≈ 1 850 words)*  \n\n---\n\n## 1. Introduction  \n\nReal‑time web applications oft"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 11.8,
+      "output_chars": 8238,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – HTTP Long‑Polling, Failure Modes Behind Corporate Proxies, and a Robust Retry/Backoff Design**  \n*Prepared for developers, network‑engineers, and reliability‑engineers who must k"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 11.2,
+      "output_chars": 8660,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – Robust HTTP Long‑Polling in Corporate Environments**  \n*Prepared for developers and network‑operations engineers who must design, implement, and maintain resilient long‑polling s"
+    }
+  ],
+  "mtk/wfm-flash-oa-gpt-oss-120b (via aide)": [
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 14.7,
+      "output_chars": 8265,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – HTTP Long‑Polling, Failure Modes, Retry/Back‑off Design, and Pseudocode Example**  \n\n---\n\n## 1. Overview of HTTP Long‑Polling  \n\n### 1.1 Definition  \nHTTP long‑polling is a clien"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 13.8,
+      "output_chars": 7754,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – Robust HTTP Long‑Polling for Long‑Lived Connections Behind Corporate Proxies**  \n*(≈ 1 650 words)*  \n\n---\n\n## 1. Fundamentals of HTTP Long‑Polling  \n\n### 1.1 What Is Long‑Polling"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 13.8,
+      "output_chars": 8374,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Technical Summary – HTTP Long‑Polling, Failure Modes, and Robust Retry/Back‑off Design**  \n\n---\n\n### 1. Overview of HTTP Long‑Polling  \n\nHTTP long‑polling is a client‑server communication pattern th"
+    },
+    {
+      "ok": true,
+      "status": 200,
+      "latency": 13.8,
+      "output_chars": 8025,
+      "garbage": {
+        "score": 0.0,
+        "reasons": []
+      },
+      "sample": "**Comprehensive Technical Overview – HTTP Long‑Polling, Proxy‑Induced Failures, and Robust Retry Logic**  \n\n---\n\n## 1. HTTP Long‑Polling – Mechanism and Lifecycle  \n\n### 1.1 Core Principle  \n\nHTTP lon"
+    }
+  ]
+}

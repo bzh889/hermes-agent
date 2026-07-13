@@ -768,6 +768,9 @@ class APIServerAdapter(BasePlatformAdapter):
     # ``async_delivery_supported()``.
     supports_async_delivery: bool = False
 
+    # How long the rebuilt model-catalog payload stays valid.
+    _MODEL_CACHE_TTL: float = 120.0  # seconds
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
@@ -800,6 +803,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # resolves requests by session key, while API clients address the
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
+        # Model-catalog cache: avoids rebuilding the full provider scan
+        # (3+ seconds) on every /v1/models or /api/model/options request.
+        self._models_payload_cache: Optional[Dict[str, Any]] = None
+        self._models_payload_ts: float = 0.0
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
         # Concurrency cap shared across all agent-serving endpoints
         # (/v1/chat/completions, /v1/responses, /v1/runs). Read from
@@ -1201,26 +1208,112 @@ class APIServerAdapter(BasePlatformAdapter):
             "pid": os.getpid(),
         })
 
+    def _get_cached_models_payload(self, force: bool = False) -> Dict[str, Any]:
+        """Return the full model-catalog payload, cached for TTL seconds.
+
+        ``build_models_payload`` probes every provider's auth status
+        and can take 3+ seconds on Windows.  Callers that only need
+        the flat id list (``_handle_models``) or the rich dashboard
+        payload (``_handle_model_options``) share the same cache so
+        the expensive scan happens at most once per TTL window.
+        """
+        now = time.time()
+        if not force and self._models_payload_cache is not None \
+                and (now - self._models_payload_ts) < self._MODEL_CACHE_TTL:
+            return self._models_payload_cache
+
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
+        payload = build_models_payload(
+            load_picker_context(),
+            include_unconfigured=True,   # include all so /v1/models can filter
+            picker_hints=True,
+            canonical_order=True,
+            pricing=True,
+            capabilities=True,
+            refresh=force,
+        )
+        self._models_payload_cache = payload
+        self._models_payload_ts = now
+        return payload
+
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — return hermes-agent as an available model."""
+        """GET /v1/models — return available models.
+
+        When the dashboard model registry is reachable (via
+        ``hermes_cli.inventory.build_models_payload``), returns every
+        model from every provider (authenticated or not) — matching
+        what ``/api/model/options`` on the dashboard returns, but in
+        the flat OpenAI-compatible shape the extension expects.
+
+        Falls back to the single ``self._model_name`` entry when the
+        registry is unavailable (e.g. missing inventory module or
+        profile scope failure).
+
+        The model catalog is cached for ``_MODEL_CACHE_TTL`` seconds
+        so repeated requests (e.g. from browser extensions) return
+        instantly instead of rebuilding the full provider scan every
+        time.
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
-        return web.json_response({
-            "object": "list",
-            "data": [
-                {
-                    "id": self._model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "hermes",
-                    "permission": [],
-                    "root": self._model_name,
-                    "parent": None,
-                }
-            ],
-        })
+        model_ids = [self._model_name]
+        try:
+            payload = self._get_cached_models_payload()
+            providers = payload.get("providers", [])
+            for prov in providers:
+                model_ids.extend(prov.get("models", []))
+            # Deduplicate while preserving order; the advertised model stays first.
+            seen: set[str] = set()
+            unique: list[str] = []
+            for mid in model_ids:
+                if mid not in seen:
+                    seen.add(mid)
+                    unique.append(mid)
+            model_ids = unique
+        except Exception:
+            pass  # Fall back to single-model response
+
+        data = [
+            {
+                "id": mid,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "hermes",
+                "permission": [],
+                "root": mid,
+                "parent": None,
+            }
+            for mid in model_ids
+        ]
+        return web.json_response({"object": "list", "data": data})
+
+    async def _handle_model_options(self, request: "web.Request") -> "web.Response":
+        """GET /api/model/options — dashboard-compatible model catalog.
+
+        Mirrors the dashboard's ``/api/model/options`` endpoint so
+        browser extensions can discover the full provider/model
+        catalog from the API server directly — avoiding an extra
+        round-trip (and CORS issues) to the dashboard.
+
+        The model catalog is cached for ``_MODEL_CACHE_TTL`` seconds.
+        Pass ``?refresh=true`` to force a fresh build.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            refresh = request.query.get("refresh", "").lower() in ("1", "true", "yes")
+            payload = self._get_cached_models_payload(force=refresh)
+            return web.json_response(payload)
+        except Exception:
+            _log.exception("GET /api/model/options failed")
+            return web.json_response(
+                {"providers": [], "model": self._model_name, "provider": "hermes"},
+            )
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
@@ -4468,6 +4561,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
+            self._app.router.add_get("/api/model/options", self._handle_model_options)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)

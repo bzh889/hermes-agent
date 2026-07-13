@@ -127,7 +127,7 @@ class TestDraftStreamingHappyPath:
         adapter = _make_draft_capable_adapter()
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)
 
@@ -165,7 +165,7 @@ class TestDraftStreamingHappyPath:
         adapter = _make_draft_capable_adapter()
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="group",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "67890", cfg)
 
@@ -190,7 +190,7 @@ class TestDraftFallbackOnFailure:
         adapter = _make_draft_capable_adapter(draft_succeeds=False)
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)
 
@@ -218,7 +218,7 @@ class TestDraftIdLifecycle:
         adapter = _make_draft_capable_adapter()
         cfg1 = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer1 = GatewayStreamConsumer(adapter, "12345", cfg1)
         consumer1.on_delta("First reply")
@@ -229,7 +229,7 @@ class TestDraftIdLifecycle:
 
         cfg2 = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer2 = GatewayStreamConsumer(adapter, "12345", cfg2)
         consumer2.on_delta("Second reply")
@@ -254,7 +254,7 @@ class TestDraftIdLifecycle:
         adapter = _make_draft_capable_adapter()
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)
 
@@ -298,7 +298,7 @@ class TestAlreadySentInDraftMode:
         adapter = _make_draft_capable_adapter()
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)
 
@@ -371,7 +371,7 @@ class TestAdapterPrefersFreshFinal:
         adapter = _make_fresh_final_adapter()
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
             fresh_final_after_seconds=0.0,  # only the adapter hook drives fresh-final
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)
@@ -464,7 +464,7 @@ class TestRichAwareOverflow:
         ])
         cfg = StreamConsumerConfig(
             transport="auto", chat_type="dm",
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
             fresh_final_after_seconds=0.0,
         )
         consumer = GatewayStreamConsumer(adapter, "12345", cfg)

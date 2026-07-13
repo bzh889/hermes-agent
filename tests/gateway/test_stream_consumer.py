@@ -338,7 +338,7 @@ class TestStreamRunMediaStripping:
         adapter.edit_message = AsyncMock(return_value=edit_result)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Feed deltas
@@ -387,7 +387,7 @@ class TestBeforeFinalizeHook:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
             on_before_finalize=lambda: events.append("pause"),
         )
         consumer.on_delta("Hello")
@@ -410,7 +410,7 @@ class TestBeforeFinalizeHook:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
             on_before_finalize=lambda: events.append("pause"),
         )
         consumer.on_delta("Hello")
@@ -440,7 +440,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=edit_result)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Phase 1: intermediate text before tool calls
@@ -470,7 +470,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # No text before the boundary — model went straight to tool calls
@@ -494,7 +494,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=edit_result)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉")
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Thinking...")
@@ -533,7 +533,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Phase 1")
@@ -557,7 +557,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Text")
@@ -580,7 +580,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=False, error="flood_control:6"))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉")
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -612,7 +612,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=False, error="flood_control:6"))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉")
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -657,7 +657,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(side_effect=edit_results + [edit_results[-1]] * 10)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉")
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -695,7 +695,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Hello")
@@ -723,7 +723,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.send = AsyncMock(return_value=send_result)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Short response.")
@@ -750,7 +750,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Simulate: text → tool boundary → text → tool boundary → text (3 segments)
@@ -786,7 +786,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=False, error="flood_control:6"))
         adapter.MAX_MESSAGE_LENGTH = 610
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉")
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉")
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         prefix = "Hello world"
@@ -818,7 +818,7 @@ class TestSegmentBreakOnToolBoundary:
         )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Simulate a pre-tool streamed segment that becomes the visible prefix
@@ -870,7 +870,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.delete_message = AsyncMock(return_value=None)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # The stale partial shows pre-tool text that is NOT a prefix of the
@@ -899,7 +899,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.delete_message = AsyncMock(return_value=None)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Visible partial is a true prefix of the final response — the
@@ -932,7 +932,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.delete_message = AsyncMock(return_value=None)
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer._message_id = "msg_partial"
@@ -954,7 +954,7 @@ class TestSegmentBreakOnToolBoundary:
         )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer._message_id = "msg_partial"
@@ -988,7 +988,7 @@ class TestFinalResponseDeliveryGuard:
             side_effect=lambda text, limit: [text[:limit], text[limit:]],
         )
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Simulate prior tool-progress edits that set _already_sent
@@ -1024,7 +1024,7 @@ class TestFinalResponseDeliveryGuard:
             side_effect=lambda text, limit: [text[:limit], text[limit:]],
         )
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         long_text = "x" * 200
@@ -1066,7 +1066,7 @@ class TestFinalContentDeliveredGuard:
         ])
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Simulate streaming: send initial text, then more text, then done
@@ -1108,7 +1108,7 @@ class TestFinalContentDeliveredGuard:
         )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("The complete response.\n")
@@ -1145,7 +1145,7 @@ class TestFinalContentDeliveredGuard:
         )
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # Trigger enough delta to enter fallback mode
@@ -1191,7 +1191,7 @@ class TestEditOverflowSplitAndDeliver:
         adapter.MAX_MESSAGE_LENGTH = 4096
 
         config = StreamConsumerConfig(
-            edit_interval=0.01, buffer_threshold=5, cursor="",
+            edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="",
         )
         consumer = GatewayStreamConsumer(adapter, "chat_999", config)
 
@@ -1231,7 +1231,7 @@ class TestInterimCommentaryMessages:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
         )
 
         consumer.on_commentary("I'll inspect the repository first.")
@@ -1254,7 +1254,7 @@ class TestInterimCommentaryMessages:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
         )
 
         consumer.on_delta("Done.")
@@ -1278,7 +1278,7 @@ class TestInterimCommentaryMessages:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉"),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor=" ▉"),
         )
 
         consumer.on_delta("Hello")
@@ -1319,7 +1319,7 @@ class TestCancelledConsumerSetsFlags:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
         )
 
         # Stream some text — the consumer sends it and sets already_sent
@@ -1355,7 +1355,7 @@ class TestCancelledConsumerSetsFlags:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_123",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
         )
 
         # Send fails — already_sent stays False
@@ -1547,7 +1547,7 @@ class TestFilterAndAccumulateIntegration:
         consumer = GatewayStreamConsumer(
             adapter,
             "chat_test",
-            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1),
         )
 
         # Simulate streaming: think block then visible text
@@ -1590,7 +1590,7 @@ class TestBufferOnlyMode:
         adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg1"))
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
 
-        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor="", buffer_only=True)
+        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="", buffer_only=True)
         consumer = GatewayStreamConsumer(adapter, "!room:server", config=cfg)
 
         for word in ["Hello", " world", ", this", " is", " a", " test"]:
@@ -1614,7 +1614,7 @@ class TestBufferOnlyMode:
         ])
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
 
-        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor="", buffer_only=True)
+        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="", buffer_only=True)
         consumer = GatewayStreamConsumer(adapter, "!room:server", config=cfg)
 
         consumer.on_delta("Before tool call")
@@ -1641,7 +1641,7 @@ class TestBufferOnlyMode:
         ])
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
 
-        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor="", buffer_only=True)
+        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="", buffer_only=True)
         consumer = GatewayStreamConsumer(adapter, "!room:server", config=cfg)
 
         consumer.on_delta("Working on it...")
@@ -1664,7 +1664,7 @@ class TestBufferOnlyMode:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
 
         # buffer_threshold=5 means any 5+ chars triggers an early edit
-        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor="")
+        cfg = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1, cursor="")
         consumer = GatewayStreamConsumer(adapter, "!room:server", config=cfg)
 
         consumer.on_delta("Hello world, this is long enough to trigger edits")
@@ -1964,7 +1964,7 @@ class TestUtf16OverflowDetection:
             side_effect=lambda text, limit, **kw: [text[:len(text)//2], text[len(text)//2:]],
         )
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         # 🚀 is 1 codepoint = 2 UTF-16 units. 2200 of them = 2200 codepoints,
@@ -2038,6 +2038,7 @@ class TestFreshFinalRespectsAdapterDecline:
             buffer_threshold=5,
             fresh_final_after_seconds=1.0,  # time threshold would trigger
             cursor=" ▉",
+            first_buffer_multiplier=1,  # disable punctuation gate for legacy tests
         )
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
@@ -2090,6 +2091,7 @@ class TestFreshFinalRespectsAdapterDecline:
             buffer_threshold=5,
             fresh_final_after_seconds=1.0,
             cursor=" ▉",
+            first_buffer_multiplier=1,  # disable punctuation gate for legacy tests
         )
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
@@ -2188,7 +2190,7 @@ class TestRunStillCurrentGuard:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(
             adapter, "chat_123", config,
             run_still_current=lambda: True,
@@ -2212,7 +2214,7 @@ class TestRunStillCurrentGuard:
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
         consumer.on_delta("Normal message")
@@ -2232,7 +2234,7 @@ class TestRunStillCurrentGuard:
         adapter.edit_message = AsyncMock()
         adapter.MAX_MESSAGE_LENGTH = 4096
 
-        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, first_buffer_multiplier=1)
         consumer = GatewayStreamConsumer(
             adapter, "chat_123", config,
             run_still_current=lambda: False,

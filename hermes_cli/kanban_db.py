@@ -880,6 +880,10 @@ class Task:
     # the defaults; empty list = explicitly no extra skills.
     skills: Optional[list] = None
     model_override: Optional[str] = None
+    # Per-task provider override. When set, the dispatcher passes
+    # --provider <name> to the worker, overriding the profile's default
+    # provider. NULL = use the profile default.
+    provider_override: Optional[str] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -978,6 +982,7 @@ class Task:
             ),
             skills=skills_value,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
+            provider_override=row["provider_override"] if "provider_override" in keys and row["provider_override"] else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
@@ -1141,6 +1146,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
     model_override       TEXT,
+    -- Per-task provider override. When set, the dispatcher passes
+    -- --provider <name> to the worker, overriding the profile's default
+    -- provider. NULL = use the profile default.
+    provider_override    TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
@@ -1946,6 +1955,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
+
+    if "provider_override" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN provider_override TEXT")
 
     if "goal_mode" not in cols:
         # Ralph-style goal loop toggle for the dispatched worker. 0 (the
@@ -7788,6 +7800,8 @@ def _default_spawn(
                 cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
+    if task.provider_override:
+        cmd.extend(["--provider", task.provider_override])
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])

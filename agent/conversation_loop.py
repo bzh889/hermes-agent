@@ -4595,10 +4595,19 @@ def run_conversation(
                     try:
                         from agent.garbage_detector import is_garbage
                         if is_garbage(final_response):
+                            # DEBUG: dump the flagged output for manual inspection
+                            from pathlib import Path
+                            from agent.garbage_detector import _garbage_score as _calc_score
+                            _dbg_dir = Path(get_hermes_home()) / "logs" / "garbage_samples"
+                            _dbg_dir.mkdir(parents=True, exist_ok=True)
+                            import time as _t
+                            _dbg_path = _dbg_dir / f"{int(_t.time()*1000)}.txt"
+                            _dbg_path.write_text(final_response, encoding="utf-8")
+                            _score = _calc_score(final_response)
                             logger.warning(
-                                "%s⚠️  Garbage output detected (multi-script/corruption "
-                                "heuristic triggered, %d chars) — discarding and retrying",
-                                agent.log_prefix, len(final_response),
+                                "%s⚠️  Garbage output detected (score=%.1f, multi-script/corruption "
+                                "heuristic triggered, %d chars) — sample saved to %s — discarding and retrying",
+                                agent.log_prefix, _score, len(final_response), _dbg_path.name,
                             )
                             agent._emit_status(
                                 "⚠️  Output quality check failed — discarding and retrying"

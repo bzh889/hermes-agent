@@ -31,6 +31,7 @@ from gateway.config import (
     DEFAULT_STREAMING_EDIT_INTERVAL as _DEFAULT_STREAMING_EDIT_INTERVAL,
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
     DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR,
+    DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER as _DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER,
 )
 from gateway.response_filters import (
     is_intentional_silence_response as _is_intentional_silence_response,
@@ -51,6 +52,11 @@ _NEW_SEGMENT = object()
 _COMMENTARY = object()
 
 
+# Sentence-ending punctuation — used by the first-fragment punctuation gate
+# to decide when enough text has accumulated for a coherent first bubble.
+_SENTENCE_END_RE = re.compile(r'[.!?。！？…]')
+
+
 @dataclass
 class StreamConsumerConfig:
     """Runtime config for a single stream consumer instance."""
@@ -66,6 +72,13 @@ class StreamConsumerConfig:
     # openclaw/openclaw#72038.  Default 0 = always edit in place (legacy
     # behavior).  The gateway enables this selectively per-platform.
     fresh_final_after_seconds: float = 0.0
+    # First-fragment punctuation gate multiplier.  When _message_id is None
+    # (first send of a segment), the effective buffer threshold is raised to
+    # buffer_threshold × first_buffer_multiplier UNLESS the accumulated text
+    # already contains a sentence-ending punctuation mark.  This avoids the
+    # "first fragment no punctuation" problem where a few mid-sentence words
+    # appear as an incomplete chat bubble.  Default 4 (≈96 chars).
+    first_buffer_multiplier: int = _DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER
     # Streaming transport selection:
     #   "auto"  — prefer native draft streaming (e.g. Telegram sendMessageDraft)
     #             when the adapter + chat supports it; fall back to edit.
@@ -599,6 +612,32 @@ class GatewayStreamConsumer:
                         self._clean_for_display(self._accumulated)
                     )
                 ):
+                    should_edit = False
+                # First-fragment punctuation gate: don't create the initial chat
+                # bubble until we have at least one sentence-ending punctuation
+                # mark (. ! ? 。！？ …) OR the accumulated text exceeds
+                # first_buffer_multiplier × buffer_threshold chars.  Without
+                # this, the first visible fragment is often a few mid-sentence
+                # words with no punctuation, producing an awkward incomplete
+                # bubble (especially visible on Teams).  Only gates the very
+                # first send/edit of a segment (_message_id is None); edits to
+                # an existing message are not affected.  Bypassed on got_done /
+                # got_segment_break / commentary so latency-sensitive paths are
+                # not delayed.
+                _first_send_punct_gate = (
+                    self._message_id is None
+                    and self.cfg.first_buffer_multiplier > 1
+                    and not self._use_draft_streaming
+                    and not got_done
+                    and not got_segment_break
+                    and commentary_text is None
+                    and not _SENTENCE_END_RE.search(
+                        self._clean_for_display(self._accumulated)
+                    )
+                    and len(self._accumulated)
+                        < self.cfg.buffer_threshold * self.cfg.first_buffer_multiplier
+                )
+                if _first_send_punct_gate:
                     should_edit = False
                 if should_edit and self._accumulated:
                     # Split overflow: if accumulated text exceeds the platform

@@ -40,6 +40,78 @@ class ImmediateThread:
         self._target()
 
 
+def test_background_review_skipped_during_fallback_cooldown(monkeypatch):
+    """When the primary provider is in an active fallback/rate-limit
+    cooldown, the review fork must not be spawned at all.
+
+    Regression for the 2026-07-11 incident where the review's own AIAgent
+    fork (created with the parent's LIVE runtime + shared credential_pool)
+    fired its own API call + retry/fallback chain concurrently with the
+    main loop's empty-response recovery, producing ~72 terminal calls in
+    a single 120s window during an AIDE quota-exhaustion event.
+    """
+    import time as _time
+
+    events = []
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            events.append("init")
+
+        def run_conversation(self, **kwargs):
+            events.append("run_conversation")
+
+    monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+
+    agent = _bare_agent()
+    agent._rate_limited_until = _time.monotonic() + 60  # still cooling down
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+    )
+
+    assert events == []  # never constructed the review fork
+
+
+def test_background_review_runs_when_cooldown_expired(monkeypatch):
+    """Sanity check: the skip is cooldown-scoped, not a blanket disable."""
+    import time as _time
+
+    events = []
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            events.append("init")
+            self._session_messages = []
+
+        def run_conversation(self, **kwargs):
+            events.append("run_conversation")
+
+        def shutdown_memory_provider(self):
+            events.append("shutdown_memory_provider")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+
+    agent = _bare_agent()
+    agent._rate_limited_until = _time.monotonic() - 5  # cooldown already expired
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+    )
+
+    assert "init" in events
+    assert "run_conversation" in events
+
+
 def test_background_review_shuts_down_memory_provider_before_close(monkeypatch):
     events = []
 

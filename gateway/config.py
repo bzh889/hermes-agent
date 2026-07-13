@@ -415,6 +415,12 @@ class PlatformConfig:
 DEFAULT_STREAMING_EDIT_INTERVAL: float = 0.8
 DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 24
 DEFAULT_STREAMING_CURSOR: str = " ▉"
+# Multiplier applied to buffer_threshold for the *first* send of a segment.
+# The first streaming fragment often appears mid-sentence (no ending punctuation),
+# creating an awkward incomplete bubble on platforms like Teams.  Delaying the
+# first send until ~4× the normal buffer (≈96 chars) gives the LLM enough room
+# to finish at least one clause with punctuation before the bubble appears.
+DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER: int = 4
 
 
 @dataclass
@@ -449,6 +455,13 @@ class StreamingConfig:
     # Telegram only (other platforms ignore the setting).  Default 0 disables
     # the fresh-message replacement path; set >0 to opt in.
     fresh_final_after_seconds: float = 0.0
+    # First-fragment punctuation gate.  The first streaming edit for a new
+    # segment (no existing message_id) is delayed until the accumulated text
+    # contains a sentence-ending punctuation mark OR exceeds
+    # first_buffer_multiplier × buffer_threshold characters.  This avoids
+    # creating an awkward incomplete bubble that shows just a few words with
+    # no punctuation.  Default 4 (≈96 chars with the default buffer_threshold=24).
+    first_buffer_multiplier: int = DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -458,6 +471,7 @@ class StreamingConfig:
             "buffer_threshold": self.buffer_threshold,
             "cursor": self.cursor,
             "fresh_final_after_seconds": self.fresh_final_after_seconds,
+            "first_buffer_multiplier": self.first_buffer_multiplier,
         }
 
     @classmethod
@@ -476,6 +490,10 @@ class StreamingConfig:
             cursor=data.get("cursor", DEFAULT_STREAMING_CURSOR),
             fresh_final_after_seconds=_coerce_float(
                 data.get("fresh_final_after_seconds"), 0.0
+            ),
+            first_buffer_multiplier=_coerce_int(
+                data.get("first_buffer_multiplier"),
+                DEFAULT_STREAMING_FIRST_BUFFER_MULTIPLIER,
             ),
         )
 
@@ -516,6 +534,11 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.RELAY: lambda cfg: bool(
         cfg.extra.get("relay_url") or cfg.extra.get("url")
     ),
+    # TeamsMTK authenticates via a local skypetoken cache (no client_id/secret
+    # OAuth, no bot token) — the only config-level signal is the conversation
+    # ID being monitored (extra["conversation_id"], set from
+    # MTK_TEAMS_CONVERSATION_ID). See gateway/platforms/teams_mtk.py.
+    Platform.TEAMS_MTK: lambda cfg: bool(cfg.extra.get("conversation_id")),
 }
 
 

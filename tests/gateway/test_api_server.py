@@ -795,8 +795,10 @@ class TestModelsEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["object"] == "list"
-            assert len(data["data"]) == 1
-            assert data["data"][0]["id"] == "hermes-agent"
+            # The advertised model must always appear (possibly alongside
+            # additional models from the dashboard registry).
+            ids = [m["id"] for m in data["data"]]
+            assert "hermes-agent" in ids
             assert data["data"][0]["owned_by"] == "hermes"
 
     @pytest.mark.asyncio

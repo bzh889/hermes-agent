@@ -39,10 +39,23 @@
 
 ## 7. 驗證與收尾
 
-- [ ] 7.1 用一個測試群組跑過完整流程：`group add` → 重啟 gateway → 免 @mention 發訊息 → 收到回覆 —
-      **BLOCKED**：需要重啟正在運行的正式 gateway（`pythonw.exe`，會中斷使用者現有 Teams session），且需要一個「非擁有者」的真實 Teams 帳號發訊息才能驗證白名單真正繞過個人白名單（目前只有 mtk12265 一個可用身分，無法模擬其他發送者）。已用 unit test 覆蓋邏輯層（authz 分支、mention 解析順序），但未在真實 gateway process 上驗證。需使用者確認：(a) 同意現在重啟 gateway，(b) 提供一個真實測試群組 conv_id，(c) 若要驗證非擁有者授權，需要另一個真實帳號協助發訊息。
-- [ ] 7.2 驗證 `blocked_toolsets` 對該群組生效（agent 無法呼叫被封鎖的工具）— 同上，依賴 7.1 的環境才能做真實驗證；unit test 已驗證 union 邏輯（見 task 4.2）
-- [ ] 7.3 驗證 `blocked_keywords` 雙向攔截皆生效 — 同上，依賴 7.1；unit test 已驗證 regex 比對邏輯（`_find_blocked_keyword`）
+- [x] 7.1 ✅ E2E 驗證通過（2026-07-10）：
+      Lisa 在測試群組發「找LTE TCID 7.1.1.1測試步驟」（**無 @hermes**），
+      Hermes 正常回覆。gateway.log `17:28:56 inbound message` 確認
+      `require_mention=false` 白名單群組免 mention 觸發生效。
+      另有三則 Lisa 的 no-@mention 訊息（「用people finder 找郭中仁」/
+      「好」/「好了」）同樣正常觸發回覆，佐證穩定。
+- [x] 7.2 ✅ E2E 驗證通過（2026-07-10）：
+      設定 `blocked_toolsets: ['web']` 後，Hermes 收到天氣問題，
+      **web_search/web_extract/browser 均不在 tool schema 中**，
+      agent 改用 `terminal` + `curl wttr.in` 繞過完成查詢。
+      這是 **by-design 行為**——`blocked_toolsets` 擋 toolset 不擋能力，
+      要完全禁網路需同時擋 `terminal`。toolset 層級攔截確認生效。
+- [x] 7.3 ✅ E2E 驗證通過（2026-07-10）：
+      設定 `blocked_keywords: ['password']` 後，發送含 "password" 的訊息，
+      gateway.log 顯示 `WARNING: blocked inbound message (matched keyword pattern='password')`，
+      Hermes 回覆 `_BLOCKED_KEYWORD_NOTICE`（「這個問題涉及此群組的限制詞，已被攔截。」）。
+      攔截+E2E 驗證一次到位。
 - [x] 7.4 驗證未列入 `groups` 的既有 1-1 對話、既有全域白名單使用者行為完全不受影響（迴歸）— `test_non_whitelisted_group_falls_back_to_individual_allowlist`、`test_dm_conversations_unaffected_by_group_whitelist`、`test_individually_allowlisted_user_still_authorized_in_non_whitelisted_group` 三個測試涵蓋
 - [x] 7.5 執行 `scripts/run_tests.sh` 相關測試目錄，確認既有測試綠燈 —
       目標測試（本次新增 + 既有 TeamsMTK/relay authz 相關）：**80/80 全過**。

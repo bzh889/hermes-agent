@@ -1519,6 +1519,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  skills:    {', '.join(task.skills)}")
     if task.model_override:
         print(f"  model:     {task.model_override}")
+    if task.provider_override:
+        print(f"  provider:  {task.provider_override}")
     # Effective retry threshold. Show the per-task override if set,
     # otherwise the dispatcher's resolved value from config (or the
     # default if config doesn't set it either). Helps operators see

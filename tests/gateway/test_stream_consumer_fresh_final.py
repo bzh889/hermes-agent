@@ -485,6 +485,7 @@ class TestGotDoneOverflowSplitNotRefinalized:
             chat_id="chat",
             config=StreamConsumerConfig(
                 edit_interval=10.0, buffer_threshold=10_000, cursor=" ▉",
+                first_buffer_multiplier=1,  # disable punctuation gate for these tests
             ),
         )
 
