@@ -1079,8 +1079,12 @@ def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]
             if foreign and foreign_marker in str(foreign.get("content") or ""):
                 break
             time.sleep(1)
-        if not foreign:
-            return False, "Controlled foreign message was not readable from MSG API"
+        foreign_content = str((foreign or {}).get("content") or "")
+        if not foreign or foreign_marker not in foreign_content:
+            return False, (
+                "Controlled foreign message was not ready from MSG API: "
+                f"found={bool(foreign)}, content_length={len(foreign_content)}"
+            )
 
         # Reproduce the live-adapter state: process this exact inbound message
         # before asking the same adapter to enforce safe deletion.
@@ -1088,7 +1092,6 @@ def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]
         adapter._message_handler = AsyncMock()
         asyncio.run(adapter._process_new_messages(GROUP_CHAT_ID, [foreign]))
 
-        foreign_content = str(foreign.get("content") or "")
         foreign_hash = hashlib.sha256(foreign_content.encode("utf-8")).hexdigest()[:10]
         refused = asyncio.run(adapter.delete_message_safe(GROUP_CHAT_ID, foreign_id))
         if (
@@ -1556,15 +1559,18 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
         return False, f"PlatformEntry.emoji != '👥': {checks}"
 
     marker = f"E2E_AUTO standalone sender {time.time_ns()}"
-    result = asyncio.run(fn(None, DM_CHAT_ID, marker))
-    if not isinstance(result, dict) or not result.get("success"):
-        return False, (
-            f"standalone sender returned failure: type={type(result).__name__}, "
-            f"success={result.get('success') if isinstance(result, dict) else None}"
-        )
-
-    message_id = str(result.get("message_id") or "")
+    result = None
+    message_id = ""
     try:
+        result = asyncio.run(fn(None, DM_CHAT_ID, marker))
+        if isinstance(result, dict):
+            message_id = str(result.get("message_id") or "")
+        if not isinstance(result, dict) or not result.get("success"):
+            return False, (
+                f"standalone sender returned failure: type={type(result).__name__}, "
+                f"success={result.get('success') if isinstance(result, dict) else None}"
+            )
+
         deadline = time.time() + 20
         while time.time() < deadline:
             messages = get_messages_raw(DM_CHAT_ID, page_size=30)
@@ -1583,6 +1589,25 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
             f"real Teams read-back; has_message_id={bool(message_id)}"
         )
     finally:
+        if not message_id:
+            # A malformed/failure result can still have sent the marker. Find
+            # the side effect before cleanup without leaking message content.
+            cleanup_deadline = time.time() + 10
+            while time.time() < cleanup_deadline and not message_id:
+                try:
+                    messages = get_messages_raw(DM_CHAT_ID, page_size=30)
+                except Exception:
+                    messages = []
+                marker_msg = next(
+                    (
+                        msg for msg in messages
+                        if marker in str(msg.get("content") or msg.get("body") or "")
+                    ),
+                    None,
+                )
+                message_id = str((marker_msg or {}).get("id") or "")
+                if not message_id:
+                    time.sleep(1)
         if message_id:
             from gateway.platforms.teams_mtk import TeamsMTKAdapter
             cleanup = asyncio.run(TeamsMTKAdapter(None).delete_message(DM_CHAT_ID, message_id))
