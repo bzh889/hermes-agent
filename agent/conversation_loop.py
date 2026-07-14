@@ -4583,14 +4583,15 @@ def run_conversation(
                 # No tool calls - this is the final response
                 final_response = assistant_message.content or ""
 
-                # ── Garbage-output detection ───────────────────────────────
+                # ── Final model-output detection ───────────────────────────
+                # This no-tool-call branch is the scope boundary. Tool results
+                # were appended and consumed in the branch above, which ends in
+                # ``continue``; they must never pass through this detector.
                 # In-house models routed through the AIDE proxy can produce
                 # multi-script gibberish (U+FFFD, random Cyrillic/Arabic
                 # mixed with CJK/Latin) after 429/quota events or stream
                 # interruptions.  Detect this before the response enters
-                # session history and trigger a retry instead.  The heuristic
-                # has 100 % recall against the 24 confirmed corpus samples and
-                # 0 % FP rate against 300 clean samples (2026-07-12 calibration).
+                # session history and trigger a retry instead.
                 if final_response:
                     try:
                         from agent.garbage_detector import is_garbage
@@ -4605,12 +4606,12 @@ def run_conversation(
                             _dbg_path.write_text(final_response, encoding="utf-8")
                             _score = _calc_score(final_response)
                             logger.warning(
-                                "%s⚠️  Garbage output detected (score=%.1f, multi-script/corruption "
+                                "%s⚠️  Corrupt final model output detected (score=%.1f, multi-script/corruption "
                                 "heuristic triggered, %d chars) — sample saved to %s — discarding and retrying",
                                 agent.log_prefix, _score, len(final_response), _dbg_path.name,
                             )
                             agent._emit_status(
-                                "⚠️  Output quality check failed — discarding and retrying"
+                                "⚠️  Final model output quality check failed — discarding and retrying"
                             )
                             # Treat like a transient API failure: activate
                             # fallback chain so the retry uses a different

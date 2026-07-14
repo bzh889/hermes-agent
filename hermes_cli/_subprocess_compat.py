@@ -28,6 +28,7 @@ guarantee.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from typing import Sequence
 
@@ -36,6 +37,7 @@ __all__ = [
     "resolve_node_command",
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
+    "windows_hidden_console_popen_kwargs",
     "windows_hide_flags",
     "windows_detach_popen_kwargs",
 ]
@@ -96,8 +98,11 @@ def resolve_node_command(name: str, argv: Sequence[str]) -> list[str]:
 # because CREATE_NO_WINDOW and DETACHED_PROCESS aren't guaranteed to be
 # present on stdlib subprocess on older Pythons or non-Windows builds.
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NEW_CONSOLE = 0x00000010
 _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
+_STARTF_USESHOWWINDOW = 0x00000001
+_SW_HIDE = 0
 # Escape any Win32 job object the parent process belongs to. Without this,
 # a detached child still inherits its parent's job object membership, and
 # when that parent (Electron, Tauri, Windows Terminal, the Desktop GUI's
@@ -199,6 +204,31 @@ def windows_hide_flags() -> int:
     if not IS_WINDOWS:
         return 0
     return _CREATE_NO_WINDOW
+
+
+def windows_hidden_console_popen_kwargs() -> dict:
+    """Create a hidden console for a short-lived Windows process tree.
+
+    ``CREATE_NO_WINDOW`` hides only the direct child. A shell launched with no
+    console can spawn console-subsystem grandchildren (PowerShell, Python,
+    git) that allocate visible conhost windows and steal foreground focus. A
+    hidden console on the shell root gives the whole CLI tree a console to
+    inherit while stdout and stderr pipes continue to work.
+
+    This is intentionally narrower than :func:`windows_hide_flags`: use it for
+    a shell root whose descendants must share one hidden console, not for GUI
+    apps or detached daemons. Returns an empty dict on non-Windows platforms.
+    """
+    if not IS_WINDOWS:
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= _STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = _SW_HIDE
+    return {
+        "creationflags": _CREATE_NEW_CONSOLE,
+        "startupinfo": startupinfo,
+    }
 
 
 def windows_detach_popen_kwargs() -> dict:

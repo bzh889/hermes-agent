@@ -337,6 +337,67 @@ class _TeamsAuth:
             self._save(tok)
             return tok["graph_token"]
 
+    def exchange_for_scope(self, scope: str) -> dict:
+        """Exchange the shared refresh token for an arbitrary OAuth scope.
+
+        Trouter uses an IC3-scoped access token rather than the Graph or
+        Skype access tokens. Persist refresh-token rotation so a scope
+        exchange cannot invalidate subsequent gateway refreshes.
+        """
+        import requests
+
+        with self._lock:
+            tok = self._load()
+            refresh_token = tok.get("refresh_token", "")
+            if not refresh_token:
+                raise RuntimeError(
+                    "No refresh_token in cache — re-authenticate: "
+                    "python ~/.claude/skills/teams/auth_run.py"
+                )
+
+            self._inject_truststore()
+            response = requests.post(
+                _TOKEN_URL,
+                data={
+                    "client_id": _CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "scope": scope,
+                },
+                verify=False,
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            new_refresh = result.get("refresh_token")
+            if new_refresh and new_refresh != refresh_token:
+                tok["refresh_token"] = new_refresh
+                self._save(tok)
+
+            return result
+
+    def _graph_request(self, method: str, url: str, **kwargs):
+        """Issue an authenticated Microsoft Graph request."""
+        import requests
+
+        self._inject_truststore()
+        headers = {
+            "Authorization": f"Bearer {self.graph_token()}",
+            "Content-Type": "application/json",
+        }
+        headers.update(kwargs.pop("headers", {}))
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            verify=False,
+            timeout=30,
+            **kwargs,
+        )
+        response.raise_for_status()
+        return response
+
     def _force_refresh(self) -> None:
         """Force a token refresh regardless of expiry (e.g. on 401)."""
         with self._lock:
@@ -3170,8 +3231,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         Skype/Teams, Bearer for SharePoint/OneDrive).  Runs in a thread
         pool via ``asyncio.to_thread`` to avoid blocking the event loop.
 
-        Falls back to ``aiohttp`` with a single ``Bearer skype_token`` header
-        when the SDK is not importable — the legacy behaviour.
+        Falls back to ``aiohttp`` with the same domain-specific authentication
+        rules when the SDK is unavailable or the SDK request fails.
         """
         from gateway.platforms.base import cache_image_from_bytes, cache_document_from_bytes
 
@@ -3211,11 +3272,18 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     logger.warning("TeamsMTK: attachment cache error: %s", exc)
                     return None
 
-        # --- Fallback: aiohttp with single Bearer header (legacy) ---
+        # --- Fallback: aiohttp with domain-appropriate auth (mirrors SDK logic) ---
         import aiohttp
-        headers = {"Authorization": f"Bearer {self._auth.skype_token()}"}
+        from urllib.parse import urlparse
+        _netloc = urlparse(url).netloc.lower()
+        if "api.asm.skype.com" in _netloc:
+            _headers = {"Authorization": f"skype_token {self._auth.skype_token()}"}
+        elif "teams.microsoft.com" in _netloc or "skype.com" in _netloc:
+            _headers = {"Authentication": f"skypetoken={self._auth.skype_token()}"}
+        else:
+            _headers = {"Authorization": f"Bearer {self._auth.access_token()}"}
         try:
-            async with aiohttp.ClientSession(headers=headers) as sess:
+            async with aiohttp.ClientSession(headers=_headers) as sess:
                 async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as resp:
                     if resp.status != 200:
                         logger.warning("TeamsMTK: attachment download failed status=%d url=%.60s", resp.status, url)

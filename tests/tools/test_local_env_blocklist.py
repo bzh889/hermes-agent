@@ -281,6 +281,39 @@ class TestActiveVenvMarkerStripping:
         assert "CONDA_PREFIX" not in result
         assert result.get("HOME") == "/home/user"
 
+    def test_make_run_env_strips_active_venv_site_packages_from_pythonpath(self):
+        """A system Python child must not load binary wheels from Hermes' venv."""
+        from tools.environments.local import _make_run_env
+
+        sep = os.pathsep
+        poison = {
+            "VIRTUAL_ENV": "/hermes/.venv",
+            "PYTHONPATH": sep.join([
+                "/project",
+                "/hermes/.venv/Lib/site-packages",
+                "/shared/python",
+            ]),
+            "PATH": "/usr/bin",
+        }
+        with patch.dict(os.environ, poison, clear=True):
+            result = _make_run_env({})
+
+        assert result["PYTHONPATH"] == sep.join(["/project", "/shared/python"])
+
+    def test_sanitize_subprocess_env_preserves_unrelated_pythonpath_entries(self):
+        from tools.environments.local import _sanitize_subprocess_env
+
+        sep = os.pathsep
+        base = {
+            "VIRTUAL_ENV": "/hermes/.venv",
+            "PYTHONPATH": sep.join([
+                "/hermes/.venv/Lib/site-packages",
+                "/project/src",
+            ]),
+        }
+        result = _sanitize_subprocess_env(base)
+        assert result["PYTHONPATH"] == "/project/src"
+
     def test_markers_constant_contents(self):
         from tools.environments.local import _ACTIVE_VENV_MARKER_VARS
         assert "VIRTUAL_ENV" in _ACTIVE_VENV_MARKER_VARS
@@ -430,7 +463,7 @@ class TestSanePathIncludesHomebrew:
     """Verify _SANE_PATH includes macOS Homebrew directories."""
 
     @pytest.fixture(autouse=True)
-    def _disable_hermes_bin_injection(self):
+    def _disable_hermes_bin_injection(self, monkeypatch):
         """These tests assert the sane-path merge in isolation. Disable the
         hermes-install-dir prepend (a separate concern, covered by
         TestHermesBinDirOnPath) so a real ``hermes`` on the test runner's PATH
@@ -438,6 +471,7 @@ class TestSanePathIncludesHomebrew:
         from tools.environments import local as local_mod
         saved = local_mod._HERMES_BIN_DIR
         local_mod._HERMES_BIN_DIR = None  # resolved -> no dir to inject
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
         yield
         local_mod._HERMES_BIN_DIR = saved
 
@@ -580,18 +614,20 @@ class TestHermesBinDirOnPath:
         from tools.environments import local as local_mod
         self._reset_cache()
         local_mod._HERMES_BIN_DIR = "/opt/hermes/bin"
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
         out = local_mod._prepend_hermes_bin_dir("/usr/bin:/bin")
-        assert out.split(os.pathsep)[0] == "/opt/hermes/bin"
-        assert "/usr/bin" in out.split(os.pathsep)
+        assert out.split(":")[0] == "/opt/hermes/bin"
+        assert "/usr/bin" in out.split(":")
 
     def test_prepend_is_idempotent(self, monkeypatch):
         from tools.environments import local as local_mod
         self._reset_cache()
         local_mod._HERMES_BIN_DIR = "/opt/hermes/bin"
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
         once = local_mod._prepend_hermes_bin_dir("/usr/bin:/bin")
         twice = local_mod._prepend_hermes_bin_dir(once)
         assert twice == once
-        assert once.split(os.pathsep).count("/opt/hermes/bin") == 1
+        assert once.split(":").count("/opt/hermes/bin") == 1
 
     def test_prepend_noop_when_unresolved(self, monkeypatch):
         from tools.environments import local as local_mod
@@ -608,7 +644,7 @@ class TestHermesBinDirOnPath:
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
         with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True):
             result = _make_run_env({})
-        entries = result["PATH"].split(os.pathsep)
+        entries = result["PATH"].split(":")
         assert entries[0] == "/opt/hermes/bin"
         assert "/usr/bin" in entries
 

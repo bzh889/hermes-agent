@@ -279,39 +279,68 @@ def test_no_disallowed_fallback_models(log_path: str, baseline: int) -> tuple[bo
     return True, "No known-disallowed models present in any provider's model list"
 
 
-def test_attachment_domain_routing_covers_asyncgw(log_path: str, baseline: int) -> tuple[bool, str]:
+def test_attachment_domain_routing_covers_asm(log_path: str, baseline: int) -> tuple[bool, str]:
     """The SDK's domain-based auth router must recognize
-    as-prod.asyncgw.teams.microsoft.com (and other *.asyncgw.teams.microsoft.com
-    subdomains) as a skypetoken-auth domain, not fall through to Bearer.
-    This is the 07-13 image-download-failure root cause — a Teams attachment
-    subdomain wasn't covered by the domain match, so download_with_auth_url()
-    picked the wrong header and got 401.
+    as-api.asm.skype.com (and other *.asm.skype.com subdomains)
+    as a skype_token-auth domain, not fall through to Bearer.
+    This is the 07-13 image-download-failure root cause — the
+    fallback path used a single Bearer header for all domains,
+    causing 401 on asm.skype.com which requires Authorization: skype_token.
+
+    Real behavioral test: calls download_with_auth_url() itself against a
+    live attachment URL on the asm.skype.com subdomain with the real
+    skype_token.  A successful non-401 response proves the router picked
+    the correct auth header (Authorization: skype_token) for this domain.
+
+    (Previous version extracted the source via inspect.getsource() but
+    never asserted against it — it re-implemented the domain-matching
+    condition locally and checked that reimplementation, so it would
+    still PASS even if the real function's routing logic were deleted.)
     """
     from teams_skype_sdk.api._http import download_with_auth_url
-    import inspect
+    from teams_skype_sdk.auth import TeamsAuth
 
-    src = inspect.getsource(download_with_auth_url)
-    # The routing condition must match on the general domain suffix, not
-    # just the literal "teams.microsoft.com" (which as-prod.asyncgw.teams.
-    # microsoft.com already satisfies as a substring — this test exists to
-    # catch a regression where someone tightens the match to an exact host
-    # equality and breaks subdomains again).
-    test_domains = [
-        "teams.microsoft.com",
-        "as-prod.asyncgw.teams.microsoft.com",
-        "asyncgw.teams.microsoft.com",
-    ]
-    import urllib.parse
-    failures = []
-    for host in test_domains:
-        netloc = host.lower()
-        matched = "teams.microsoft.com" in netloc or "skype.com" in netloc
-        if not matched:
-            failures.append(host)
+    auth = TeamsAuth()
+    skype_token = auth.get_skype_token()
 
-    if failures:
-        return False, f"Domain routing does NOT cover: {failures}"
-    return True, f"Domain routing covers all {len(test_domains)} teams.microsoft.com subdomains (substring match confirmed in {inspect.getsourcefile(download_with_auth_url)})"
+    # Use a real asm.skype.com attachment URL — if the token is valid
+    # and the router picks the correct auth header, we get a 200 (or
+    # redirect).  If the router picks Bearer, we get 401.
+    # We grab a fresh URL from our own conversation's recent messages.
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+    adapter = TeamsMTKAdapter(None)
+    # Find recent messages with inline images (asm.skype.com URLs)
+    dm_id = DM_CHAT_ID
+    msgs = adapter._fetch_messages(conv_id=dm_id, limit=50)
+    att_url = None
+    for m in (msgs or []):
+        content = m.get("content", "") or ""
+        # Look for asm.skype.com image URLs in message HTML
+        import re as _re
+        _urls = _re.findall(r'https://[a-z0-9.-]*asm\.skype\.com/v1/objects/[\w-]+', content)
+        if _urls:
+            att_url = _urls[0]
+            break
+
+    if att_url is None:
+        return False, "No live asm.skype.com attachment URL found in the latest 50 DM messages"
+
+    try:
+        result = download_with_auth_url(
+            att_url, skype_token=skype_token, access_token="deliberately-invalid-token",
+            verify_ssl=False, timeout=15,
+        )
+    except Exception as e:
+        return False, f"download_with_auth_url failed on live asm.skype.com attachment: {e}"
+
+    if not isinstance(result, bytes) or len(result) == 0:
+        return False, f"download_with_auth_url returned empty/non-bytes result: {result!r}"
+
+    return True, (
+        f"download_with_auth_url succeeded on asm.skype.com "
+        f"({len(result)} bytes) using skype_token despite garbage access_token — "
+        f"proves the router picked Authorization:skype_token for this domain, not Bearer"
+    )
 
 
 def test_garbage_detector_no_false_positive_on_clean_output(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -328,8 +357,12 @@ def test_garbage_detector_no_false_positive_on_clean_output(log_path: str, basel
 
     send_chat_message(DM_CHAT_ID, "/new")
     time.sleep(3)
-    send_chat_message(DM_CHAT_ID, "簡短測試：現在幾點？不用查任何工具，直接回答格式即可")
-    time.sleep(30)
+    send_chat_message(
+        DM_CHAT_ID,
+        "不用使用工具。請用繁體中文寫四點條列，說明軟體測試的重要性；"
+        "每點至少二十五個中文字，總長必須超過一百五十字。",
+    )
+    time.sleep(45)
 
     msgs = get_messages_raw(DM_CHAT_ID, page_size=20)
     bot_replies = [
@@ -340,15 +373,47 @@ def test_garbage_detector_no_false_positive_on_clean_output(log_path: str, basel
     if not bot_replies:
         return False, "No bot reply received within wait window"
 
-    new_log = tail_log(log_path, baseline)
-    discard_count = len(re.findall(r"Garbage output detected", new_log))
+    from agent.garbage_detector import is_garbage, _garbage_score
+    import html as _html
 
-    # A single occasional discard-and-retry is within the documented
-    # AIDE degradation rate; the delivered reply existing at all means
-    # the retry loop succeeded. Zero replies + any discard = real failure.
+    substantial = []
+    for reply in bot_replies:
+        raw = str(reply.get("content") or "")
+        text = _html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) >= 80:
+            substantial.append(text)
+
+    if not substantial:
+        return False, (
+            "Bot replied, but no reply was long enough to exercise the "
+            "production detector's 80-character threshold"
+        )
+
+    for text in substantial:
+        if "\ufffd" in text:
+            return False, "Delivered reply contains U+FFFD replacement characters"
+        repeated = re.search(r"([^\s])\1{11,}", text)
+        if repeated:
+            return False, f"Delivered reply contains a repeated-character run: {repeated.group(0)!r}"
+        if is_garbage(text):
+            return False, (
+                f"Production detector flags the delivered clean reply as garbage "
+                f"(score={_garbage_score(text):.2f})"
+            )
+
+    new_log = tail_log(log_path, baseline)
+    discard_count = len(
+        re.findall(r"(?:Garbage output detected|Corrupt final model output detected)", new_log)
+    )
+    if discard_count:
+        return False, (
+            f"Clean-output turn triggered {discard_count} garbage discard(s); "
+            "this is a false positive even though a retry eventually replied"
+        )
     return True, (
-        f"{len(bot_replies)} bot reply(ies) delivered; "
-        f"{discard_count} garbage-discard event(s) in this turn (retry succeeded if >0)"
+        f"{len(substantial)} substantial reply/replies delivered; detector score(s)="
+        f"{[_garbage_score(text) for text in substantial]}; 0 false-positive discards"
     )
 
 
@@ -366,11 +431,13 @@ def test_dm_echo_guard(log_path: str, baseline: int) -> tuple[bool, str]:
     http = HTTPLayer(auth)
     msg_svc = MessagesService(http)
     result = msg_svc.send(conversation_id=DM_CHAT_ID, content=content)
-    msg_id = str(result.get("id", ""))
+    msg_id = str(result.get("id") or result.get("OriginalArrivalTime") or "")
+    if not msg_id:
+        return False, f"SDK send succeeded but returned no message id: {result!r}"
 
     found, evidence = wait_and_check_log(
         log_path, baseline,
-        [f"skipping own sent message.*id={msg_id}", "skipping own sent"],
+        [rf"skipping own sent message id={re.escape(msg_id)}(?:\s|$)"],
     )
     return found, evidence
 
@@ -715,8 +782,8 @@ def test_download_attachment(log_path: str, baseline: int) -> tuple[bool, str]:
     Uses Graph API hostedContents to upload a real 1x1 PNG inline image.
     Real behavioral test: the old version accepted "download was attempted
     (even if failed)" as a pass — that OR-list is exactly why the 07-13
-    as-prod.asyncgw.teams.microsoft.com domain-routing 401 bug went
-    undetected for so long.  This now REQUIRES the success signal
+    as-api.asm.skype.com authentication 401 bug went undetected for so long.
+    This now REQUIRES the success signal
     (cache_image_from_bytes / cached bytes) — a mere attempt is a FAIL.
     """
     import base64
@@ -975,17 +1042,13 @@ def test_find_conversation(log_path: str, baseline: int) -> tuple[bool, str]:
 
 
 def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
-    """G5 + standalone_sender_fn: _standalone_send 已在 platform_registry 中註冊。
+    """G5 + standalone_sender_fn: registry sender performs a real delivery.
 
-    驗收條件：
-    1. `_standalone_send` 函式存在於 teams_mtk 模組
-    2. platform_registry 含 'teams_mtk' 條目
-    3. 該條目的 standalone_sender_fn 即為 _standalone_send
-    4. _standalone_send 為 async function（協約要求）
-    5. PlatformEntry.name == 'teams_mtk'、emoji == '👥'
-
-    本測試不實際發送訊息（避免佔用真實 DM 頻道），純做 registry 驗證。
+    A registry-only check would still pass if the sender's auth, adapter
+    construction, or network path were completely broken.  Invoke the
+    registered callable and read the marker back from the real DM instead.
     """
+    import asyncio
     import inspect
     from gateway.platforms import teams_mtk as _teams_mtk_mod
 
@@ -1039,10 +1102,27 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
 
     if not name_ok:
         return False, f"PlatformEntry.name != 'teams_mtk': {checks}"
+    if not emoji_ok:
+        return False, f"PlatformEntry.emoji != '👥': {checks}"
 
-    return True, (
-        f"_standalone_send registered in platform_registry; "
-        f"is_async=True; {checks}"
+    marker = f"E2E_AUTO standalone sender {time.time_ns()}"
+    result = asyncio.run(fn(None, DM_CHAT_ID, marker))
+    if not isinstance(result, dict) or not result.get("success"):
+        return False, f"standalone sender returned failure: {result!r}"
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        messages = get_messages_raw(DM_CHAT_ID, page_size=30)
+        for msg in messages:
+            if marker in str(msg.get("content") or msg.get("body") or ""):
+                return True, (
+                    f"standalone sender delivered and read back marker; "
+                    f"message_id={result.get('message_id')!r}; {checks}"
+                )
+        time.sleep(2)
+    return False, (
+        "standalone sender returned success but marker was not present in "
+        f"real Teams read-back; result={result!r}"
     )
 
 
@@ -1070,7 +1150,7 @@ NAMED_TESTS = {
     "streaming-no-echo-duplication": test_streaming_no_echo_duplication,
     "no-residual-markdown-in-reply": test_no_residual_markdown_in_reply,
     "no-disallowed-fallback-models": test_no_disallowed_fallback_models,
-    "attachment-domain-routing-covers-asyncgw": test_attachment_domain_routing_covers_asyncgw,
+    "attachment-domain-routing-covers-asm": test_attachment_domain_routing_covers_asm,
     "garbage-detector-no-false-positive": test_garbage_detector_no_false_positive_on_clean_output,
 }
 
@@ -1112,6 +1192,10 @@ def main():
 
         baseline = sum(1 for _ in open(log_path, encoding="utf-8", errors="replace"))
         print(status)
+        if not results[name]:
+            print(f"    Evidence: {evidence}")
+            print("    Stopping: later E2E results would be invalid until this failure is fixed.")
+            break
 
     # Summary
     passed = sum(1 for v in results.values() if v)

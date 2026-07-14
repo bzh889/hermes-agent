@@ -251,6 +251,25 @@ class TestMem0ErrorHandling:
         provider.handle_tool_call("mem0_update", {"memory_id": "mem-1", "text": "x"})
         assert provider._consecutive_failures == 1
 
+    def test_oss_connection_hint_identifies_local_embedder_not_qdrant(self):
+        provider = Mem0MemoryProvider()
+        provider._mode = "oss"
+        provider._config = {
+            "oss": {
+                "vector_store": {"provider": "qdrant", "config": {"path": "C:/mem0"}},
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"openai_base_url": "http://127.0.0.1:19901/v1"},
+                },
+            }
+        }
+
+        message = provider._format_error("Mem0 search failed", Exception("Connection error."))
+
+        assert "embedder" in message.lower()
+        assert "127.0.0.1:19901" in message
+        assert "qdrant is running" not in message.lower()
+
 
 class TestMem0V3Internal:
 

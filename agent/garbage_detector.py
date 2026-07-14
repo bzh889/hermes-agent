@@ -1,4 +1,4 @@
-"""Detect degenerate / garbage LLM output before it enters session history.
+"""Detect degenerate final LLM output before it enters session history.
 
 Motivation: analysis of state.db (2026-07-12) found 24 assistant messages
 with characteristic multi-script gibberish text (U+FFFD replacement chars,
@@ -8,25 +8,29 @@ continuation paths after 429/quota events.  These outputs were being written
 into session history as compacted=0, active=1 records, then re-read into
 every subsequent context window, causing cascading corruption.
 
+Scope contract: this detector is only for model-generated final assistant
+output.  Never apply it to ``role=tool`` content.  Broken or mis-decoded tool
+results must remain in context so the agent can repair the tool or post-process
+its output; discarding an entire tool result would destroy evidence.
+
 The heuristic is deliberately conservative (prefer false negatives over false
-positives): the corpus of 24 confirmed garbage samples all scored ≥ 57,
-while 300 clean assistant messages from the same DB scored 0.0 — a wide
-separation gap.  The FP rate against that 300-message clean corpus is 0 %.
+positives).  The regression suite includes representative confirmed garbage,
+normal technical responses, CR-derived summaries, and coherent multilingual
+content.
 
 Key design decision — two-tier script check:
   Normal bilingual output (Chinese + English) appears with avg_scripts ≈ 2.0
   (CJK + Latin).  This is *expected* and must NOT trigger.  Only penalise when
-  "problem scripts" (Cyrillic, Arabic, Hangul, Thai) appear alongside other
-  scripts — this pattern is essentially impossible in legitimate Chinese/English
-  content but common in the observed garbage corpus (which contained fragments
-  of many languages randomly interleaved).
+  sparse fragments of "problem scripts" (Cyrillic, Arabic, Hangul, Thai) appear
+  alongside other scripts.  Coherent multilingual paragraphs and translations
+  are explicitly exempt; random low-density fragments remain suspicious.
 
 Usage::
 
     from agent.garbage_detector import is_garbage
 
-    if is_garbage(content):
-        logger.warning("Garbage output detected, retrying")
+    if is_garbage(final_assistant_output):
+        logger.warning("Corrupt final model output detected, retrying")
         ...
 """
 from __future__ import annotations
@@ -53,7 +57,7 @@ _PROBLEM_SCRIPTS: frozenset[str] = frozenset({"Cyrillic", "Arabic", "Hangul", "T
 _SYMBOL_SET: frozenset[str] = frozenset("[]{}()<>|°∙›⟩\u200b\u200c\u200d\ufeff")
 
 _MIN_CHARS = 80       # skip very short responses (bullets, ACKs, etc.)
-_THRESHOLD = 3.0      # calibrated: all 24 garbage samples >> 3.0; 300 clean samples == 0.0
+_THRESHOLD = 3.0      # separates bundled representative garbage/clean regressions
 
 
 def _script_of(cp: int) -> str | None:
@@ -81,17 +85,35 @@ def _garbage_score(text: str) -> float:
     # Real output in Chinese + English stays at CJK + Latin only.
     # Garbage mixes Cyrillic, Arabic, Hangul, Thai into the same windows.
     window = 40
-    for i in range(0, n - window, window):
-        chunk = text[i : i + window]
-        scripts: set[str | None] = {_script_of(ord(ch)) for ch in chunk}
-        scripts.discard(None)
-        problem = scripts & _PROBLEM_SCRIPTS
-        # 3+ total scripts AND a problem script present = suspicious
-        if problem and len(scripts) >= 3:
-            score += 2.0
-        # 2+ distinct problem scripts in the same window = very suspicious
-        if len(problem) >= 2:
-            score += 3.0
+    script_counts = {name: 0 for name, _lo, _hi in _SCRIPT_RANGES}
+    for ch in text:
+        script = _script_of(ord(ch))
+        if script is not None:
+            script_counts[script] += 1
+    # A script used consistently across the response is coherent multilingual
+    # content, not contamination.  Garbage corpus samples contain only sparse,
+    # isolated fragments of the unexpected scripts.
+    coherent_floor = min(50, max(12, int(n * 0.02)))
+    coherent_problem_scripts = {
+        script for script in _PROBLEM_SCRIPTS
+        if script_counts[script] >= coherent_floor
+    }
+    # Do not let a fixed-width window cross natural line boundaries.  A normal
+    # CR or translation can contain one coherent language per paragraph; the
+    # previous whole-string scan combined the end of an Arabic paragraph with
+    # the start of a Russian one and falsely treated that as script soup.
+    for line in text.splitlines() or [text]:
+        for i in range(0, len(line) - window, window):
+            chunk = line[i : i + window]
+            scripts: set[str | None] = {_script_of(ord(ch)) for ch in chunk}
+            scripts.discard(None)
+            problem = (scripts & _PROBLEM_SCRIPTS) - coherent_problem_scripts
+            # 3+ total scripts AND a problem script present = suspicious
+            if problem and len(scripts) >= 3:
+                score += 2.0
+            # 2+ distinct problem scripts in the same window = very suspicious
+            if len(problem) >= 2:
+                score += 3.0
 
     # ── Signal 3: Low coherent Latin-run density ──────────────────────────
     # Garbage has almost no multi-word English phrases.  Only evaluated
@@ -125,12 +147,15 @@ def _garbage_score(text: str) -> float:
 
 
 def is_garbage(text: str | None) -> bool:
-    """Return True if *text* looks like degenerate/garbage model output.
+    """Return True if final model output looks degenerate or corrupted.
 
     Designed for fast in-loop use (pure Python, no I/O, ~microseconds per
     call).  Errs on the side of *not* flagging real output: only clearly
     corrupted text exceeds the threshold.  Returns False for None/empty/short
     content unconditionally.
+
+    This function must never be called for tool-result content.  Tool output is
+    evidence to preserve and repair, not model output eligible for discard.
     """
     if not text or len(text) < _MIN_CHARS:
         return False

@@ -11,6 +11,31 @@ def _make_adapter():
     return TeamsMTKAdapter(config=None)
 
 
+def test_graph_request_adds_auth_and_checks_status():
+    adapter = _make_adapter()
+    response = MagicMock()
+    with patch.object(adapter._auth, "_inject_truststore"), \
+         patch.object(adapter._auth, "graph_token", return_value="graph-token"), \
+         patch("requests.request", return_value=response) as request:
+        result = adapter._auth._graph_request(
+            "POST", "https://graph.microsoft.com/beta/example", json={"x": 1}
+        )
+
+    assert result is response
+    response.raise_for_status.assert_called_once_with()
+    request.assert_called_once_with(
+        "POST",
+        "https://graph.microsoft.com/beta/example",
+        headers={
+            "Authorization": "Bearer graph-token",
+            "Content-Type": "application/json",
+        },
+        verify=False,
+        timeout=30,
+        json={"x": 1},
+    )
+
+
 # ── S7: Reactions ──────────────────────────────────────────────────────
 
 class TestSendReaction:
@@ -24,11 +49,10 @@ class TestSendReaction:
     @pytest.mark.asyncio
     async def test_valid_reaction_sdk_path(self):
         adapter = _make_adapter()
-        adapter._auth._graph_token = "fake-token"
         mock_result = {"status": "reacted", "reaction": "like", "message_id": "msg1"}
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKReactions") as MockSvc, \
-             patch("gateway.platforms.teams_mtk._SDKGraphAdapter"):
+             patch.object(adapter._auth, "graph_token", return_value="fake-token"):
             mock_svc_instance = MagicMock()
             mock_svc_instance.send.return_value = mock_result
             MockSvc.return_value = mock_svc_instance
@@ -38,14 +62,16 @@ class TestSendReaction:
     @pytest.mark.asyncio
     async def test_valid_reaction_raw_fallback(self):
         adapter = _make_adapter()
-        adapter._auth._graph_token = None
-        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False):
-            # Mock the raw HTTP call
-            with patch("gateway.platforms.teams_mtk._VALID_REACTIONS", {"like", "heart"}):
-                result = await adapter.send_reaction("conv1", "msg1", "like")
-                # Will fail without real auth but validates the code path
-                # Error path is acceptable — we're testing routing, not API
-                assert "status" in result
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch.object(adapter._auth, "_graph_request") as request:
+            result = await adapter.send_reaction("conv1", "msg1", "like")
+
+        assert result == {"status": "reacted", "reaction": "like", "message_id": "msg1"}
+        request.assert_called_once_with(
+            "POST",
+            "https://graph.microsoft.com/beta/chats/conv1/messages/msg1/setReaction",
+            json={"reactionType": "like"},
+        )
 
     @pytest.mark.asyncio
     async def test_all_valid_rejections(self):
@@ -69,11 +95,10 @@ class TestRemoveReaction:
     @pytest.mark.asyncio
     async def test_valid_reaction_sdk_path(self):
         adapter = _make_adapter()
-        adapter._auth._graph_token = "fake-token"
         mock_result = {"status": "removed", "reaction": "heart", "message_id": "msg1"}
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKReactions") as MockSvc, \
-             patch("gateway.platforms.teams_mtk._SDKGraphAdapter"):
+             patch.object(adapter._auth, "graph_token", return_value="fake-token"):
             mock_svc_instance = MagicMock()
             mock_svc_instance.remove.return_value = mock_result
             MockSvc.return_value = mock_svc_instance
@@ -83,9 +108,10 @@ class TestRemoveReaction:
     @pytest.mark.asyncio
     async def test_error_handling(self):
         adapter = _make_adapter()
-        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False):
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch.object(adapter._auth, "_graph_request", side_effect=RuntimeError("boom")):
             result = await adapter.remove_reaction("conv1", "msg1", "like")
-            assert "status" in result
+            assert result == {"status": "error", "error": "boom"}
 
 
 # ── S9: Message Deletion ──────────────────────────────────────────────

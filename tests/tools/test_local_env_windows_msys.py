@@ -18,7 +18,7 @@ and ``os.path.isdir`` so the MSYS path tests as "missing" exactly like
 on the real OS.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 from tools.environments import local as local_mod
@@ -196,3 +196,34 @@ class TestExtractCwdFromOutputWindowsMsys:
             env._extract_cwd_from_output(result)
 
         assert env.cwd == str(new_dir)
+
+
+class TestWindowsBackgroundConsole:
+    def test_run_bash_hides_the_console_inherited_by_cli_descendants(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        monkeypatch.setattr(local_mod, "_find_bash", lambda: "bash.exe")
+        monkeypatch.setattr(local_mod, "_make_run_env", lambda _env: {})
+        monkeypatch.setattr(local_mod, "_resolve_safe_cwd", lambda _cwd: str(tmp_path))
+
+        startupinfo = object()
+        hidden_tree_kwargs = {
+            "creationflags": 0x00000010,
+            "startupinfo": startupinfo,
+        }
+        monkeypatch.setattr(
+            local_mod,
+            "windows_hidden_console_popen_kwargs",
+            lambda: hidden_tree_kwargs,
+        )
+        popen = MagicMock()
+        monkeypatch.setattr(local_mod.subprocess, "Popen", popen)
+
+        with patch.object(LocalEnvironment, "init_session", return_value=None):
+            env = LocalEnvironment(cwd=str(tmp_path), timeout=10)
+        env._run_bash("echo ok")
+
+        kwargs = popen.call_args.kwargs
+        assert kwargs["creationflags"] == 0x00000010
+        assert kwargs["startupinfo"] is startupinfo

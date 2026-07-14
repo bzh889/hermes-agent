@@ -1,8 +1,8 @@
 """Tests for agent.garbage_detector — calibration and regression coverage.
 
 Verifies that:
-  1. All 24 confirmed garbage messages from state.db are detected (100% recall).
-  2. Representative clean messages are not flagged (0% FP).
+  1. Three representative patterns from the 24-message garbage corpus are detected.
+  2. Representative clean messages, including crtool output, are not flagged.
   3. Edge cases (empty, short, bilingual Chinese/English) are safe.
 """
 import pytest
@@ -79,6 +79,20 @@ CLEAN_EMPTY = ""
 CLEAN_NONE = None
 CLEAN_SINGLE_LINE = "78/78 tests passed."
 
+CLEAN_CRTOOL_DERIVED_RESPONSE = """CR ALPS12345678 目前狀態為 Assigned，優先級為 1.High。
+問題摘要：雙卡插入後，NR capability 回報了非預期頻段；單卡情境僅回報 n257，雙卡情境另外出現 n261。
+分析重點：請比對四份 modem log 的 supportedBandList、NR_UECapabilityEnquiry、NARFCN 與 PCI，並先確認 NWOTA 設定，再判斷是否需要修改實作。"""
+
+CLEAN_MULTILINGUAL_CR = """CR summary: modem registration fails after reboot. Please check the attached logs.
+中文摘要：裝置重新開機後註冊失敗，請確認附件中的數據機紀錄。
+ملخص العميل: يفشل التسجيل بعد إعادة التشغيل، يرجى مراجعة السجلات المرفقة.
+Резюме клиента: регистрация не выполняется после перезагрузки."""
+
+CLEAN_INLINE_TRANSLATIONS = (
+    "Customer/客戶/العميل/клиент: registration 註冊 التسجيل регистрация failed 失敗 فشل ошибка. "
+    "Status/狀態/الحالة/статус: investigating 分析中 قيد التحليل исследуется. "
+) * 4
+
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -122,6 +136,15 @@ class TestCleanSamples:
     def test_single_line(self):
         assert not is_garbage(CLEAN_SINGLE_LINE), "single short line should not be garbage"
 
+    def test_crtool_derived_final_response(self):
+        assert not is_garbage(CLEAN_CRTOOL_DERIVED_RESPONSE), "normal CR-derived final response should not be garbage"
+
+    def test_multilingual_cr_paragraphs(self):
+        assert not is_garbage(CLEAN_MULTILINGUAL_CR), "coherent multilingual CR text should not be garbage"
+
+    def test_inline_multilingual_fields(self):
+        assert not is_garbage(CLEAN_INLINE_TRANSLATIONS), "coherent inline translations should not be garbage"
+
 
 class TestScoreOrdering:
     """Garbage samples must score significantly higher than clean samples."""
@@ -139,6 +162,9 @@ class TestScoreOrdering:
             ("markdown_table", CLEAN_MARKDOWN_TABLE),
             ("code_mixed", CLEAN_CODE_MIXED),
             ("english_only", CLEAN_ENGLISH_ONLY),
+            ("crtool_derived_response", CLEAN_CRTOOL_DERIVED_RESPONSE),
+            ("multilingual_cr", CLEAN_MULTILINGUAL_CR),
+            ("inline_translations", CLEAN_INLINE_TRANSLATIONS),
         ]:
             score = _garbage_score(text)
             assert score < 3.0, f"{name} scored {score:.2f} >= threshold 3.0"

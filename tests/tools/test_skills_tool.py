@@ -1225,6 +1225,37 @@ class TestSkillViewCollisionDetection:
         assert result["success"] is True
         assert "LOCAL VERSION" in result["content"]
 
+    def test_same_categorized_path_uses_local_precedence(self, tmp_path):
+        """A mirrored external tree must not defeat the documented path escape hatch."""
+        local_dir = tmp_path / "local"
+        external_dir = tmp_path / "external"
+        local_dir.mkdir()
+        external_dir.mkdir()
+
+        _make_skill(
+            local_dir,
+            "verification-before-completion",
+            category="superpowers/skills",
+            body="LOCAL VERSION",
+        )
+        _make_skill(
+            external_dir,
+            "verification-before-completion",
+            category="superpowers/skills",
+            body="EXTERNAL VERSION",
+        )
+
+        p1, p2 = self._patch_dirs(local_dir, [external_dir])
+        with p1, p2:
+            raw = skill_view(
+                "superpowers/skills/verification-before-completion"
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "LOCAL VERSION" in result["content"]
+        assert "EXTERNAL VERSION" not in result["content"]
+
     def test_support_markdown_does_not_collide_with_real_skill(self, tmp_path):
         """Supporting reference docs named <skill>.md are not skills.
 

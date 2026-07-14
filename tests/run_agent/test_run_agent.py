@@ -3984,6 +3984,30 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
+    def test_garbage_detector_only_inspects_final_assistant_output(self, agent):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("crtool")
+        tc = _mock_tool_call(name="crtool", arguments="{}", call_id="c1")
+        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        final_text = "The CR data was retrieved successfully and is ready for analysis."
+        resp2 = _mock_response(content=final_text, finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp1, resp2]
+        corrupted_tool_result = "\ufffd" * 120 + " Жж مرحبا broken-tool-payload"
+
+        with (
+            patch("run_agent.handle_function_call", return_value=corrupted_tool_result),
+            patch("agent.garbage_detector.is_garbage", return_value=False) as detector,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("read the CR")
+
+        tool_messages = [m for m in result["messages"] if m.get("role") == "tool"]
+        assert any(corrupted_tool_result in m.get("content", "") for m in tool_messages), tool_messages
+        detector.assert_called_once_with(final_text)
+        assert result["final_response"] == final_text
+
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

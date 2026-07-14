@@ -3,6 +3,7 @@
 import os
 import re
 import pytest
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -642,16 +643,39 @@ class TestSearchPathValidation:
         assert "search failed" in result.error.lower() or "Search error" in result.error
 
 
+    def test_rg_separates_leading_dash_pattern(self, mock_env, monkeypatch):
+        mock_env.execute.return_value = {"output": "", "returncode": 1}
+        ops = ShellFileOperations(mock_env)
+        monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == "rg")
+        ops._search_with_rg("--profile", ".", None, 5, 0, "content", 0)
+        assert " -- '--profile' '.'" in mock_env.execute.call_args.args[0]
+
+
+    def test_grep_uses_extended_regex_and_separator(self, mock_env):
+        mock_env.execute.return_value = {"output": "", "returncode": 1}
+        ops = ShellFileOperations(mock_env)
+        ops._search_with_grep(r"search_files\(", ".", None, 5, 0, "content", 0)
+        command = mock_env.execute.call_args.args[0]
+        assert "grep -ErnH" in command
+        assert " -- 'search_files\\(' '.'" in command
+
+
 class TestSearchFilesFallbackHiddenPaths:
     def _make_env(self):
         env = MagicMock()
         env.cwd = "/"
 
         def execute(command, **kwargs):
+            invocation = (
+                [shutil.which("bash"), "-lc", command]
+                if os.name == "nt" else command
+            )
             completed = subprocess.run(
-                command,
-                shell=True,
+                invocation,
+                shell=os.name != "nt",
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
             )
             return {
@@ -677,10 +701,10 @@ class TestSearchFilesFallbackHiddenPaths:
 
         ops = ShellFileOperations(self._make_env())
         monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
-        result = ops._search_files("*.log", str(root), limit=50, offset=0)
+        result = ops._search_files("*.log", root.as_posix(), limit=50, offset=0)
 
         assert result.error is None
-        assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        assert {Path(path) for path in result.files} == {visible_file, visible_nested_file}
 
     def test_normal_root_still_excludes_hidden_descendants(self, tmp_path, monkeypatch):
         """Fallback find should still exclude hidden descendant paths for normal roots."""
@@ -696,10 +720,10 @@ class TestSearchFilesFallbackHiddenPaths:
 
         ops = ShellFileOperations(self._make_env())
         monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
-        result = ops._search_files("*.log", str(root), limit=50, offset=0)
+        result = ops._search_files("*.log", root.as_posix(), limit=50, offset=0)
 
         assert result.error is None
-        assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        assert {Path(path) for path in result.files} == {visible_file, visible_nested_file}
 
 
 class TestShellFileOpsWriteDenied:

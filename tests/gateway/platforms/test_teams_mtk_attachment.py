@@ -168,6 +168,54 @@ async def test_download_attachment_cache_error_returns_none():
     assert result is None
 
 
+@pytest.mark.parametrize(
+    ("url", "expected_headers"),
+    [
+        (
+            "https://as-api.asm.skype.com/v1/objects/object-id/views/imgpsh_fullsize",
+            {"Authorization": "skype_token skype-token"},
+        ),
+        (
+            "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/object-id",
+            {"Authentication": "skypetoken=skype-token"},
+        ),
+        (
+            "https://tenant.sharepoint.com/shared/file.txt",
+            {"Authorization": "Bearer access-token"},
+        ),
+    ],
+)
+async def test_download_attachment_fallback_uses_domain_auth(url, expected_headers):
+    """Raw fallback must preserve the SDK's per-domain authentication rules."""
+    adapter = _make_adapter()
+    response = AsyncMock()
+    response.status = 200
+    response.read = AsyncMock(return_value=b"content")
+
+    response_context = AsyncMock()
+    response_context.__aenter__ = AsyncMock(return_value=response)
+    response_context.__aexit__ = AsyncMock(return_value=False)
+
+    session = AsyncMock()
+    session.get = MagicMock(return_value=response_context)
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+
+    aiohttp = MagicMock()
+    aiohttp.ClientSession = MagicMock(return_value=session)
+    aiohttp.ClientTimeout = MagicMock(return_value=object())
+
+    with patch.dict("sys.modules", {"aiohttp": aiohttp}), \
+         patch("gateway.platforms.teams_mtk._sdk_download", None), \
+         patch("gateway.platforms.base.cache_document_from_bytes", return_value="cached"), \
+         patch.object(adapter._auth, "skype_token", return_value="skype-token"), \
+         patch.object(adapter._auth, "access_token", return_value="access-token"):
+        result = await adapter._download_attachment(url, "file", "file.txt")
+
+    assert result == "cached"
+    aiohttp.ClientSession.assert_called_once_with(headers=expected_headers)
+
+
 # ---------------------------------------------------------------------------
 # _process_new_messages() – attachment extraction
 # ---------------------------------------------------------------------------

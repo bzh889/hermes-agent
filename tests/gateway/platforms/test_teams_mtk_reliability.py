@@ -327,7 +327,7 @@ def test_token_cache_auto_purge_on_corruption(tmp_path, monkeypatch):
 
 
 def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
-    """If cache has one valid JSON + trailing garbage, raw_decode recovers it."""
+    """_load recovers first valid JSON object when trailing garbage exists."""
     from gateway.platforms.teams_mtk import _TeamsAuth
     cache_path = tmp_path / "token_cache.json"
     monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
@@ -336,6 +336,43 @@ def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
     auth = _TeamsAuth()
     data = auth._load()
     assert data["access_token"] == "abc"
+
+
+def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refresh(
+    tmp_path, monkeypatch
+):
+    """IC3/Graph exchanges preserve refresh-token rotation in the shared cache."""
+    import json
+    from gateway.platforms.teams_mtk import _TeamsAuth
+
+    cache_path = tmp_path / "token_cache.json"
+    cache_path.write_text(
+        json.dumps({"refresh_token": "refresh-old", "access_token": "skype-access"})
+    )
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
+
+    response = MagicMock()
+    response.json.return_value = {
+        "access_token": "ic3-access",
+        "refresh_token": "refresh-new",
+        "expires_in": 3600,
+    }
+
+    auth = _TeamsAuth()
+    with patch("requests.post", return_value=response) as post:
+        result = auth.exchange_for_scope(
+            "https://ic3.teams.office.com/Teams.AccessAsUser.All"
+        )
+
+    assert result["access_token"] == "ic3-access"
+    assert post.call_args.kwargs["data"] == {
+        "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-old",
+        "scope": "https://ic3.teams.office.com/Teams.AccessAsUser.All",
+    }
+    assert json.loads(cache_path.read_text())["refresh_token"] == "refresh-new"
+    response.raise_for_status.assert_called_once_with()
 
 
 # ── §7 edit_message respects throttle ─────────────────────────────────

@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hidden_console_popen_kwargs
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -208,6 +208,39 @@ _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 _ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX")
 
 
+def _strip_active_venv_pythonpath(env: dict, source_env: dict) -> None:
+    """Remove active-venv entries from PYTHONPATH before spawning user code."""
+    roots = [source_env.get(name) for name in _ACTIVE_VENV_MARKER_VARS]
+    roots = [os.path.normcase(os.path.abspath(str(root))) for root in roots if root]
+    if not roots:
+        return
+
+    pythonpath_key = next((key for key in env if key.upper() == "PYTHONPATH"), None)
+    if pythonpath_key is None:
+        return
+
+    kept: list[str] = []
+    for entry in str(env.get(pythonpath_key, "")).split(os.pathsep):
+        if not entry:
+            continue
+        normalized = os.path.normcase(os.path.abspath(entry))
+        under_active_venv = False
+        for root in roots:
+            try:
+                under_active_venv = os.path.commonpath((normalized, root)) == root
+            except ValueError:
+                under_active_venv = False
+            if under_active_venv:
+                break
+        if not under_active_venv:
+            kept.append(entry)
+
+    if kept:
+        env[pythonpath_key] = os.pathsep.join(kept)
+    else:
+        env.pop(pythonpath_key, None)
+
+
 def _is_hermes_internal_secret(key: str) -> bool:
     """Return True for Hermes-internal secrets injected under *dynamic* names.
 
@@ -297,6 +330,10 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(sanitized)
+
+    source_env = dict(base_env or {})
+    source_env.update(extra_env or {})
+    _strip_active_venv_pythonpath(sanitized, source_env)
 
     for _marker in _ACTIVE_VENV_MARKER_VARS:
         sanitized.pop(_marker, None)
@@ -588,14 +625,16 @@ def _resolve_hermes_bin_dir() -> str | None:
 def _prepend_hermes_bin_dir(existing_path: str) -> str:
     """Prepend the hermes install dir to ``existing_path`` if it's missing.
 
-    Cross-platform (uses ``os.pathsep``). First-occurrence wins, so a PATH
-    that already contains the dir is returned unchanged. Returns the input
+    Cross-platform. The separator follows the target environment indicated by
+    ``_IS_WINDOWS`` rather than the host running the tests, so POSIX child
+    environments remain representable on Windows. First-occurrence wins, so a
+    PATH that already contains the dir is returned unchanged. Returns the input
     unchanged when the install dir can't be resolved.
     """
     bin_dir = _resolve_hermes_bin_dir()
     if not bin_dir:
         return existing_path
-    sep = os.pathsep
+    sep = ";" if _IS_WINDOWS else ":"
     entries = [e for e in existing_path.split(sep) if e] if existing_path else []
     if bin_dir in entries:
         return existing_path
@@ -706,10 +745,16 @@ def _make_run_env(env: dict) -> dict:
         from gateway.session_context import _UNSET, _VAR_MAP
         for var_name, var in _VAR_MAP.items():
             value = var.get()
-            if value is not _UNSET and value:
+            if value is _UNSET:
+                continue
+            if value:
                 run_env[var_name] = value
+            else:
+                run_env.pop(var_name, None)
     except Exception:
         pass
+
+    _strip_active_venv_pythonpath(run_env, merged)
 
     for _marker in _ACTIVE_VENV_MARKER_VARS:
         run_env.pop(_marker, None)
@@ -906,7 +951,10 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        # CREATE_NO_WINDOW covers bash itself but leaves it with no console;
+        # PowerShell/Python/git grandchildren may then allocate visible conhost
+        # windows. Give the entire CLI tree one inherited, hidden console.
+        _popen_kwargs = windows_hidden_console_popen_kwargs()
 
         proc = subprocess.Popen(
             args,

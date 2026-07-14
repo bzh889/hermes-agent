@@ -470,6 +470,10 @@ class TestStdinHelpers:
         pty.sendeof.assert_called_once()
         assert result["status"] == "ok"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="ConPTY cannot close only stdin without terminating the child",
+    )
     def test_close_stdin_allows_eof_driven_process_to_finish(self, registry, tmp_path):
         """PTY mode: writing data + sending EOF lets an EOF-driven child finish.
 
@@ -479,7 +483,7 @@ class TestStdinHelpers:
         supported path.
         """
         session = registry.spawn_local(
-            'python3 -c "import sys; print(sys.stdin.read().strip())"',
+            'python -c "import sys; print(sys.stdin.read().strip())"',
             cwd=str(tmp_path),
             use_pty=True,
         )
@@ -699,6 +703,39 @@ class TestSpawnEnvSanitization:
         assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
 
+    def test_spawn_local_uses_hidden_console_for_background_cli_tree(
+        self, registry
+    ):
+        captured = {}
+        startupinfo = object()
+
+        def fake_popen(_cmd, **kwargs):
+            captured.update(kwargs)
+            proc = MagicMock()
+            proc.pid = 4321
+            proc.stdout = iter([])
+            proc.poll.return_value = None
+            return proc
+
+        fake_thread = MagicMock()
+        with patch(
+            "tools.process_registry.windows_hidden_console_popen_kwargs",
+            return_value={
+                "creationflags": 0x00000010,
+                "startupinfo": startupinfo,
+            },
+        ), patch(
+            "tools.process_registry._find_shell", return_value="bash.exe"
+        ), patch(
+            "tools.process_registry.subprocess.Popen", side_effect=fake_popen
+        ), patch(
+            "tools.process_registry.threading.Thread", return_value=fake_thread
+        ), patch.object(registry, "_write_checkpoint"):
+            registry.spawn_local("echo hello", cwd="/tmp")
+
+        assert captured["creationflags"] == 0x00000010
+        assert captured["startupinfo"] is startupinfo
+
     def test_spawn_via_env_uses_backend_temp_dir_for_artifacts(self, registry):
         class FakeEnv:
             def __init__(self):
@@ -844,7 +881,9 @@ class TestPopenLeakOnSetupFailure:
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", return_value=proc), \
              patch("threading.Thread", side_effect=boom), \
-             patch("os.getpgid", side_effect=ProcessLookupError), \
+             patch("tools.process_registry._IS_WINDOWS", False), \
+             patch("tools.process_registry.os.getpgid", return_value=proc.pid, create=True), \
+             patch("tools.process_registry.os.killpg", side_effect=ProcessLookupError, create=True), \
              patch.object(registry, "_write_checkpoint"):
             with pytest.raises(RuntimeError, match="Thread creation failed"):
                 registry.spawn_local("echo hello", cwd="/tmp")
@@ -876,7 +915,9 @@ class TestPopenLeakOnSetupFailure:
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", return_value=proc), \
              patch("threading.Thread", return_value=fake_thread), \
-             patch("os.getpgid", side_effect=ProcessLookupError), \
+             patch("tools.process_registry._IS_WINDOWS", False), \
+             patch("tools.process_registry.os.getpgid", return_value=proc.pid, create=True), \
+             patch("tools.process_registry.os.killpg", side_effect=ProcessLookupError, create=True), \
              patch.object(registry, "_write_checkpoint", side_effect=OSError("disk full")):
             with pytest.raises(OSError, match="disk full"):
                 registry.spawn_local("echo hello", cwd="/tmp")
@@ -1150,6 +1191,7 @@ class TestKillProcess:
             # SIGKILL-escalation step (grace=0) so it doesn't call
             # ``psutil.wait_procs`` on the FakeProcess.
             with patch("gateway.status._pid_exists", return_value=True), \
+                 patch("tools.process_registry._IS_WINDOWS", False), \
                  patch.object(ProcessRegistry, "_daemon_term_grace_seconds",
                               staticmethod(lambda: 0.0)), \
                  patch.object(_psutil, "Process", side_effect=lambda pid: FakeProcess(pid)):

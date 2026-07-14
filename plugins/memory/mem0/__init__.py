@@ -310,8 +310,23 @@ class Mem0MemoryProvider(MemoryProvider):
         if self._mode == "oss":
             err_str = str(exc).lower()
             if "connection" in err_str or "refused" in err_str or "timeout" in err_str:
-                vs = self._config.get("oss", {}).get("vector_store", {})
-                msg += f" (check that {vs.get('provider', 'vector store')} is running)"
+                oss = self._config.get("oss", {})
+                vs = oss.get("vector_store", {})
+                vs_config = vs.get("config", {})
+                embedder = oss.get("embedder", {})
+                embedder_config = embedder.get("config", {})
+                embedder_url = (
+                    embedder_config.get("openai_base_url")
+                    or embedder_config.get("api_base")
+                    or embedder_config.get("base_url")
+                )
+                vector_is_embedded = bool(vs_config.get("path")) and not (
+                    vs_config.get("url") or vs_config.get("host")
+                )
+                if embedder_url and vector_is_embedded:
+                    msg += f" (check that the embedder at {embedder_url} is running)"
+                else:
+                    msg += f" (check that {vs.get('provider', 'vector store')} is running)"
         return msg
 
     def _record_success(self):

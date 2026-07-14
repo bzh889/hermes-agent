@@ -50,10 +50,10 @@ class TestConfigureWindowsStdio:
         yield
         sys.modules.pop("hermes_cli.stdio", None)
 
-    def test_no_op_on_posix(self):
+    def test_no_op_on_posix(self, monkeypatch):
         from hermes_cli import stdio
 
-        assert stdio.is_windows() is False
+        monkeypatch.setattr(stdio, "is_windows", lambda: False)
         result = stdio.configure_windows_stdio()
         assert result is False
 
@@ -287,8 +287,9 @@ class TestSigkillFallback:
 
     def test_getattr_fallback_prefers_sigkill_when_present(self):
         """On POSIX the fallback is a no-op: real SIGKILL wins."""
-        result = getattr(signal, "SIGKILL", signal.SIGTERM)
-        assert result == signal.SIGKILL
+        fake_signal = MagicMock(SIGKILL=9, SIGTERM=15)
+        result = getattr(fake_signal, "SIGKILL", fake_signal.SIGTERM)
+        assert result == 9
 
     @pytest.mark.parametrize(
         "module_path, line_pattern",
@@ -543,12 +544,34 @@ class TestSubprocessCompatHelpers:
         from hermes_cli._subprocess_compat import (
             windows_detach_flags,
             windows_detach_flags_without_breakaway,
+            windows_hidden_console_popen_kwargs,
             windows_hide_flags,
         )
         if sys.platform != "win32":
             assert windows_detach_flags() == 0
             assert windows_detach_flags_without_breakaway() == 0
+            assert windows_hidden_console_popen_kwargs() == {}
             assert windows_hide_flags() == 0
+
+    def test_windows_hidden_console_kwargs_keep_descendants_off_desktop(
+        self, monkeypatch
+    ):
+        """A hidden console root gives CLI grandchildren a console to inherit."""
+        from hermes_cli import _subprocess_compat as sc
+
+        class FakeStartupInfo:
+            dwFlags = 0
+            wShowWindow = None
+
+        monkeypatch.setattr(sc, "IS_WINDOWS", True)
+        monkeypatch.setattr(sc.subprocess, "STARTUPINFO", FakeStartupInfo)
+
+        kwargs = sc.windows_hidden_console_popen_kwargs()
+
+        assert kwargs["creationflags"] == 0x00000010  # CREATE_NEW_CONSOLE
+        assert not kwargs["creationflags"] & 0x08000000  # not CREATE_NO_WINDOW
+        assert kwargs["startupinfo"].dwFlags & 0x00000001  # STARTF_USESHOWWINDOW
+        assert kwargs["startupinfo"].wShowWindow == 0  # SW_HIDE
 
     def test_windows_detach_popen_kwargs_is_posix_equivalent_on_posix(self):
         from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
