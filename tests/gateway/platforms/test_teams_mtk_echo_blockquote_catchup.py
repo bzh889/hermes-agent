@@ -1,7 +1,7 @@
 """Tests for BUG-1/2/3/5 fixes in teams_mtk message processing.
 
 Covers:
-- BUG-1: Echo-guard #4 (border-left HTML fingerprint detection)
+- BUG-1: Echo ownership uses trusted metadata, never presentation HTML
 - BUG-2: <blockquote> forwarded message handling
 - BUG-3: Cold-start catchup (unanswered @hermes messages)
 - BUG-5: Short-message smart gating in no-mention groups
@@ -16,112 +16,54 @@ from unittest.mock import MagicMock, patch, AsyncMock
 # Ensure project root is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from gateway.platforms.helpers import MessageDeduplicator
+from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
 
 # ---------------------------------------------------------------------------
-# BUG-1: Echo-guard #4 — branded HTML fingerprint detection
+# BUG-1: Echo ownership — IDs/metadata, not branded HTML
 # ---------------------------------------------------------------------------
 
-class TestEchoGuardBrandedHTML:
-    """Echo-guard should detect our own messages via HTML fingerprint
-    even when properties.hermes_sender has been stripped by Teams API."""
-
-    def _make_adapter(self):
-        """Create a minimal mock of the TeamsMTK adapter parts we need."""
-        adapter = MagicMock()
-        adapter._sent_dedup = MessageDeduplicator(ttl=300, max_size=200)
-        adapter._last_sent_message_id = None
-        adapter._last_message_ids = {}
-        adapter._MENTION_TAG = "@hermes"
-        adapter.require_mention = True
-        adapter._no_mention_convs = set()
-        adapter._group_config = MagicMock(return_value={})
-        adapter._group_blocked_keyword_patterns = MagicMock(return_value=[])
-        adapter._find_blocked_keyword = MagicMock(return_value=None)
-        adapter._model_picker_states = {}
-        return adapter
-
-    def test_echo_guard_flags_border_left_uppercase(self):
-        """Messages with border-left:3px solid #6264A7 are own."""
-        msg = {
-            "id": "1001",
-            "type": "RichText/Html",
-            "from": "8:orgid:my-oid",
-            "content": '<div style="border-left:3px solid #6264A7;padding-left:10px"><b>\U0001f916 Hermes</b></div>',
-            "properties": {},  # hermes_sender stripped!
-            "composetime": "2026-07-10T07:00:00Z",
-            "imdisplayname": "User",
+class TestEchoGuardOwnership:
+    @staticmethod
+    def _message(msg_id: str) -> dict:
+        return {
+            "id": msg_id,
+            "messagetype": "RichText/Html",
+            "content": "Please explain this quote",
+            "_raw_content": (
+                '<blockquote><div style="border-left:3px solid #6264A7">'
+                "<b>🤖 Hermes</b> quoted text</div></blockquote>"
+            ),
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Foreign User",
+            "from": "8:orgid:foreign-user",
         }
-        # Simulate the echo-guard logic inline
-        props = msg.get("properties", {})
-        is_own = False
-        if props.get("hermes_sender") == "agent":
-            is_own = True
-        if not is_own and msg.get("content") and (
-            "border-left:3px solid #6264A7" in msg["content"]
-            or "border-left:3px solid #6264a7" in msg["content"]
-            or "<b>🤖 Hermes</b>" in msg["content"]
-        ):
-            is_own = True
-        assert is_own is True
 
-    def test_echo_guard_flags_border_left_lowercase(self):
-        """Messages with lowercase #6264a7 are also own."""
-        msg_content = '<div style="border-left:3px solid #6264a7;padding-left:10px">text</div>'
-        is_own = (
-            "border-left:3px solid #6264A7" in msg_content
-            or "border-left:3px solid #6264a7" in msg_content
-            or "<b>🤖 Hermes</b>" in msg_content
-        )
-        assert is_own is True
+    @pytest.mark.asyncio
+    async def test_foreign_branded_html_is_dispatched(self):
+        adapter = TeamsMTKAdapter(config=None)
+        adapter._message_handler = AsyncMock()
+        conv_id = "48:notes"
+        adapter._last_message_ids[conv_id] = "0"
 
-    def test_echo_guard_flags_emoji_prefix(self):
-        """Messages with <b>🤖 Hermes</b> are own even without border-left."""
-        msg_content = "<p><b>\U0001f916 Hermes</b> did something</p>"
-        is_own = (
-            "border-left:3px solid #6264A7" in msg_content
-            or "border-left:3px solid #6264a7" in msg_content
-            or "<b>\U0001f916 Hermes</b>" in msg_content
-        )
-        assert is_own is True
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock) as handle:
+            await adapter._process_new_messages(conv_id, [self._message("1")])
 
-    def test_echo_guard_passes_normal_user_message(self):
-        """Normal user message should NOT be flagged as own."""
-        msg_content = "<p>Hello, can you help me?</p>"
-        is_own = (
-            "border-left:3px solid #6264A7" in msg_content
-            or "border-left:3px solid #6264a7" in msg_content
-            or "<b>🤖 Hermes</b>" in msg_content
-        )
-        assert is_own is False
+        handle.assert_awaited_once()
 
-    def test_echo_guard_hermes_sender_still_primary(self):
-        """hermes_sender=agent still flags as own even without HTML fingerprint."""
-        props = {"hermes_sender": "agent"}
-        is_own = props.get("hermes_sender") == "agent"
-        assert is_own is True
+    @pytest.mark.asyncio
+    async def test_tracked_outbound_id_is_suppressed(self):
+        adapter = TeamsMTKAdapter(config=None)
+        adapter._message_handler = AsyncMock()
+        conv_id = "48:notes"
+        adapter._last_message_ids[conv_id] = "0"
+        adapter._remember_sent_message(conv_id, "1")
 
-    def test_echo_guard_combined_all_four_signals(self):
-        """When all 4 guards are checked, a stripped-hermes_sender + branded-HTML message is caught."""
-        msg = {
-            "id": "2001",
-            "content": '<div style="border-left:3px solid #6264A7">reply</div>',
-            "properties": {},  # stripped by Teams API
-        }
-        is_own = False
-        props = msg.get("properties", {})
-        # guard 1
-        if props.get("hermes_sender") == "agent":
-            is_own = True
-        # guard 4
-        if not is_own and msg.get("content") and (
-            "border-left:3px solid #6264A7" in msg["content"]
-            or "border-left:3px solid #6264a7" in msg["content"]
-            or "<b>\U0001f916 Hermes</b>" in msg["content"]
-        ):
-            is_own = True
-        assert is_own is True
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock) as handle:
+            await adapter._process_new_messages(conv_id, [self._message("1")])
+
+        handle.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

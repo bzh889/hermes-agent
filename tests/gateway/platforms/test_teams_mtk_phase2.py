@@ -114,9 +114,9 @@ class TestForwardMessage:
 
 class TestDeleteMessageSafe:
     @pytest.mark.asyncio
-    async def test_delete_own_last_sent(self):
+    async def test_delete_owned_message(self):
         adapter = _make_adapter()
-        adapter._last_sent_message_id = "msg1"
+        adapter._remember_sent_message("conv1", "msg1")
         with patch.object(adapter, "delete_message", new_callable=AsyncMock) as mock:
             mock.return_value = {"status": "deleted"}
             result = await adapter.delete_message_safe("conv1", "msg1")
@@ -124,10 +124,9 @@ class TestDeleteMessageSafe:
             assert result["status"] == "deleted"
 
     @pytest.mark.asyncio
-    async def test_delete_dedup_own(self):
+    async def test_delete_owned_registry_entry(self):
         adapter = _make_adapter()
-        adapter._last_sent_message_id = None
-        adapter._sent_dedup.is_duplicate = MagicMock(return_value=True)
+        adapter._remember_sent_message("conv1", "msg1")
         with patch.object(adapter, "delete_message", new_callable=AsyncMock) as mock:
             mock.return_value = {"status": "deleted"}
             result = await adapter.delete_message_safe("conv1", "msg1")
@@ -136,8 +135,6 @@ class TestDeleteMessageSafe:
     @pytest.mark.asyncio
     async def test_reject_not_own(self):
         adapter = _make_adapter()
-        adapter._last_sent_message_id = None
-        adapter._sent_dedup.is_duplicate = MagicMock(return_value=False)
         # _fetch_messages returns a message not from agent
         adapter._fetch_messages = MagicMock(return_value=[
             {"id": "msg1", "properties": {"hermes_sender": "user"}}

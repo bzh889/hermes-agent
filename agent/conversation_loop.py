@@ -4526,52 +4526,62 @@ def run_conversation(
                 if _tc_names == {"execute_code"}:
                     agent.iteration_budget.refund()
                 
-                # Use real token counts from the API response to decide
-                # compression.  prompt_tokens + completion_tokens is the
-                # actual context size the provider reported plus the
-                # assistant turn — a tight lower bound for the next prompt.
-                # Tool results appended above aren't counted yet, but the
-                # threshold (default 50%) leaves ample headroom; if tool
-                # results push past it, the next API call will report the
-                # real total and trigger compression then.
+                # Decide compression from both the provider-reported prompt
+                # and the request we are about to make.  The response usage
+                # predates the tool results appended above; trusting it alone
+                # can send an oversized next request before the provider has
+                # any chance to report its size.
                 #
                 # If last_prompt_tokens is 0 (stale after API disconnect
                 # or provider returned no usage data), fall back to rough
                 # estimate to avoid missing compression.  Without this,
                 # a session can grow unbounded after disconnects because
                 # should_compress(0) never fires.  (#2153)
-                _compressor = agent.context_compressor
-                if _compressor.last_prompt_tokens > 0:
-                    # Only use prompt_tokens — completion/reasoning
-                    # tokens don't consume context window space.
-                    # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
-                    # inflate completion_tokens with reasoning,
-                    # causing premature compression.  (#12026)
-                    _real_tokens = _compressor.last_prompt_tokens
-                elif _compressor.last_prompt_tokens == -1:
-                    # Compression just ran and no API-reported prompt count
-                    # has arrived yet. Avoid treating a schema-heavy rough
-                    # post-compression estimate as real context pressure.
-                    _real_tokens = 0
-                else:
-                    # Include tool schemas — with 50+ tools enabled
-                    # these add 20-30K tokens the messages-only
-                    # estimate misses, which can skip compression
-                    # past the configured threshold (#14695).
-                    _real_tokens = estimate_request_tokens_rough(
-                        messages, tools=agent.tools or None
+                if agent.compression_enabled:
+                    _compressor = agent.context_compressor
+                    _rough_next_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt or "",
+                        tools=agent.tools or None,
                     )
+                    if _compressor.last_prompt_tokens > 0:
+                        # Only use prompt_tokens — completion/reasoning
+                        # tokens don't consume context window space.
+                        # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
+                        # inflate completion_tokens with reasoning,
+                        # causing premature compression.  (#12026)
+                        _real_tokens = _compressor.last_prompt_tokens
+                        _defer_rough = getattr(
+                            _compressor,
+                            "should_defer_preflight_to_real_usage",
+                            lambda _tokens: False,
+                        )
+                        if (
+                            _rough_next_tokens >= _compressor.threshold_tokens
+                            and not _defer_rough(_rough_next_tokens)
+                        ):
+                            _real_tokens = max(_real_tokens, _rough_next_tokens)
+                    elif _compressor.last_prompt_tokens == -1:
+                        # Compression just ran and no API-reported prompt count
+                        # has arrived yet. Avoid treating a schema-heavy rough
+                        # post-compression estimate as real context pressure.
+                        _real_tokens = 0
+                    else:
+                        # Include the system prompt and tool schemas — with 50+
+                        # tools enabled these add 20-30K tokens the messages-only
+                        # estimate misses (#14695).
+                        _real_tokens = _rough_next_tokens
 
-                if agent.compression_enabled and _compressor.should_compress(_real_tokens):
-                    agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
-                        messages, system_message,
-                        approx_tokens=agent.context_compressor.last_prompt_tokens,
-                        task_id=effective_task_id,
-                    )
-                    conversation_history = conversation_history_after_compression(
-                        agent, messages
-                    )
+                    if _compressor.should_compress(_real_tokens):
+                        agent._safe_print("  ⟳ compacting context…")
+                        messages, active_system_prompt = agent._compress_context(
+                            messages, system_message,
+                            approx_tokens=_real_tokens,
+                            task_id=effective_task_id,
+                        )
+                        conversation_history = conversation_history_after_compression(
+                            agent, messages
+                        )
                 
                 # Save session log incrementally (so progress is visible even if interrupted)
                 agent._session_messages = messages

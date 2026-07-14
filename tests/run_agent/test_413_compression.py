@@ -825,8 +825,10 @@ class TestToolResultPreflightCompression:
         """When tool results push estimated tokens past threshold, compress before next call."""
         agent.compression_enabled = True
         agent.context_compressor.context_length = 200_000
-        agent.context_compressor.threshold_tokens = 130_000  # below the 135k reported usage
-        agent.context_compressor.last_prompt_tokens = 130_000
+        agent.context_compressor.threshold_tokens = 130_000
+        # The provider-reported prompt still fits. Compression must be caused
+        # by the newly appended tool result, not by this stale pre-tool usage.
+        agent.context_compressor.last_prompt_tokens = 100_000
         agent.context_compressor.last_completion_tokens = 5_000
 
         tc = SimpleNamespace(
@@ -835,7 +837,7 @@ class TestToolResultPreflightCompression:
         )
         tool_resp = _mock_response(
             content=None, finish_reason="stop", tool_calls=[tc],
-            usage={"prompt_tokens": 130_000, "completion_tokens": 5_000, "total_tokens": 135_000},
+            usage={"prompt_tokens": 100_000, "completion_tokens": 5_000, "total_tokens": 105_000},
         )
         ok_resp = _mock_response(
             content="Done after compression", finish_reason="stop",
@@ -844,8 +846,17 @@ class TestToolResultPreflightCompression:
         agent.client.chat.completions.create.side_effect = [tool_resp, ok_resp]
         large_result = "x" * 100_000
 
+        def next_request_tokens(msgs, **_kwargs):
+            # The first request fits; once the tool result is appended, the
+            # authoritative next-request estimate crosses the threshold.
+            return 150_000 if any(m.get("role") == "tool" for m in msgs) else 90_000
+
         with (
             patch("run_agent.handle_function_call", return_value=large_result),
+            patch(
+                "agent.conversation_loop.estimate_request_tokens_rough",
+                side_effect=next_request_tokens,
+            ),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -857,6 +868,40 @@ class TestToolResultPreflightCompression:
             result = agent.run_conversation("hello")
 
         mock_compress.assert_called_once()
+        assert result["completed"] is True
+
+    def test_disabled_compression_skips_post_tool_preflight_estimate(self, agent):
+        """Disabled compression must not run its post-tool preflight scan."""
+        agent.compression_enabled = False
+        tc = SimpleNamespace(
+            id="tc1", type="function",
+            function=SimpleNamespace(name="web_search", arguments='{"query":"test"}'),
+        )
+        tool_resp = _mock_response(
+            content=None, finish_reason="stop", tool_calls=[tc],
+            usage={"prompt_tokens": 1_000, "completion_tokens": 10, "total_tokens": 1_010},
+        )
+        ok_resp = _mock_response(
+            content="Done", finish_reason="stop",
+            usage={"prompt_tokens": 1_100, "completion_tokens": 10, "total_tokens": 1_110},
+        )
+        agent.client.chat.completions.create.side_effect = [tool_resp, ok_resp]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="result"),
+            patch("agent.conversation_loop.estimate_request_tokens_rough") as estimate,
+            patch.object(agent, "_compress_context") as compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert all(
+            "system_prompt" not in call.kwargs
+            for call in estimate.call_args_list
+        )
+        compress.assert_not_called()
         assert result["completed"] is True
 
     def test_anthropic_prompt_too_long_safety_net(self, agent):

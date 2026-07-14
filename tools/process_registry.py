@@ -1552,7 +1552,7 @@ class ProcessRegistry:
         }
 
     def close_stdin(self, session_id: str) -> dict:
-        """Close a running process's stdin / send EOF without killing the process."""
+        """Close stdin/send EOF when the backend can do so without killing it."""
         session = self.get(session_id)
         if session is None:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
@@ -1560,6 +1560,16 @@ class ProcessRegistry:
             return {"status": "already_exited", "error": "Process has already finished"}
 
         if hasattr(session, '_pty') and session._pty:
+            if _IS_WINDOWS:
+                return {
+                    "status": "unsupported",
+                    "error": (
+                        "Windows ConPTY cannot close stdin independently or "
+                        "deliver a reliable EOF without terminating the process. "
+                        "Use process.submit with the program's quit command, or "
+                        "process.kill to terminate it."
+                    ),
+                }
             try:
                 session._pty.sendeof()
                 return {"status": "ok", "message": "EOF sent"}
@@ -2118,7 +2128,8 @@ PROCESS_SCHEMA = {
         "Actions: 'list' (show all), 'poll' (check status + new output), "
         "'log' (full output with pagination), 'wait' (block until done or timeout), "
         "'kill' (terminate), 'write' (send raw stdin data without newline), "
-        "'submit' (send data + Enter, for answering prompts), 'close' (close stdin/send EOF)."
+        "'submit' (send data + Enter, for answering prompts), 'close' (close stdin/send EOF; "
+        "unsupported for Windows PTY sessions because ConPTY cannot close input independently)."
     ),
     "parameters": {
         "type": "object",

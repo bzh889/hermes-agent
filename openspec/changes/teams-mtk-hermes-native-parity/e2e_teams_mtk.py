@@ -26,6 +26,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -78,6 +79,19 @@ def send_chat_message(chat_id: str, content: str) -> str:
     if r.status_code != 201:
         raise RuntimeError(f"Graph API POST failed: {r.status_code} {r.text[:200]}")
     return r.json()["id"]
+
+
+def delete_graph_message(chat_id: str, message_id: str) -> None:
+    """Delete a controlled Graph-user E2E message."""
+    token = get_graph_token()
+    url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{message_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.delete(url, headers=headers)
+    if response.status_code not in (204, 404):
+        raise RuntimeError(
+            f"Graph API DELETE failed: status={response.status_code}, "
+            f"body_length={len(response.text or '')}"
+        )
 
 
 def tail_log(path: str, after_line: int = 0) -> str:
@@ -433,27 +447,62 @@ def test_dm_echo_guard(log_path: str, baseline: int) -> tuple[bool, str]:
     result = msg_svc.send(conversation_id=DM_CHAT_ID, content=content)
     msg_id = str(result.get("id") or result.get("OriginalArrivalTime") or "")
     if not msg_id:
-        return False, f"SDK send succeeded but returned no message id: {result!r}"
+        return False, (
+            "SDK send succeeded but returned no message id; "
+            f"response_keys={sorted(result) if isinstance(result, dict) else []}"
+        )
 
-    found, evidence = wait_and_check_log(
-        log_path, baseline,
-        [rf"skipping own sent message id={re.escape(msg_id)}(?:\s|$)"],
-    )
-    return found, evidence
+    try:
+        found, evidence = wait_and_check_log(
+            log_path, baseline,
+            [rf"skipping own sent message id={re.escape(msg_id)}(?:\s|$)"],
+            wait_seconds=45,  # adaptive poll may be 30s while WS is healthy
+        )
+        return found, evidence
+    finally:
+        from gateway.platforms.teams_mtk import TeamsMTKAdapter
+        cleanup = asyncio.run(TeamsMTKAdapter(None).delete_message(DM_CHAT_ID, msg_id))
+        if cleanup.get("status") != "deleted":
+            raise RuntimeError(f"echo-guard cleanup failed: status={cleanup.get('status')}")
 
 
 def test_mention_gating_ignore(log_path: str, baseline: int) -> tuple[bool, str]:
-    """Group: message without @hermes is ignored when require_mention=true."""
+    """Group: a non-mentioned message is inspected but produces no bot reply."""
+    baseline_msgs = get_messages_raw(GROUP_CHAT_ID, page_size=15)
+    baseline_ids = {str(m.get("id")) for m in baseline_msgs}
     content = "E2E_AUTO no mention — should be ignored"
     msg_id = send_chat_message(GROUP_CHAT_ID, content)
 
-    found, evidence = wait_and_check_log(
+    inspected, evidence = wait_and_check_log(
         log_path, baseline,
-        [r"ignoring group message.*require_mention",
-         r"require_mention.*no.*@hermes",
-         r"inspecting msg.*E2E.*AUTO no mention"],
+        [rf"inspecting msg id={re.escape(str(msg_id))}(?:\s|$)"],
+        wait_seconds=45,
     )
-    return found, evidence
+    if not inspected:
+        return False, f"Gateway never inspected marker {msg_id}: {evidence}"
+
+    time.sleep(2)
+    msgs = get_messages_raw(GROUP_CHAT_ID, page_size=30)
+
+    def _after_marker(message: dict) -> bool:
+        candidate = str(message.get("id") or "")
+        try:
+            return int(candidate) > int(str(msg_id))
+        except ValueError:
+            return candidate not in baseline_ids
+
+    unexpected_replies = [
+        m for m in msgs
+        if _after_marker(m)
+        and str(m.get("id")) != str(msg_id)
+        and "border-left" in (m.get("content") or "")
+    ]
+    if unexpected_replies:
+        return False, (
+            "Non-mentioned group message triggered a bot reply: "
+            f"id={unexpected_replies[0].get('id')}"
+        )
+    return True, f"Gateway inspected {msg_id}; no bot reply was delivered"
 
 
 def test_mention_gating_process(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -488,11 +537,36 @@ def test_mention_gating_process(log_path: str, baseline: int) -> tuple[bool, str
 
 
 def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
-    """DM: /model triggers picker step 1, provider selection triggers step 2."""
+    """DM /model picker: provider list -> provider choice -> model list."""
+    def _read_picker(message_id: str, marker: str, wait_seconds: int = 20) -> str:
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=30):
+                if str(message.get("id") or "") != str(message_id):
+                    continue
+                content = str(message.get("content") or "")
+                if marker in content:
+                    return content
+            time.sleep(2)
+        return ""
+
+    def _numbered_block(html_content: str, marker: str) -> Optional[int]:
+        for block in re.findall(
+            r'<div style="margin:1px 0">(.*?)</div>',
+            html_content,
+            flags=re.DOTALL,
+        ):
+            if marker not in block:
+                continue
+            match = re.search(r">(\d+)</span>", block)
+            if match:
+                return int(match.group(1))
+        return None
+
     send_chat_message(DM_CHAT_ID, "/model")
 
-    # Wait longer for step 1 (gateway poll + LLM call for provider list)
-    for attempt in range(5):
+    # Allow the stable-WS poll interval (up to 30s) plus delivery time.
+    for attempt in range(12):
         time.sleep(4)
         step1_log = tail_log(log_path, baseline)
         if "model picker step 1 (providers) sent" in step1_log:
@@ -500,17 +574,114 @@ def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
     else:
         return False, step1_log[-500:]
 
-    # Select first provider — use fresh baseline
-    time.sleep(2)
+    picker_ids = re.findall(
+        r"model picker step 1 \(providers\) sent \(id=([^\s)]+)\)",
+        step1_log,
+    )
+    if not picker_ids:
+        return False, "Picker was sent but its real message ID was not logged"
+    picker_id = picker_ids[-1]
+
+    # A successful send is not enough: the next poll must classify the
+    # outbound picker as Hermes-owned.  This catches the SDK-normalization
+    # regression where ``content`` lost its HTML fingerprint and the picker
+    # was dispatched back into the agent as if the user had typed it.
+    skipped, skip_evidence = wait_and_check_log(
+        log_path,
+        baseline,
+        [rf"skipping own sent message id={re.escape(picker_id)}(?:\s|$)"],
+        wait_seconds=50,
+    )
+    if not skipped:
+        return False, (
+            f"Outbound picker id={picker_id} was not echo-guarded; "
+            f"evidence={skip_evidence}"
+        )
+
+    provider_html = _read_picker(picker_id, "Select Provider")
+    if not provider_html:
+        return False, f"Provider picker id={picker_id} was not readable from Teams"
+    current_model_match = re.search(
+        r"Current:\s*<b>(.*?)</b>", provider_html, flags=re.DOTALL
+    )
+    current_model = (
+        re.sub(r"<[^>]+>", "", current_model_match.group(1)).strip()
+        if current_model_match else ""
+    )
+    provider_choice = _numbered_block(provider_html, "←")
+    if not current_model or provider_choice is None:
+        return False, (
+            "Could not identify the current provider/model from the real picker; "
+            f"current_model={current_model!r}, provider_choice={provider_choice!r}"
+        )
+
+    # Select the current provider so the E2E never mutates the user's model.
     baseline2 = sum(1 for _ in open(log_path, encoding="utf-8", errors="replace"))
-    send_chat_message(DM_CHAT_ID, "1")
+    send_chat_message(DM_CHAT_ID, str(provider_choice))
 
     found, evidence = wait_and_check_log(
         log_path, baseline2,
         [r"model picker step 2.*sent"],
-        wait_seconds=15,
+        wait_seconds=45,
     )
-    return found, evidence
+    if not found:
+        return False, evidence
+
+    step2_log = tail_log(log_path, baseline2)
+    sub_picker_ids = re.findall(
+        r"model picker step 2 .* sent \(id=([^\s)]+)\)", step2_log
+    )
+    if not sub_picker_ids:
+        return False, "Model sub-picker was sent but its message ID was not logged"
+    sub_picker_id = sub_picker_ids[-1]
+    model_html = _read_picker(sub_picker_id, "Select Model")
+    if not model_html:
+        return False, f"Model picker id={sub_picker_id} was not readable from Teams"
+
+    model_choice = _numbered_block(model_html, f">{current_model}</span>")
+    if model_choice is None:
+        model_choice = _numbered_block(model_html, "✓")
+    if model_choice is None:
+        return False, (
+            f"Current model {current_model!r} was not selectable in the real sub-picker"
+        )
+
+    # Complete the flow. The adapter clears picker state before invoking the
+    # callback, so a successful confirmation proves the stale-state regression
+    # cannot poison the next E2E run.
+    confirmation_baseline = {
+        str(message.get("id") or "")
+        for message in get_messages_raw(DM_CHAT_ID, page_size=20)
+    }
+    baseline3 = sum(1 for _ in open(log_path, encoding="utf-8", errors="replace"))
+    send_chat_message(DM_CHAT_ID, str(model_choice))
+    selected, selection_evidence = wait_and_check_log(
+        log_path,
+        baseline3,
+        [r"model picker model selection:"],
+        wait_seconds=45,
+    )
+    if not selected:
+        return False, selection_evidence
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        confirmations = [
+            message for message in get_messages_raw(DM_CHAT_ID, page_size=30)
+            if str(message.get("id") or "") not in confirmation_baseline
+            and current_model in str(message.get("content") or "")
+            and "Select Model" not in str(message.get("content") or "")
+        ]
+        if confirmations:
+            return True, (
+                f"provider={provider_choice}, model={model_choice} ({current_model}); "
+                f"confirmation_id={confirmations[0].get('id')}"
+            )
+        time.sleep(2)
+    return False, (
+        f"Model selection executed but no real confirmation containing "
+        f"{current_model!r} was readable from Teams"
+    )
 
 
 def test_restart_no_replay(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -526,7 +697,23 @@ def test_restart_no_replay(log_path: str, baseline: int) -> tuple[bool, str]:
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
     marker = f"E2E_AUTO restart-no-replay marker {int(time.time())}"
-    marker_id = send_chat_message(DM_CHAT_ID, marker)
+    # Use the bot-token path. A Graph user message would correctly start a
+    # live agent turn and poison the next sequential E2E test; the restart
+    # watermark contract only requires a real persisted message ID.
+    marker_id = send_via_sdk(DM_CHAT_ID, marker)
+    if not marker_id:
+        return False, "SDK restart marker send returned no message ID"
+    skipped, skip_evidence = wait_and_check_log(
+        log_path,
+        baseline,
+        [rf"skipping own sent message id={re.escape(marker_id)}(?:\s|$)"],
+        wait_seconds=45,
+    )
+    if not skipped:
+        return False, (
+            f"Restart marker id={marker_id} was not echo-guarded; "
+            f"evidence={skip_evidence}"
+        )
     time.sleep(2)  # give MSG API a moment to persist before read-back
 
     adapter = TeamsMTKAdapter(None)
@@ -752,9 +939,199 @@ def test_send_text(log_path: str, baseline: int) -> tuple[bool, str]:
     found, evidence = wait_and_check_log(
         log_path, baseline,
         [r"TeamsMTK: sent message id="],
-        wait_seconds=30,
+        # Stable WS polling may take 30s before the inbound message is seen;
+        # leave another 30s for the real model turn and SDK delivery.
+        wait_seconds=60,
     )
     return found, evidence
+
+
+def test_reaction_roundtrip(log_path: str, baseline: int) -> tuple[bool, str]:
+    """S7: add and remove a real reaction, verified through MSG read-back."""
+    del log_path, baseline
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    marker = f"E2E_AUTO reaction roundtrip {time.time_ns()}"
+    message_id = send_via_sdk(DM_CHAT_ID, marker)
+    if not message_id:
+        return False, "SDK reaction target send returned no message ID"
+
+    adapter = TeamsMTKAdapter(None)
+
+    def _emotion_users() -> Optional[list]:
+        message = next(
+            (
+                item
+                for item in get_messages_raw(DM_CHAT_ID, page_size=30)
+                if str(item.get("id")) == str(message_id)
+            ),
+            None,
+        )
+        if not message:
+            return None
+        properties = message.get("properties") or {}
+        if isinstance(properties, str):
+            properties = json.loads(properties)
+        for emotion in properties.get("emotions") or []:
+            if emotion.get("key") == "like":
+                return emotion.get("users") or []
+        return []
+
+    try:
+        sent = asyncio.run(adapter.send_reaction(DM_CHAT_ID, message_id, "like"))
+        if sent.get("status") != "reacted":
+            return False, f"send_reaction failed: {sent!r}"
+
+        deadline = time.time() + 20
+        added_users = None
+        while time.time() < deadline:
+            added_users = _emotion_users()
+            if added_users:
+                break
+            time.sleep(1)
+        if not added_users:
+            return False, f"Reaction was not visible in MSG read-back: users={added_users!r}"
+
+        removed = asyncio.run(adapter.remove_reaction(DM_CHAT_ID, message_id, "like"))
+        if removed.get("status") != "removed":
+            return False, f"remove_reaction failed: {removed!r}"
+
+        deadline = time.time() + 20
+        remaining_users = added_users
+        while time.time() < deadline:
+            remaining_users = _emotion_users()
+            if remaining_users == []:
+                break
+            time.sleep(1)
+        if remaining_users != []:
+            return False, f"Reaction remained after remove: users={remaining_users!r}"
+
+        return True, f"Reaction add/remove read-back verified for message_id={message_id}"
+    finally:
+        asyncio.run(adapter.delete_message(DM_CHAT_ID, message_id))
+
+
+def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]:
+    """S9: delete an own message and refuse a processed foreign message."""
+    del log_path, baseline
+    import hashlib
+    from unittest.mock import AsyncMock
+
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    adapter = TeamsMTKAdapter(None)
+    own_marker = f"E2E_AUTO delete own {time.time_ns()}"
+    sent = asyncio.run(adapter.send(DM_CHAT_ID, own_marker))
+    own_id = str(sent.message_id or "")
+    if not sent.success or not own_id:
+        return False, f"Own delete target send failed: success={sent.success}"
+
+    own_deleted = False
+    foreign_id = ""
+    try:
+        deleted = asyncio.run(adapter.delete_message_safe(DM_CHAT_ID, own_id))
+        if deleted.get("status") != "deleted":
+            return False, f"delete_message_safe rejected own message: status={deleted.get('status')}"
+        own_deleted = True
+
+        deadline = time.time() + 20
+        tombstone = None
+        tombstone_properties = {}
+        while time.time() < deadline:
+            tombstone = next(
+                (
+                    item
+                    for item in get_messages_raw(DM_CHAT_ID, page_size=30)
+                    if str(item.get("id")) == own_id
+                ),
+                None,
+            )
+            tombstone_properties = (tombstone or {}).get("properties") or {}
+            if isinstance(tombstone_properties, str):
+                tombstone_properties = json.loads(tombstone_properties)
+            if (
+                tombstone
+                and not (tombstone.get("content") or "")
+                and tombstone_properties.get("deletetime")
+            ):
+                break
+            time.sleep(1)
+        else:
+            return False, (
+                f"Own tombstone missing: found={bool(tombstone)}, "
+                f"content_length={len((tombstone or {}).get('content') or '')}, "
+                f"has_deletetime={bool(tombstone_properties.get('deletetime'))}"
+            )
+
+        foreign_marker = f"E2E_AUTO foreign delete guard {time.time_ns()}"
+        foreign_id = send_chat_message(GROUP_CHAT_ID, foreign_marker)
+        foreign = None
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            foreign = next(
+                (
+                    item
+                    for item in get_messages_raw(GROUP_CHAT_ID, page_size=30)
+                    if str(item.get("id")) == foreign_id
+                ),
+                None,
+            )
+            if foreign and foreign_marker in str(foreign.get("content") or ""):
+                break
+            time.sleep(1)
+        if not foreign:
+            return False, "Controlled foreign message was not readable from MSG API"
+
+        # Reproduce the live-adapter state: process this exact inbound message
+        # before asking the same adapter to enforce safe deletion.
+        adapter._last_message_ids[GROUP_CHAT_ID] = None
+        adapter._message_handler = AsyncMock()
+        asyncio.run(adapter._process_new_messages(GROUP_CHAT_ID, [foreign]))
+
+        foreign_content = str(foreign.get("content") or "")
+        foreign_hash = hashlib.sha256(foreign_content.encode("utf-8")).hexdigest()[:10]
+        refused = asyncio.run(adapter.delete_message_safe(GROUP_CHAT_ID, foreign_id))
+        if (
+            refused.get("status") != "error"
+            or "not your message" not in refused.get("error", "")
+        ):
+            return False, (
+                f"Foreign delete was not refused: status={refused.get('status')}, "
+                f"error_type={type(refused.get('error')).__name__}"
+            )
+
+        after = next(
+            (
+                item
+                for item in get_messages_raw(GROUP_CHAT_ID, page_size=30)
+                if str(item.get("id")) == foreign_id
+            ),
+            None,
+        )
+        after_content = str((after or {}).get("content") or "")
+        after_hash = hashlib.sha256(after_content.encode("utf-8")).hexdigest()[:10]
+        if not after or after_hash != foreign_hash:
+            return False, (
+                f"Foreign message changed after refusal: found={bool(after)}, "
+                f"before_length={len(foreign_content)}, after_length={len(after_content)}, "
+                f"hash_equal={after_hash == foreign_hash}"
+            )
+
+        own_hash = hashlib.sha256(own_id.encode("utf-8")).hexdigest()[:10]
+        foreign_id_hash = hashlib.sha256(foreign_id.encode("utf-8")).hexdigest()[:10]
+        return True, (
+            f"Own tombstone hash={own_hash}; processed foreign message "
+            f"hash={foreign_id_hash} refused and unchanged"
+        )
+    finally:
+        if not own_deleted:
+            cleanup = asyncio.run(adapter.delete_message(DM_CHAT_ID, own_id))
+            if cleanup.get("status") != "deleted":
+                raise RuntimeError(
+                    f"own delete-target cleanup failed: status={cleanup.get('status')}"
+                )
+        if foreign_id:
+            delete_graph_message(GROUP_CHAT_ID, foreign_id)
 
 
 def test_edit_message(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -771,7 +1148,7 @@ def test_edit_message(log_path: str, baseline: int) -> tuple[bool, str]:
     found, evidence = wait_and_check_log(
         log_path, baseline,
         [r"TeamsMTK: edited message", r"TeamsMTK: sent message id="],
-        wait_seconds=15,
+        wait_seconds=45,  # adaptive poll may be 30s while WS is healthy
     )
     return found, evidence
 
@@ -834,7 +1211,7 @@ def test_download_attachment(log_path: str, baseline: int) -> tuple[bool, str]:
         [
             r"TeamsMTK: cached \d+ bytes from",  # New unified success log (both SDK + aiohttp paths)
         ],
-        wait_seconds=20,
+        wait_seconds=45,  # adaptive poll may be 30s while WS is healthy
     )
     if not found:
         fail_found, fail_evidence = wait_and_check_log(
@@ -988,6 +1365,79 @@ def test_find_conv_by_display_name(log_path: str, baseline: int) -> tuple[bool, 
     )
 
 
+def test_contact_routing(log_path: str, baseline: int) -> tuple[bool, str]:
+    """G13-A.4: resolve a dynamic contact target and deliver via the real API."""
+    del log_path, baseline
+    import asyncio
+    import hashlib
+    import json as _json
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from gateway.config import Platform
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+    from tools.send_message_tool import send_message_tool
+
+    adapter = TeamsMTKAdapter(None)
+    matches = [
+        c for c in adapter.list_conversations(limit=200)
+        if str(c.get("id") or "") == DM_CHAT_ID
+    ]
+    title = next(
+        (
+            str(c.get("title") or "").strip()
+            for c in matches
+            if len(str(c.get("title") or "").strip()) >= 4
+        ),
+        "",
+    )
+    if not title:
+        return False, "control DM has no usable dynamic title for contact routing"
+
+    resolved = adapter._find_conv_by_display_name(title)
+    if resolved != DM_CHAT_ID:
+        return False, "display-name resolver did not resolve the control DM"
+
+    marker = f"E2E_AUTO contact routing {int(time.time())}"
+    runner = SimpleNamespace(adapters={Platform.TEAMS_MTK: adapter})
+    result = None
+    try:
+        with patch("gateway.run._gateway_runner_ref", return_value=runner):
+            raw_result = send_message_tool({
+                "action": "send",
+                "target": f"teams_mtk:contact:{title}",
+                "message": marker,
+            })
+        result = _json.loads(raw_result)
+        if not result.get("success"):
+            return False, f"contact route send failed: {result!r}"
+        message_id = str(result.get("message_id") or "")
+        if not message_id:
+            return False, f"contact route returned no message id: {result!r}"
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            target = next(
+                (m for m in get_messages_raw(DM_CHAT_ID, 30) if str(m.get("id")) == message_id),
+                None,
+            )
+            if target is not None and marker in str(target.get("content") or ""):
+                title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()[:10]
+                return True, (
+                    f"contact title hash={title_hash} resolved to control DM; "
+                    f"message_id={message_id!r} read back"
+                )
+            time.sleep(2)
+        return False, f"contact route message {message_id!r} not found in MSG read-back"
+    finally:
+        message_id = str((result or {}).get("message_id") or "")
+        if message_id:
+            try:
+                asyncio.run(adapter.delete_message_safe(DM_CHAT_ID, message_id))
+            except Exception:
+                pass
+
+
 def test_find_conversation(log_path: str, baseline: int) -> tuple[bool, str]:
     """find_conversation() — SDK ConversationsService.find() search path.
 
@@ -1108,22 +1558,38 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
     marker = f"E2E_AUTO standalone sender {time.time_ns()}"
     result = asyncio.run(fn(None, DM_CHAT_ID, marker))
     if not isinstance(result, dict) or not result.get("success"):
-        return False, f"standalone sender returned failure: {result!r}"
+        return False, (
+            f"standalone sender returned failure: type={type(result).__name__}, "
+            f"success={result.get('success') if isinstance(result, dict) else None}"
+        )
 
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        messages = get_messages_raw(DM_CHAT_ID, page_size=30)
-        for msg in messages:
-            if marker in str(msg.get("content") or msg.get("body") or ""):
-                return True, (
-                    f"standalone sender delivered and read back marker; "
-                    f"message_id={result.get('message_id')!r}; {checks}"
+    message_id = str(result.get("message_id") or "")
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            messages = get_messages_raw(DM_CHAT_ID, page_size=30)
+            for msg in messages:
+                if marker in str(msg.get("content") or msg.get("body") or ""):
+                    message_id = str(msg.get("id") or message_id)
+                    import hashlib
+                    id_hash = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:10]
+                    return True, (
+                        f"standalone sender delivered and read back marker; "
+                        f"message_hash={id_hash}; {checks}"
+                    )
+            time.sleep(2)
+        return False, (
+            "standalone sender returned success but marker was not present in "
+            f"real Teams read-back; has_message_id={bool(message_id)}"
+        )
+    finally:
+        if message_id:
+            from gateway.platforms.teams_mtk import TeamsMTKAdapter
+            cleanup = asyncio.run(TeamsMTKAdapter(None).delete_message(DM_CHAT_ID, message_id))
+            if cleanup.get("status") != "deleted":
+                raise RuntimeError(
+                    f"standalone sender cleanup failed: status={cleanup.get('status')}"
                 )
-        time.sleep(2)
-    return False, (
-        "standalone sender returned success but marker was not present in "
-        f"real Teams read-back; result={result!r}"
-    )
 
 
 # ── Runner ────────────────────────────────────────────────────────
@@ -1135,6 +1601,8 @@ NAMED_TESTS = {
     "model-picker": test_model_picker,
     "restart-no-replay": test_restart_no_replay,
     "send-text": test_send_text,
+    "reaction-roundtrip": test_reaction_roundtrip,
+    "delete-message-safety": test_delete_message_safety,
     "edit-message": test_edit_message,
     "download-attachment": test_download_attachment,
     "send-image-file": test_send_image_file,
@@ -1144,6 +1612,7 @@ NAMED_TESTS = {
     "send-typing": test_send_typing,
     "list-conversations": test_list_conversations,
     "find-conv-by-display-name": test_find_conv_by_display_name,
+    "contact-routing": test_contact_routing,
     "find-conversation": test_find_conversation,
     "standalone-sender-fn": test_standalone_sender_fn,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
@@ -1175,8 +1644,15 @@ def main():
 
     to_run = list(NAMED_TESTS.keys())
     if args.only:
+        unknown = sorted(set(args.only) - set(NAMED_TESTS))
+        if unknown:
+            print(f"FATAL: unknown --only test name(s): {unknown}")
+            sys.exit(2)
         to_run = [t for t in to_run if t in args.only]
     to_run = [t for t in to_run if t not in args.skip]
+    if not to_run:
+        print("FATAL: no E2E tests selected")
+        sys.exit(2)
 
     results = {}
     for name in to_run:

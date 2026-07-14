@@ -446,6 +446,10 @@ class _SDKGraphAdapter:
             "Content-Type": "application/json",
         }
 
+    def _request(self, method: str, url: str, **kwargs):
+        """Expose the Graph transport contract used by SDK services."""
+        return self._gw._graph_request(method, url, **kwargs)
+
     def upload_to_onedrive(self, file_bytes: bytes, original_filename: str) -> dict:
         import requests as _req, time as _time, uuid as _uuid, os as _os
         ext = _os.path.splitext(original_filename)[1]
@@ -732,6 +736,8 @@ class _TrouterListener:
 
     def _handshake(self, trouter_info: dict, ic3_token: str, skype_token: str):
         """Socket.IO handshake to get session_id."""
+        import requests
+
         base_url = trouter_info.get("socketio", "")
         if not base_url.endswith("/"):
             base_url += "/"
@@ -776,13 +782,32 @@ class _TrouterListener:
         return f"{base}socket.io/1/websocket/{session_id}?{qs}"
 
     def is_healthy(self) -> bool:
-        """Return True if the WS connection is alive and responsive."""
-        if not self._ws or self._ws.closed:
+        """Return True while the WebSocket is open and heartbeat is fresh."""
+        if not self._ws:
             return False
-        if self._last_pong_time is None:
+        if not getattr(self, "_connected", True):
             return False
-        # Consider unhealthy if no pong within 2× heartbeat timeout
-        return (time.time() - self._last_pong_time) < (self._heartbeat_timeout * 2)
+
+        closed = getattr(self._ws, "closed", None)
+        if closed is True:
+            return False
+
+        state = getattr(self._ws, "state", None)
+        state_name = getattr(state, "name", state if isinstance(state, str) else None)
+        if isinstance(state_name, str):
+            return state_name.upper() == "OPEN"
+
+        last_heartbeat = getattr(self, "_last_heartbeat", None)
+        if last_heartbeat is not None:
+            return (time.monotonic() - last_heartbeat) < (2 * _WS_HEARTBEAT_TIMEOUT)
+
+        # Compatibility for listeners created by the pre-websockets-15
+        # implementation, which tracked wall-clock pong timestamps.
+        last_pong = getattr(self, "_last_pong_time", None)
+        if last_pong is None:
+            return False
+        timeout = getattr(self, "_heartbeat_timeout", _WS_HEARTBEAT_TIMEOUT)
+        return (time.time() - last_pong) < (2 * timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -926,9 +951,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._user_oid: Optional[str] = None  # set during connect from first poll
         self._last_sent_message_id: Optional[str] = None  # id of last message WE sent (echo guard)
         self._last_sent_message_html: Optional[str] = None  # HTML cache for trailing-footer merge
-        # TTL-based echo-guard cache — replaces a raw growing set() so sent
-        # message ids expire instead of accumulating forever across a
-        # long-lived gateway process. See gateway/platforms/helpers.py.
+        # TTL-based outbound ownership registry. Keys include both the
+        # conversation and message ID so inbound deduplication can never grant
+        # delete ownership or suppress an unrelated chat with the same ID.
         from gateway.platforms.helpers import MessageDeduplicator
         self._sent_dedup = MessageDeduplicator()
 
@@ -990,6 +1015,29 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             _vip_cfg.get("notify_targets", []))
         except Exception:
             pass
+
+    @staticmethod
+    def _sent_message_key(chat_id: str, msg_id: Any) -> str:
+        return f"{chat_id}\x1f{msg_id}"
+
+    def _remember_sent_message(self, chat_id: str, msg_id: Any) -> Optional[str]:
+        """Track a proven outbound message for echo guard and safe delete.
+
+        ``_last_sent_message_id`` is only a convenience pointer and can be
+        overwritten by an overlapping send. The chat-scoped TTL registry is
+        the authoritative ownership signal.
+        """
+        if not msg_id:
+            return None
+        tracked_id = str(msg_id)
+        self._last_sent_message_id = tracked_id
+        self._sent_dedup.remember(self._sent_message_key(chat_id, tracked_id))
+        return tracked_id
+
+    def _is_sent_message(self, chat_id: str, msg_id: Any) -> bool:
+        if not msg_id:
+            return False
+        return self._sent_dedup.contains(self._sent_message_key(chat_id, str(msg_id)))
 
     # ---- Per-group config (gateway.teams_mtk.groups in config.yaml) ----
 
@@ -1199,8 +1247,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         except Exception:
                             logger.debug("TeamsMTK: msg-id read-back failed", exc_info=True)
                     if msg_id:
-                        self._last_sent_message_id = str(msg_id)
-                        self._sent_dedup.is_duplicate(str(msg_id))
+                        self._remember_sent_message(chat_id, msg_id)
                         if html_content:
                             self._last_sent_message_html = html_content
                     logger.info(
@@ -1260,8 +1307,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # edit/delete, not a timestamp.
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
-                self._sent_dedup.is_duplicate(str(msg_id))
+                self._remember_sent_message(chat_id, msg_id)
                 if html_content:
                     self._last_sent_message_html = html_content
             logger.info(
@@ -1602,7 +1648,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 result = svc.send_image(chat_id, image_data, content_type, caption=caption)
                 msg_id = result.get("id", "")
                 if msg_id:
-                    self._last_sent_message_id = str(msg_id)
+                    self._remember_sent_message(chat_id, msg_id)
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as _sdk_err:
                 logger.warning(
@@ -1671,7 +1717,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_resp.raise_for_status()
             msg_id = msg_resp.json().get("id")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
+                self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
             logger.warning("TeamsMTK: send_image_file failed: %s", e)
@@ -1726,7 +1772,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 resp.raise_for_status()
                 msg_id = resp.json().get("id")
                 if msg_id:
-                    self._last_sent_message_id = str(msg_id)
+                    self._remember_sent_message(chat_id, msg_id)
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as e:
                 logger.warning("TeamsMTK: send_image (AMS direct embed) failed: %s", e)
@@ -1787,7 +1833,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 result = file_svc.send_file(chat_id, file_bytes, filename, graph_api, caption=caption)
                 msg_id = result.get("id", "")
                 if msg_id:
-                    self._last_sent_message_id = str(msg_id)
+                    self._remember_sent_message(chat_id, msg_id)
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as _sdk_err:
                 logger.warning(
@@ -1856,7 +1902,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_resp.raise_for_status()
             msg_id = msg_resp.json().get("id")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
+                self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
             logger.warning("TeamsMTK: send_document failed: %s", e)
@@ -1927,7 +1973,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             resp.raise_for_status()
             msg_id = resp.json().get("id")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
+                self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
             logger.warning("TeamsMTK: send_adaptive_card failed (%s) — falling back to text", e)
@@ -2346,9 +2392,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _adapter = _SDKAuthAdapter(self._auth)
-                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
-                _svc = _SDKReactions(_http)
+                _graph = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                _svc = _SDKReactions(_graph)
                 result = _svc.send(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, message_id)
                 return result
@@ -2370,9 +2415,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _adapter = _SDKAuthAdapter(self._auth)
-                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
-                _svc = _SDKReactions(_http)
+                _graph = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                _svc = _SDKReactions(_graph)
                 result = _svc.remove(chat_id, message_id, reaction)
                 logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, message_id)
                 return result
@@ -2532,11 +2576,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     # ---- S9-2: Enforce delete-only-own ----
 
     async def delete_message_safe(self, chat_id: str, message_id: str) -> dict:
-        """Delete a message only if we are the sender (echo guard check)."""
-        # Check if this was our own message
-        if self._last_sent_message_id and str(message_id) == str(self._last_sent_message_id):
-            return await self.delete_message(chat_id, message_id)
-        if self._sent_dedup.is_duplicate(str(message_id)):
+        """Delete only a chat-scoped outbound or API-verified agent message."""
+        if self._is_sent_message(chat_id, message_id):
             return await self.delete_message(chat_id, message_id)
         # Otherwise verify via fetch that sender is us before deleting
         try:
@@ -2819,7 +2860,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             data = resp.json()
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
+                self._remember_sent_message(chat_id, msg_id)
             logger.info("TeamsMTK: model picker step 1 (providers) sent (id=%s)", msg_id)
         except Exception as e:
             logger.error("TeamsMTK: model picker step 1 send failed: %s", e)
@@ -2967,7 +3008,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             data = resp.json()
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
-                self._last_sent_message_id = str(msg_id)
+                self._remember_sent_message(chat_id, msg_id)
             logger.info(
                 "TeamsMTK: model picker step 2 (models for %s) sent (id=%s)",
                 chosen_name, msg_id,
@@ -3381,14 +3422,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._last_message_ids[conv_id] = msg_id
                 continue
 
-            # Echo-loop guard: in a self-chat (48:notes), every message
-            # comes from the same OID.  We use three signals to decide
-            # whether a message is our own output:
+            # Echo-loop guard: in a self-chat (48:notes), every message can
+            # come from the same OID. Ownership therefore requires one of two
+            # trusted signals:
             #   1. properties.hermes_sender in ("agent", "bot")  (tag on send)
             #      Gateway sends "agent"; SDK-normalized messages carry "bot"
-            #   2. clientmessageid matches our sent id  (id-match fallback)
-            #   3. composetime is within 2s and content matches last sent
-            #      (catches cases where Teams API strips properties)
+            #   2. (conversation, message ID) exists in the outbound registry
+            # Presentation HTML is not proof: users can quote or forward it.
             is_own = False
             # Check hermes_sender from both msg.properties and _raw_properties
             props = msg.get("properties", {}) or {}
@@ -3406,21 +3446,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             _sender_val = props.get("hermes_sender") or _raw_props.get("hermes_sender")
             if _sender_val in ("agent", "bot"):
                 is_own = True
-            if self._last_sent_message_id and str(msg_id) == str(self._last_sent_message_id):
+            if self._is_sent_message(conv_id, msg_id):
                 is_own = True
-            if self._sent_dedup.is_duplicate(str(msg_id)):
-                is_own = True
-            # ④ HTML fingerprint detection: Hermes wraps responses in a
-            # <div style="border-left:#6264A7"> block with a
-            # <b>🤖 Hermes</b> signature.  Some Teams API paths strip
-            # the hermes_sender property, so fingerprint matching
-            # catches those cases.
-            if not is_own and content and "border-left" in content and "#6264a7" in content.lower():
-                is_own = True
-                logger.debug("TeamsMTK: fingerprint match (border-left:#6264A7) for msg id=%s", msg_id)
-            if not is_own and content and "<b>🤖 Hermes</b>" in content:
-                is_own = True
-                logger.debug("TeamsMTK: fingerprint match (🤖 Hermes signature) for msg id=%s", msg_id)
             if is_own:
                 logger.info("TeamsMTK: skipping own sent message id=%s", msg_id)
                 self._last_message_ids[conv_id] = msg_id

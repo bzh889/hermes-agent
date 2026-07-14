@@ -45,16 +45,22 @@ class MessageDeduplicator:
         self._max_size = max_size
         self._ttl = ttl_seconds
 
-    def is_duplicate(self, msg_id: str) -> bool:
-        """Return True if *msg_id* was already seen within the TTL window."""
+    def contains(self, msg_id: str) -> bool:
+        """Check a live entry without registering an unseen ID."""
         if not msg_id:
             return False
         now = time.time()
         if msg_id in self._seen:
             if now - self._seen[msg_id] < self._ttl:
                 return True
-            # Entry has expired — remove it and treat as new
             del self._seen[msg_id]
+        return False
+
+    def remember(self, msg_id: str) -> None:
+        """Register *msg_id* without treating prior state as a duplicate."""
+        if not msg_id:
+            return
+        now = time.time()
         self._seen[msg_id] = now
         if len(self._seen) > self._max_size:
             cutoff = now - self._ttl
@@ -68,6 +74,12 @@ class MessageDeduplicator:
                     key=lambda item: item[1],
                 )[-self._max_size:]
                 self._seen = dict(newest)
+
+    def is_duplicate(self, msg_id: str) -> bool:
+        """Return True if *msg_id* was already seen within the TTL window."""
+        if self.contains(msg_id):
+            return True
+        self.remember(msg_id)
         return False
 
     def clear(self):

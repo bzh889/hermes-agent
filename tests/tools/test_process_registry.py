@@ -465,10 +465,24 @@ class TestStdinHelpers:
         s._pty = pty
         registry._running[s.id] = s
 
-        result = registry.close_stdin(s.id)
+        with patch("tools.process_registry._IS_WINDOWS", False):
+            result = registry.close_stdin(s.id)
 
         pty.sendeof.assert_called_once()
         assert result["status"] == "ok"
+
+    def test_close_stdin_windows_pty_reports_unsupported(self, registry):
+        pty = MagicMock()
+        s = _make_session()
+        s._pty = pty
+        registry._running[s.id] = s
+
+        with patch("tools.process_registry._IS_WINDOWS", True):
+            result = registry.close_stdin(s.id)
+
+        pty.sendeof.assert_not_called()
+        assert result["status"] == "unsupported"
+        assert "ConPTY" in result["error"]
 
     @pytest.mark.skipif(
         sys.platform == "win32",

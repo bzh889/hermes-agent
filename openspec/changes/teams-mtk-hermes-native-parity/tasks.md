@@ -50,7 +50,7 @@
 > | `streaming-no-echo-duplication` | 2 | Streaming edit echo 重複發送（`OriginalArrivalTime` vs `id`） | 讀回真實對話，比對近似重複訊息 body | ✅ 2026-07-13 PASS |
 > | `no-residual-markdown-in-reply` | 2 | `**`/`` ` ``/`[url]`/`- `/pipe table 殘留未轉 HTML | 讀回真實 HTML，正則檢查殘留語法 | ✅ 2026-07-13 PASS |
 > | `no-disallowed-fallback-models` | 1 | 480b fallback 撞 403 浪費 retry | 檢查 config.yaml provider 清單 | ✅ 2026-07-13 PASS |
-> | `attachment-domain-routing-covers-asyncgw` | 1 | 圖片下載 domain routing 漏 `asyncgw.teams.microsoft.com` | 靜態檢查 domain match 邏輯涵蓋子網域 | ✅ 2026-07-13 PASS |
+> | `attachment-domain-routing-covers-asm` | 1 | 圖片下載 domain routing | 檢查 `asyncgw.teams.microsoft.com` 與 `as-api.asm.skype.com` 都走 token auth | ✅ 2026-07-14 PASS |
 > | `garbage-detector-no-false-positive` | 2 | Garbage detector 誤判疑慮 | 真實訊息確認有送達 + 記錄 discard 次數（非零仍算過，因 retry 成功） | ✅ 2026-07-13 PASS |
 >
 
@@ -70,24 +70,26 @@
 > | `send-typing` | G4 send_typing | 2026-07-13（**假測項訂正**：舊版是「不拋例外」檢查，但 send_typing 本身是 best-effort 吞掉所有例外，等於必過；在 `send_typing()` 補成功 log `TeamsMTK: send_typing ok` 後改為讀 log 驗證真實 POST 成功）|
 > | `list-conversations` | G13-A.1 | 2026-07-13（**假測項訂正**：舊版空清單也算 PASS（「token may be expired」），這種真實故障會被綠燈掩蓋；改為要求非空清單 + log 成功信號，並在 `list_conversations()` 兩個實作（`TeamsMTKAdapter` + `_TeamsAuth`）都補上成功/失敗 log）|
 > | `find-conv-by-display-name` | G13-A.2 | 2026-07-13（**假測項訂正**：舊版 `list_conversations` 回空清單時靜默通過；改為要求真實解析到已知對話 id，空清單直接 FAIL）|
-> | `standalone-sender-fn` | cron deliver | 2026-07-12（execution_success only，Teams 收訊待確認） |
+> | `contact-routing` | G13-A.4 | ✅ 2026-07-14 PASS（動態取得控制 DM title，真 `send_message` contact route → MSG read-back → safe-delete） |
+> | `find-conversation` | G13 Phase A SDK search | ✅ 2026-07-14 PASS（真 SDK search 回傳非空 conversation id） |
+> | `reaction-roundtrip` | S7-1~3 | ✅ 2026-07-14 PASS（Graph add/remove；MSG `properties.emotions[].users` add 後非空、remove 後清空） |
+> | `delete-message-safety` | S9-1~3 | ✅ 2026-07-14 PASS（同一 adapter 先處理受控 Graph-user foreign 訊息，再驗 own tombstone、foreign 明確拒刪且內容 hash 不變；finally Graph cleanup） |
+> | `standalone-sender-fn` | cron deliver | ✅ 2026-07-14 PASS（真 registry sender 呼叫 + MSG read-back + finally delete cleanup） |
 >
-> **2026-07-13 全量重跑**：20/20 real gateway E2E PASS + `scripts/run_tests.sh` 288/288 pytest PASS。
-> `test_send_typing`/`test_list_conversations`/`test_find_conv_by_display_name` 三項的訂正
-> 順帶在 `teams_mtk.py` 補上了原本缺失的成功/失敗 log（`send_typing ok`、
-> `list_conversations...ok, N convs`），這是撰寫真測項過程中發現的可觀測性 gap，
-> 不只是測試腳本本身的問題。
+> **2026-07-14 review 修復後全量重跑**：gateway 重啟載入最新 source 後，
+> 24/24 real gateway E2E PASS。包含 model-picker、restart-no-replay、SDK
+> send/edit/media、S7 reaction round-trip、同一 adapter 處理受控 foreign 後的 S9
+> delete safety、G13 contact routing、standalone sender cleanup 與 Tier-2 content
+> read-back。最新完整相關 pytest 555/555 PASS。
 >
-> ### 缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
+> ### 仍缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
 > | 功能 | Task ID | 需新增測項名稱 |
 > |------|---------|--------------|
-> | G13-A.3 `_find_conv_by_member_oid` | G13-A.3 | `find-conv-by-member-oid` |
-> | G13-A.4 `contact:` 路由 | G13-A.4 | `contact-routing` |
+> | G13-B.2 directory fallback | G13-B.2 | `contact-directory-fallback`（目前只有 mock unit，且只能補錯誤訊息） |
 > | G14 VIP buffer 偵測+緩衝 | G14-1.1~1.5 | `vip-buffer-detect`, `vip-buffer-flush` |
 > | BUG-2 `<at>` + blockquote 修法 | BUG-2 | `at-mention-prefix`, `blockquote-skip` |
 > | BUG-3 cold-start catchup | BUG-3 | `cold-start-catchup` |
 > | BUG-5 short-message gating | BUG-5 | `short-message-gating` |
-> | SDK-3b/3c send/edit 替換 | SDK-3b/3c | 已有 `send-text`/`edit-message`，SDK-3d 跑即覆蓋 |
 > | S1 全量拉取 | S1-1~4 | `full-fetch-no-reply`, `full-fetch-pagination` |
 > | S2 訊息搜尋 | S2-1~3 | `search-messages` |
 > | S3 使用者查詢 | S3-1 | `search-users` |
@@ -464,10 +466,14 @@
 - [x] **G13-A.2** ✅ **已完成並真實 E2E 驗證**：`_find_conv_by_display_name(name)` —
       唯讀掃已有對話名稱比對。Mock test 3 case 全過；真實對已知對話標題
       比對成功，未知名稱正確回傳 None。
-- [x] **G13-A.3** ✅ **已完成**：`_find_conv_by_member_oid(oid)` —
-      掃已有對話成員 OID 比對。依賴 G13-A.1（已驗證）。
-- [x] **G13-A.4** ✅ **已完成**：`contact:` 路由升級
-      依賴 G13-A.1~3，三者皆已真實驗證，路由可正常運作。
+- [x] **G13-A.3** ✅ **已查證並關閉（2026-07-14）**：原規劃的
+      `_find_conv_by_member_oid(oid)` 不存在，也不能由現有 Skype
+      `/conversations` 實作，因該 API 不回 member OID；Graph `Chat.Read` scope
+      亦未授權。正確的既有對話解析邊界是 title/member display name，不再誤稱
+      OID matcher 已實作。
+- [x] **G13-A.4** ✅ **已完成並真實 E2E 驗證（2026-07-14）**：`contact:`
+      路由以 display/member name 解析既有對話。`contact-routing` 對動態控制 DM
+      title 執行真 `send_message`，MSG API 讀回相同 message id/content 後 safe-delete。
 
 #### Phase B — Graph API 動態搜尋 + 主動建新對話（需決策，blocked）
 
@@ -478,13 +484,15 @@
 > 故 B.2/B.4 也需重新查證，不應維持「已完成」標記。
 
 - [ ] **G13-B.1** ~~新增 Graph token~~（**不需要**，m365 skill 已涵蓋 search_users）
-- [ ] **G13-B.2** 🔴 **需重新查證**（原誤標✅）：display name 搜不到時 fallback
-      `people.py search`——依賴不存在的 G13-A.4，需重做。
+- [ ] **G13-B.2** 🟡 **部分實作，尚缺真實 E2E**：display name 搜不到時會呼叫
+      `people.py search`；但因 A.3 的 member OID rematch 在現有權限下不可行，
+      目前只用 directory canonical name 補強「請先在 Teams 開啟對話」錯誤訊息。
+      mock unit 已有，仍需 `contact-directory-fallback` 真實驗證。
 - [ ] **G13-B.3** 🔴 **blocked**：Chat.Create scope 未授權，無法主動建新對話。
       需 IT 加 `Chat.Create` / `Chat.ReadWrite` scope。
       見 design.md L274-300 的安全 gate 設計。
-- [ ] **G13-B.4** 🔴 **需重新查證**（原誤標✅「3個新測試15/15全通」）：
-      同 B.2，依賴不存在的函式。
+- [ ] **G13-B.4** 🟡 **待 B.2 真實 E2E**：現有 unit 覆蓋 directory success/failure
+      與 direct-match skip，但不得用 unit test 宣稱完整 E2E 完成。
 
 ### 4C. 行事曆整合（outlook skill 已現成）
 
@@ -558,14 +566,11 @@
 > `19:072f8afcd2e24a48b1f89310d1abcf8f@thread.v2`
 > 實測，發現 5 個 bug，以下逐一修復。
 
-- [x] **BUG-1** ✅ 已修復：`hermes_sender` property 被 Teams API 剝除
-      （統計 101/179 = 56% 訊息的 property 被清空），導致 echo guard
-      第一道防線失效。**修法**：echo guard 加第 4 道防線 — 偵測
-      HTML fingerprint（`border-left:3px solid #6264A7` /
-      `border-left:3px solid #6264a7` / `<b>🤖 Hermes</b>`），
-      即使 `hermes_sender` 被剝也能正確識別自己發的訊息。
-      檔案：`teams_mtk.py` L593-598（cold-start catchup）、
-      L2005（主處理流程 `is_own`）
+- [x] **BUG-1** ✅ 2026-07-14 review 訂正：`hermes_sender` property 可能被
+      Teams API 剝除，但 HTML fingerprint 不能作 ownership 證據（真人可引用／轉寄
+      Hermes HTML）。current gateway 改用 `(chat_id, message_id)` TTL outbound
+      registry；inbound 僅 non-mutating membership check，foreign HTML quote 必須 dispatch。
+      `hermes_sender` 仍作 API metadata fallback，restart replay 由 watermark 防護。
 - [x] **BUG-2** ✅ 已修復：`<blockquote>` 轉發訊息沒正確處理 + `<at>` 標籤
       `@` 前綴被吃。**根因**：Skype API `mentions:[]` 回傳空陣列
       （API 不回傳 mention 資訊），而我們自己的 text parsing 也把
@@ -596,12 +601,11 @@
       可 per-group config `short_message_ignore: false` 關閉。
       門檻刻意保守（≤2）避免吞掉「停」「好了」等有意圖的指令。
       檔案：`teams_mtk.py` L2214-2236
-- [x] **BUG-6** ✅ 隨 BUG-1 修復同時解決：echo loop 的 root cause
-      是 `hermes_sender` 被剝除 + dedup TTL 過期，修 Bug1 後
-      fingerprint detection 填補了缺口。
+- [x] **BUG-6** ✅ 隨 BUG-1 訂正：echo loop 由 chat-scoped outbound registry
+      + `hermes_sender` metadata + restart watermark 防護；不再信任 presentation HTML。
 
-> **測試**：新測試 19/19（`test_teams_mtk_echo_blockquote_catchup.py`），
-> 回歸 11 檔 183/183 全通。
+> **測試**：`test_teams_mtk_echo_blockquote_catchup.py` 15/15，包含真 adapter
+> foreign branded HTML dispatch / tracked outbound suppress；完整相關回歸 555/555。
 
 ## Backlog（既有 G13/G14/G15，搬移到 §4 後保留引用）
 
@@ -713,7 +717,9 @@
       - download 驗證：Graph API 上傳真實 inline PNG → gateway 處理 hostedContent
 - [x] **SDK-3b** ✅：替換 `send()` → SDK MessagesService.send()
 - [x] **SDK-3c** ✅：替換 `edit_message()` → SDK MessagesService.edit()
-- [ ] **SDK-3d** ⏸️：跑全量 E2E 回歸確認不變（開發收尾後再跑）
+- [x] **SDK-3d** ✅（2026-07-14）：gateway 重啟載入最新 source 後全量
+      24/24 real gateway E2E PASS；SDK send/edit/media、reaction/delete、contact
+      lookup 與 Tier-2 content read-back 全部在同一次 sequential run 通過。
 
 ### 7.1 S1 — 歷史訊息翻頁（極高價值）
 
@@ -775,19 +781,22 @@
 
 ### 7.6 S7 — Reactions（中低價值）
 
-- [ ] **S7-1** 🟡：新增 `send_reaction(conv_id, msg_id, reaction)` /
-      `remove_reaction(conv_id, msg_id, reaction)` 方法
-      — 委託 SDK `ReactionsService`，Graph API beta endpoint。
-- [ ] **S7-2** 🟡：`reaction` 限於 VALID_REACTIONS，`ValueError` 如果傳入無效表情。
-- [ ] **S7-3** 🟡：`PLATFORM_HINTS` 更新 + 測試。
+- [x] **S7-1** ✅：`send_reaction()` / `remove_reaction()` 委託 SDK
+      `ReactionsService`；修正 Graph service 誤接 Skype `HTTPLayer` 的 401，改由
+      `_SDKGraphAdapter._request()` 使用 Graph bearer transport。
+- [x] **S7-2** ✅：`reaction` 限於 `_VALID_REACTIONS`，無效值回傳明確 error。
+- [x] **S7-3** ✅（2026-07-14）：PLATFORM_HINTS + 13/13 unit PASS；
+      `reaction-roundtrip` 真實 E2E 驗證 add/remove 與 MSG read-back 24/24全量通過。
 
 ### 7.7 S9 — 訊息刪除（中低價值）
 
-- [ ] **S9-1** 🟡：新增 `delete_message(conv_id, msg_id)` 方法
-      — 委託 SDK `MessagesService.delete()`。
-- [ ] **S9-2** 🟡：安全考量——只允許刪除 Hermes 自己發的訊息
-      （比對 `hermes_sender` / fingerprint），不允許刪他人訊息。
-- [ ] **S9-3** 🟡：`PLATFORM_HINTS` 更新 + 測試。
+- [x] **S9-1** ✅：`delete_message()` 委託 SDK `MessagesService.delete()`。
+- [x] **S9-2** ✅：`delete_message_safe()` 只允許刪除 `(chat_id, message_id)`
+      outbound ownership registry 或 API read-back `hermes_sender` 可證明為己方的訊息；
+      inbound dedup 與 HTML 呈現樣式都不能授予 ownership，foreign message 明確拒絕。
+- [x] **S9-3** ✅（2026-07-14）：PLATFORM_HINTS + unit PASS；
+      `delete-message-safety` 真實 E2E 以同一 adapter 先處理受控 Graph-user foreign
+      訊息，再驗 own tombstone、foreign refusal、內容 hash unchanged 與 finally cleanup。
 
 ### 7.8 S10 — 訊息轉發（中低價值）
 
@@ -899,7 +908,7 @@
 
 | 原項目 | 衝擊 |
 |---|---|
-| **BUG-1 echo guard** | SDK 替換後 `hermes_sender` property 仍可能被剝除——fingerprint detection 是獨立邏輯，**不受 SDK 影響**。但 REPLACE-1 改走 SDK `MessagesService.get()` 時，SDK 回傳的 message dict 格式可能跟 gateway 現行 parsing 不同——**回歸必須驗 `is_own` 判斷** |
+| **BUG-1 echo guard** | SDK 替換後 `hermes_sender` property 仍可能被剝除；HTML fingerprint 不得作 ownership 證據。REPLACE-1 必須保留 chat-scoped outbound ID registry，並驗 foreign quoted HTML 仍 dispatch。 |
 | **BUG-2 blockquote/at** | SDK 的 HTTPLayer 已有 HTML↔markdown 轉換——**需驗證** SDK 的 `<at>` regex 是否正確保留 `@` 前綴（gateway 修過 BUG-2 的 regex，SDK 可能沒修） |
 | **BUG-3 cold-start catchup** | 全量拉取（§8.10）+ PKB 快取改變了 cold-start 行為：不再只掃最近 20 條，而是從 PKB 讀全量 + API 增量。**需要重新測試** cold-start 種子邏輯是否仍正確找到未回覆的 @hermes 訊息 |
 | **BUG-5 short-message gating** | 不受影響 |
@@ -953,13 +962,15 @@
   - 驗證：SDK patch 4項測試全過 ✅
   - **已完成→REV-1 自動完成**（SDK `<at>` regex 正確=BUG-2 regression 不存在）
 
-- [x] **C-2** 🟡→🔴：Patch `poll.py` — Echo guard 加強 ✅
+- [ ] **C-2** 🔴 2026-07-14 reopen：SDK `poll.py` echo ownership 尚需訂正
   - SDK `_messages.py send()` + `reply()` 注入 `properties.hermes_sender: "bot"` ✅
-  - `poll.py _is_bot_msg()` 4 層防線：MRI / hermes_sender property / HTML fingerprint / msgid ✅
-  - `poll-state.json` 記錄 `last_sent_msgid` 做 msgid 比對防線 ✅
-  - `_normalize_raw` 保留 `_raw_content` + `_raw_properties` 供下游偵測 ✅
-  - `update_last_sent_msgid()` helper 供 loop runner 回寫 ✅
-  - 驗證：4 層 echo guard 單元測試全過 ✅
+  - HTML fingerprint 層不安全，必須移除；真人引用／轉寄 Hermes HTML 不得被吞。
+  - 單一 `last_sent_msgid` 不足以處理跨 chat；需改為 `(chat_id, message_id)`
+    bounded TTL registry 或等價結構，且 inbound lookup 不得註冊 unseen ID。
+  - current Hermes gateway 已完成上述修正並通過 555/555 + 24/24；SDK `poll.py`
+    不在本 repo、也不是 current gateway live poll path，需在 SDK repo 另行修復驗證。
+  - 驗證門檻：SDK repo 必須新增 foreign quoted HTML dispatch、cross-chat ID
+    collision、inbound lookup non-mutating 三類 regression tests。
 
 - [x] **C-3** 🔴：Patch `messages.py` CLI + SDK — 全量拉取預設 ✅
   - SDK `MessagesService.get()` 預設 `limit=None`（全量）+ `backwardLink` 翻頁 ✅

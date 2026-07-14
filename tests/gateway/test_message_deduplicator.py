@@ -17,6 +17,27 @@ from gateway.platforms.helpers import MessageDeduplicator
 class TestMessageDeduplicatorTTL:
     """TTL-based expiration must work regardless of cache size."""
 
+    def test_contains_does_not_register_unseen_id(self):
+        dedup = MessageDeduplicator(ttl_seconds=60)
+
+        assert dedup.contains("msg-1") is False
+        assert "msg-1" not in dedup._seen
+
+    def test_remember_registers_without_duplicate_probe(self):
+        dedup = MessageDeduplicator(ttl_seconds=60)
+
+        dedup.remember("msg-1")
+
+        assert dedup.contains("msg-1") is True
+
+    def test_contains_removes_expired_id_without_refreshing_it(self):
+        dedup = MessageDeduplicator(ttl_seconds=5)
+        dedup.remember("msg-1")
+        dedup._seen["msg-1"] = time.time() - 10
+
+        assert dedup.contains("msg-1") is False
+        assert "msg-1" not in dedup._seen
+
     def test_duplicate_within_ttl(self):
         """Same message within TTL window is duplicate."""
         dedup = MessageDeduplicator(ttl_seconds=60)

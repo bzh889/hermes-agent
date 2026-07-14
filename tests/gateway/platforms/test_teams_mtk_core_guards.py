@@ -15,8 +15,6 @@ def _make_adapter():
     adapter._message_handler = AsyncMock()
     adapter._conv_ids = ["conv1"]
     adapter._last_sent_message_id = None
-    adapter._sent_dedup = MagicMock()
-    adapter._sent_dedup.is_duplicate = MagicMock(return_value=False)
     return adapter
 
 
@@ -127,9 +125,9 @@ class TestPollAdaptiveLogic:
 
 class TestDeleteOnlyOwnGuard:
     @pytest.mark.asyncio
-    async def test_delete_own_last_sent(self):
+    async def test_delete_owned_message_for_same_chat(self):
         adapter = _make_adapter()
-        adapter._last_sent_message_id = "m1"
+        adapter._remember_sent_message("conv1", "m1")
         with patch.object(adapter, "delete_message", new_callable=AsyncMock) as mock:
             mock.return_value = {"status": "deleted"}
             result = await adapter.delete_message_safe("conv1", "m1")
@@ -137,10 +135,20 @@ class TestDeleteOnlyOwnGuard:
             assert result["status"] == "deleted"
 
     @pytest.mark.asyncio
+    async def test_same_message_id_in_other_chat_is_not_owned(self):
+        adapter = _make_adapter()
+        adapter._remember_sent_message("conv1", "m1")
+        adapter._fetch_messages = MagicMock(return_value=[
+            {"id": "m1", "properties": {"hermes_sender": "user"}}
+        ])
+        with patch.object(adapter, "delete_message", new_callable=AsyncMock) as mock:
+            result = await adapter.delete_message_safe("conv2", "m1")
+        mock.assert_not_awaited()
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
     async def test_reject_other_user_message(self):
         adapter = _make_adapter()
-        adapter._last_sent_message_id = None
-        adapter._sent_dedup.is_duplicate = MagicMock(return_value=False)
         adapter._fetch_messages = MagicMock(return_value=[
             {"id": "m1", "properties": {"hermes_sender": "user"}}
         ])
@@ -186,6 +194,123 @@ class TestForwardWhitelistGuard:
             MockSvc.return_value = mock_svc
             result = await adapter.forward_message("src", "m1", "any_target")
             assert result["status"] == "forwarded"
+
+
+# ── Echo guard across normalized/manual send paths ─────────────────────
+
+class TestEchoGuardIntegration:
+    @pytest.mark.asyncio
+    async def test_tracked_sdk_message_skips_after_html_normalization(self):
+        """A real outbound ID remains authoritative after SDK normalization."""
+        adapter = _make_adapter()
+        conv_id = "19:dm@unq.gbl.spaces"
+        adapter._last_message_ids[conv_id] = "0"
+        adapter._remember_sent_message(conv_id, "1")
+        message = {
+            "id": "1",
+            "messagetype": "RichText/Html",
+            "content": "⚙️ Select ProviderCurrent: gpt-5.6-sol",
+            "_raw_content": (
+                '<div style="border-left:3px solid #6264A7">'
+                '<div>⚙️ Select Provider</div></div>'
+            ),
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Unknown",
+            "from": "8:orgid:self",
+        }
+
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock) as handle:
+            await adapter._process_new_messages(conv_id, [message])
+
+        handle.assert_not_awaited()
+        assert adapter._last_message_ids[conv_id] == "1"
+
+    @pytest.mark.asyncio
+    async def test_foreign_hermes_html_quote_is_dispatched(self):
+        """Presentation HTML alone must never prove outbound ownership."""
+        adapter = _make_adapter()
+        conv_id = "48:notes"
+        adapter._last_message_ids[conv_id] = "0"
+        message = {
+            "id": "1",
+            "messagetype": "RichText/Html",
+            "content": "Please explain this quoted answer",
+            "_raw_content": (
+                '<blockquote><div style="border-left:3px solid #6264A7">'
+                "<b>🤖 Hermes</b> quoted text</div></blockquote>"
+            ),
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Foreign User",
+            "from": "8:orgid:foreign-user",
+        }
+
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock) as handle:
+            await adapter._process_new_messages(conv_id, [message])
+
+        handle.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_foreign_inbound_does_not_gain_delete_ownership(self):
+        """Processing inbound traffic must not mutate outbound ownership."""
+        adapter = _make_adapter()
+        conv_id = "48:notes"
+        adapter._last_message_ids[conv_id] = "0"
+        message = {
+            "id": "foreign-1",
+            "messagetype": "Text",
+            "content": "foreign input",
+            "properties": {"hermes_sender": "user"},
+            "_raw_properties": {},
+            "imdisplayname": "Foreign User",
+            "from": "8:orgid:foreign-user",
+        }
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock):
+            await adapter._process_new_messages(conv_id, [message])
+        adapter._fetch_messages = MagicMock(return_value=[message])
+
+        with patch.object(adapter, "delete_message", new_callable=AsyncMock) as delete:
+            result = await adapter.delete_message_safe(conv_id, "foreign-1")
+
+        delete.assert_not_awaited()
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_model_picker_id_stays_guarded_after_another_chat_send(self):
+        """A picker ID must be in the TTL cache, not only the global last-ID slot."""
+        from gateway.platforms.helpers import MessageDeduplicator
+
+        adapter = TeamsMTKAdapter(config=None)
+        adapter._sent_dedup = MessageDeduplicator()
+        adapter._auth._inject_truststore = MagicMock()
+        adapter._auth.skype_token = MagicMock(return_value="token")
+        adapter._auth._msg_base = "https://example.invalid/v1/users/ME"
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"OriginalArrivalTime": "picker-id"}
+        session = MagicMock()
+        session.post.return_value = response
+
+        with patch("requests.Session", return_value=session):
+            result = await adapter.send_model_picker(
+                chat_id="19:dm@unq.gbl.spaces",
+                providers=[{
+                    "slug": "openai-codex",
+                    "name": "OpenAI Codex",
+                    "models": ["gpt-5.6-sol"],
+                    "is_current": True,
+                }],
+                current_model="gpt-5.6-sol",
+                current_provider="openai-codex",
+                session_key="session",
+                on_model_selected=AsyncMock(),
+            )
+
+        assert result.message_id == "picker-id"
+        adapter._last_sent_message_id = "other-chat-message-id"
+        assert adapter._is_sent_message("19:dm@unq.gbl.spaces", "picker-id") is True
 
 
 # ── Blocked stubs (G13-B.3, G14-2.1) ────────────────────────────────────

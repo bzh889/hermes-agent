@@ -267,12 +267,13 @@ async def test_throttle_per_conv_independent():
 
 # ── §5 echo guard: MessageDeduplicator ─────────────────────────────────
 
-async def test_echo_guard_skips_known_sent_id():
-    """Messages whose id is tracked by _sent_dedup must be skipped."""
+async def test_echo_guard_tracks_conversation_and_message_id():
+    """Outbound ownership is scoped to the exact conversation and message."""
     adapter = _make_adapter()
-    # Register msg "999" as sent — first call returns False (not duplicate), second returns True
-    adapter._sent_dedup.is_duplicate("999")
-    assert adapter._sent_dedup.is_duplicate("999") is True
+    adapter._remember_sent_message("conv-a", "999")
+
+    assert adapter._is_sent_message("conv-a", "999") is True
+    assert adapter._is_sent_message("conv-b", "999") is False
 
 
 async def test_at_mention_preserved_in_html_strip():
@@ -338,7 +339,7 @@ def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
     assert data["access_token"] == "abc"
 
 
-def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refresh(
+async def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refresh(
     tmp_path, monkeypatch
 ):
     """IC3/Graph exchanges preserve refresh-token rotation in the shared cache."""

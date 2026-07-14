@@ -4,7 +4,11 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from gateway.platforms.teams_mtk import TeamsMTKAdapter, _VALID_REACTIONS
+from gateway.platforms.teams_mtk import (
+    TeamsMTKAdapter,
+    _SDKGraphAdapter,
+    _VALID_REACTIONS,
+)
 
 
 def _make_adapter():
@@ -36,6 +40,22 @@ def test_graph_request_adds_auth_and_checks_status():
     )
 
 
+def test_sdk_graph_adapter_request_delegates_to_gateway_graph_transport():
+    gateway_auth = MagicMock()
+    response = MagicMock()
+    gateway_auth._graph_request.return_value = response
+
+    transport = _SDKGraphAdapter(gateway_auth)
+    result = transport._request(
+        "POST", "https://graph.microsoft.com/beta/test", json={"x": 1}
+    )
+
+    assert result is response
+    gateway_auth._graph_request.assert_called_once_with(
+        "POST", "https://graph.microsoft.com/beta/test", json={"x": 1}
+    )
+
+
 # ── S7: Reactions ──────────────────────────────────────────────────────
 
 class TestSendReaction:
@@ -52,12 +72,16 @@ class TestSendReaction:
         mock_result = {"status": "reacted", "reaction": "like", "message_id": "msg1"}
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKReactions") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKGraphAdapter") as MockGraph, \
              patch.object(adapter._auth, "graph_token", return_value="fake-token"):
+            graph_transport = MagicMock()
+            MockGraph.return_value = graph_transport
             mock_svc_instance = MagicMock()
             mock_svc_instance.send.return_value = mock_result
             MockSvc.return_value = mock_svc_instance
             result = await adapter.send_reaction("conv1", "msg1", "like")
             assert result["status"] == "reacted"
+            MockSvc.assert_called_once_with(graph_transport)
 
     @pytest.mark.asyncio
     async def test_valid_reaction_raw_fallback(self):
@@ -98,12 +122,16 @@ class TestRemoveReaction:
         mock_result = {"status": "removed", "reaction": "heart", "message_id": "msg1"}
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKReactions") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKGraphAdapter") as MockGraph, \
              patch.object(adapter._auth, "graph_token", return_value="fake-token"):
+            graph_transport = MagicMock()
+            MockGraph.return_value = graph_transport
             mock_svc_instance = MagicMock()
             mock_svc_instance.remove.return_value = mock_result
             MockSvc.return_value = mock_svc_instance
             result = await adapter.remove_reaction("conv1", "msg1", "heart")
             assert result["status"] == "removed"
+            MockSvc.assert_called_once_with(graph_transport)
 
     @pytest.mark.asyncio
     async def test_error_handling(self):

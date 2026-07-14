@@ -85,6 +85,62 @@ class _FakeWS:
 
 class TestTrouterListener:
 
+    def test_handshake_uses_requests_client(self):
+        """WS-1: the real handshake path has an available HTTP client."""
+        from gateway.platforms.teams_mtk import _TrouterListener
+
+        response = MagicMock()
+        response.text = "session-123:60:60:websocket"
+        listener = _TrouterListener(_make_auth(), AsyncMock(), MagicMock())
+
+        with patch("requests.get", return_value=response) as get:
+            session_id, params = listener._handshake(
+                _trouter_info(), "fake_ic3", "fake_skype",
+            )
+
+        assert session_id == "session-123"
+        assert params["ccid"] == "cc-test"
+        get.assert_called_once()
+        response.raise_for_status.assert_called_once()
+
+    def test_is_healthy_supports_websockets_15_client_connection(self):
+        """WS-3: websockets 15 exposes ``state`` instead of ``closed``."""
+        from websockets.protocol import State
+        from gateway.platforms.teams_mtk import _TrouterListener
+
+        listener = _TrouterListener(_make_auth(), AsyncMock(), MagicMock())
+        listener._ws = MagicMock(spec=["state"])
+        listener._ws.state = State.OPEN
+        listener._connected = True
+        listener._last_heartbeat = time.monotonic()
+
+        assert listener.is_healthy() is True
+
+    def test_is_healthy_websockets_15_uses_protocol_state(self):
+        """Protocol ping/pong owns liveness for websockets 15 connections."""
+        from websockets.protocol import State
+        from gateway.platforms.teams_mtk import _TrouterListener
+
+        listener = _TrouterListener(_make_auth(), AsyncMock(), MagicMock())
+        listener._ws = MagicMock(spec=["state"])
+        listener._ws.state = State.OPEN
+        listener._connected = True
+        listener._last_heartbeat = time.monotonic() - 61
+
+        assert listener.is_healthy() is True
+
+    def test_is_healthy_rejects_closed_websockets_15_state(self):
+        from websockets.protocol import State
+        from gateway.platforms.teams_mtk import _TrouterListener
+
+        listener = _TrouterListener(_make_auth(), AsyncMock(), MagicMock())
+        listener._ws = MagicMock(spec=["state"])
+        listener._ws.state = State.CLOSED
+        listener._connected = True
+        listener._last_heartbeat = time.monotonic()
+
+        assert listener.is_healthy() is False
+
     def test_parse_event_5frame(self):
         """WS-1: _parse_event correctly parses Socket.IO 5: frame."""
         from gateway.platforms.teams_mtk import _TrouterListener
