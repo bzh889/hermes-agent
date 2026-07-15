@@ -71,21 +71,21 @@
 > | `list-conversations` | G13-A.1 | 2026-07-13（**假測項訂正**：舊版空清單也算 PASS（「token may be expired」），這種真實故障會被綠燈掩蓋；改為要求非空清單 + log 成功信號，並在 `list_conversations()` 兩個實作（`TeamsMTKAdapter` + `_TeamsAuth`）都補上成功/失敗 log）|
 > | `find-conv-by-display-name` | G13-A.2 | 2026-07-13（**假測項訂正**：舊版 `list_conversations` 回空清單時靜默通過；改為要求真實解析到已知對話 id，空清單直接 FAIL）|
 > | `contact-routing` | G13-A.4 | ✅ 2026-07-14 PASS（動態取得控制 DM title，真 `send_message` contact route → MSG read-back → safe-delete） |
+> | `contact-directory-fallback` | G13-B.2/B.4 | ✅ 2026-07-15 PASS（真 M365 People directory 動態候選 → canonical error enrichment；sender 0 calls；姓名只輸出 hash） |
 > | `find-conversation` | G13 Phase A SDK search | ✅ 2026-07-14 PASS（真 SDK search 回傳非空 conversation id） |
 > | `reaction-roundtrip` | S7-1~3 | ✅ 2026-07-14 PASS（Graph add/remove；MSG `properties.emotions[].users` add 後非空、remove 後清空） |
 > | `delete-message-safety` | S9-1~3 | ✅ 2026-07-14 PASS（同一 adapter 先處理受控 Graph-user foreign 訊息，再驗 own tombstone、foreign 明確拒刪且內容 hash 不變；finally Graph cleanup） |
 > | `standalone-sender-fn` | cron deliver | ✅ 2026-07-14 PASS（真 registry sender 呼叫 + MSG read-back + finally delete cleanup） |
 >
-> **2026-07-14 review 修復後全量重跑**：gateway 重啟載入最新 source 後，
-> 24/24 real gateway E2E PASS。包含 model-picker、restart-no-replay、SDK
+> **2026-07-15 G13-B.2/B.4 補完後全量重跑**：gateway 載入最新 source 後，
+> 25/25 real gateway E2E PASS。包含 model-picker、restart-no-replay、SDK
 > send/edit/media、S7 reaction round-trip、同一 adapter 處理受控 foreign 後的 S9
-> delete safety、G13 contact routing、standalone sender cleanup 與 Tier-2 content
+> delete safety、G13 contact routing + live directory fallback、standalone sender cleanup 與 Tier-2 content
 > read-back。最新完整相關 pytest 555/555 PASS。
 >
 > ### 仍缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
 > | 功能 | Task ID | 需新增測項名稱 |
 > |------|---------|--------------|
-> | G13-B.2 directory fallback | G13-B.2 | `contact-directory-fallback`（目前只有 mock unit，且只能補錯誤訊息） |
 > | G14 VIP buffer 偵測+緩衝 | G14-1.1~1.5 | `vip-buffer-detect`, `vip-buffer-flush` |
 > | BUG-2 `<at>` + blockquote 修法 | BUG-2 | `at-mention-prefix`, `blockquote-skip` |
 > | BUG-3 cold-start catchup | BUG-3 | `cold-start-catchup` |
@@ -480,19 +480,23 @@
 > 需要新增 Graph API scope 到 `_SKYPE_SCOPE`（或另維護一組 Graph token），
 > **需要重新走 OAuth 同意流程**（`auth_run.py` 重新授權），是唯一需要使用者介入
 > 的技術動作。Chat.Create scope 目前未授權。
-> ⚠️ G13-B.2/B.4 依賴 G13-A 的 `_find_conv_by_display_name`，該函式不存在，
-> 故 B.2/B.4 也需重新查證，不應維持「已完成」標記。
+> G13-A 的 `_find_conv_by_display_name` 已完成；G13-B.2/B.4 已用 live directory
+> fallback 驗證。Phase B 目前只剩主動建新對話（B.3）受 scope 阻擋。
 
 - [ ] **G13-B.1** ~~新增 Graph token~~（**不需要**，m365 skill 已涵蓋 search_users）
-- [ ] **G13-B.2** 🟡 **部分實作，尚缺真實 E2E**：display name 搜不到時會呼叫
+- [x] **G13-B.2** ✅ **已完成並真實 E2E 驗證（2026-07-15）**：display name 搜不到時會呼叫
       `people.py search`；但因 A.3 的 member OID rematch 在現有權限下不可行，
       目前只用 directory canonical name 補強「請先在 Teams 開啟對話」錯誤訊息。
-      mock unit 已有，仍需 `contact-directory-fallback` 真實驗證。
+      `contact-directory-fallback` 真實讀取 200 個 conversations 與 M365 People，
+      動態挑選「directory 有、既有 chat 無」候選，驗證 canonical/manual-open error、
+      sender 0 calls；姓名僅輸出 SHA-256 短 hash。Full E2E **25/25 PASS**。
 - [ ] **G13-B.3** 🔴 **blocked**：Chat.Create scope 未授權，無法主動建新對話。
       需 IT 加 `Chat.Create` / `Chat.ReadWrite` scope。
       見 design.md L274-300 的安全 gate 設計。
-- [ ] **G13-B.4** 🟡 **待 B.2 真實 E2E**：現有 unit 覆蓋 directory success/failure
-      與 direct-match skip，但不得用 unit test 宣稱完整 E2E 完成。
+- [x] **G13-B.4** ✅ **已完成並真實 E2E 驗證（2026-07-15）**：15 個 contact lookup
+      unit 覆蓋 directory success/failure 與 direct-match skip；`contact-routing` 驗證
+      direct match 真實送訊/read-back，`contact-directory-fallback` 驗證 live directory
+      canonical error enrichment 與未送訊。Full E2E **25/25 PASS**。
 
 ### 4C. 行事曆整合（outlook skill 已現成）
 
@@ -962,15 +966,18 @@
   - 驗證：SDK patch 4項測試全過 ✅
   - **已完成→REV-1 自動完成**（SDK `<at>` regex 正確=BUG-2 regression 不存在）
 
-- [ ] **C-2** 🔴 2026-07-14 reopen：SDK `poll.py` echo ownership 尚需訂正
+- [x] **C-2** ✅ **已完成（2026-07-15，SDK commit `beb50e1`）**：SDK `poll.py`
+  echo ownership 已訂正
   - SDK `_messages.py send()` + `reply()` 注入 `properties.hermes_sender: "bot"` ✅
   - HTML fingerprint 層不安全，必須移除；真人引用／轉寄 Hermes HTML 不得被吞。
   - 單一 `last_sent_msgid` 不足以處理跨 chat；需改為 `(chat_id, message_id)`
     bounded TTL registry 或等價結構，且 inbound lookup 不得註冊 unseen ID。
-  - current Hermes gateway 已完成上述修正並通過 555/555 + 24/24；SDK `poll.py`
-    不在本 repo、也不是 current gateway live poll path，需在 SDK repo 另行修復驗證。
-  - 驗證門檻：SDK repo 必須新增 foreign quoted HTML dispatch、cross-chat ID
-    collision、inbound lookup non-mutating 三類 regression tests。
+  - current Hermes gateway 已完成上述修正；SDK 改為 TTL/bounded
+    `(chat_id, message_id)` ownership registry，移除 HTML fingerprint ownership，
+    inbound lookup 不會註冊 unseen ID，並保留 legacy writer/output 相容欄位。
+  - SDK repo 已新增 foreign quoted HTML dispatch、cross-chat ID collision、inbound
+    lookup non-mutating、multi-send persistence、TTL/bound 與 main wiring regressions；
+    full tests **116/116 PASS**。
 
 - [x] **C-3** 🔴：Patch `messages.py` CLI + SDK — 全量拉取預設 ✅
   - SDK `MessagesService.get()` 預設 `limit=None`（全量）+ `backwardLink` 翻頁 ✅

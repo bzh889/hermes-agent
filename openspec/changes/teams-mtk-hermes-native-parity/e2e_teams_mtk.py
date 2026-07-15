@@ -1441,6 +1441,125 @@ def test_contact_routing(log_path: str, baseline: int) -> tuple[bool, str]:
                 pass
 
 
+def test_contact_directory_fallback(log_path: str, baseline: int) -> tuple[bool, str]:
+    """G13-B.2/B.4: real directory lookup enriches a safe no-chat error.
+
+    Select a directory contact dynamically so no person's identity is stored in
+    the repository. The candidate must exist in the live M365 People API but
+    not in the account's existing Teams conversations. The contact route must
+    then return the canonical directory name and manual-open guidance without
+    invoking any sender or attempting to create a chat.
+    """
+    del log_path, baseline
+    import hashlib
+    import json as _json
+    import os as _os
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from gateway.config import Platform
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+    from tools.send_message_tool import send_message_tool
+
+    adapter = TeamsMTKAdapter(None)
+    conversations = adapter.list_conversations(limit=200)
+    if not conversations:
+        return False, "list_conversations returned [] — cannot prove directory fallback boundary"
+
+    people_script = _os.path.expanduser("~/.hermes/skills/m365/scripts/people.py")
+    if not _os.path.isfile(people_script):
+        return False, "M365 people.py is unavailable at the configured Hermes skill path"
+
+    directory_env = {**_os.environ, "PYTHONPATH": ""}
+
+    def _run_people(*args: str) -> tuple[list[dict], str]:
+        try:
+            completed = subprocess.run(
+                ["python", people_script, *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=directory_env,
+            )
+        except Exception as exc:
+            return [], type(exc).__name__
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return [], f"exit={completed.returncode}"
+        try:
+            payload = _json.loads(completed.stdout)
+        except (TypeError, ValueError):
+            return [], "invalid JSON"
+        people = payload.get("people") or []
+        return [person for person in people if isinstance(person, dict)], ""
+
+    relevant_people, relevant_error = _run_people("relevant", "--limit", "50")
+    if relevant_error:
+        return False, f"live M365 People relevant lookup failed ({relevant_error})"
+    if not relevant_people:
+        return False, "live M365 People relevant lookup returned no candidates"
+
+    def _matches_existing_conversation(name: str) -> bool:
+        needle = name.lower()
+        return any(
+            needle in str(conv.get("title") or "").lower()
+            or needle in str(conv.get("member_names") or "").lower()
+            for conv in conversations
+        )
+
+    candidate = ""
+    canonical_name = ""
+    for person in relevant_people:
+        name = str(person.get("displayName") or "").strip()
+        if len(name) < 4 or _matches_existing_conversation(name):
+            continue
+        matches, search_error = _run_people(
+            "search", "--query", name, "--limit", "10"
+        )
+        if search_error or not matches:
+            continue
+        canonical = str(matches[0].get("displayName") or "").strip()
+        if canonical:
+            candidate = name
+            canonical_name = canonical
+            break
+
+    if not candidate:
+        return False, (
+            "no dynamic directory contact outside existing conversations; "
+            f"conversations={len(conversations)} candidates={len(relevant_people)}"
+        )
+
+    runner = SimpleNamespace(adapters={Platform.TEAMS_MTK: adapter})
+    with patch("gateway.run._gateway_runner_ref", return_value=runner), patch(
+        "tools.send_message_tool._send_via_adapter",
+        side_effect=AssertionError("directory-only fallback attempted to send"),
+    ) as send_mock:
+        raw_result = send_message_tool({
+            "action": "send",
+            "target": f"teams_mtk:contact:{candidate}",
+            "message": f"E2E_AUTO contact directory fallback {time.time_ns()}",
+        })
+
+    result = _json.loads(raw_result)
+    error = str(result.get("error") or "")
+    if not error:
+        return False, "directory-only contact unexpectedly returned success"
+    if "found in directory as" not in error or canonical_name not in error:
+        return False, "contact error was not enriched with the live canonical directory name"
+    if "Open a 1:1 chat" not in error:
+        return False, "contact error omitted the manual-open guidance required without Chat.Create"
+    if send_mock.call_count:
+        return False, f"directory-only fallback invoked sender {send_mock.call_count} time(s)"
+
+    candidate_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
+    canonical_hash = hashlib.sha256(canonical_name.encode("utf-8")).hexdigest()[:10]
+    return True, (
+        f"directory candidate={candidate_hash} canonical={canonical_hash}; "
+        f"conversations={len(conversations)}; enriched error; sender calls=0"
+    )
+
+
 def test_find_conversation(log_path: str, baseline: int) -> tuple[bool, str]:
     """find_conversation() — SDK ConversationsService.find() search path.
 
@@ -1638,6 +1757,7 @@ NAMED_TESTS = {
     "list-conversations": test_list_conversations,
     "find-conv-by-display-name": test_find_conv_by_display_name,
     "contact-routing": test_contact_routing,
+    "contact-directory-fallback": test_contact_directory_fallback,
     "find-conversation": test_find_conversation,
     "standalone-sender-fn": test_standalone_sender_fn,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
