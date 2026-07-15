@@ -81,7 +81,8 @@
 > 25/25 real gateway E2E PASS。包含 model-picker、restart-no-replay、SDK
 > send/edit/media、S7 reaction round-trip、同一 adapter 處理受控 foreign 後的 S9
 > delete safety、G13 contact routing + live directory fallback、standalone sender cleanup 與 Tier-2 content
-> read-back。最新完整相關 pytest 555/555 PASS。
+> read-back。去識別與network fallback修正後重新驗證：完整 E2E 25/25、
+> 最新完整相關 pytest 415/415 PASS。
 >
 > ### 仍缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
 > | 功能 | Task ID | 需新增測項名稱 |
@@ -357,7 +358,7 @@
 
 - [x] 2.1 **G6** ✅ 已完成（2026-07-10 真實測試）：`_parse_target_ref` 補了
       `teams_mtk` 分支（識別 `19:`/`8:orgid:`/`48:notes` 格式為顯式 target），
-      真實發送 `SendResult(success=True, message_id='1783663108254')`。
+      真實發送成功，僅保留 `SendResult(success=True, message_id=<redacted>)` 證據。
       測試：150/150（`tests/tools/test_send_message_tool.py`）
 - [x] 2.2 **G2/G3** ✅ 已查證：Adaptive Card 按鈕回呼需要 webhook endpoint，
       teams_mtk polling 架構無法接收。**架構限制，關閉。**
@@ -454,9 +455,9 @@
 >
 > ✅ **後續（2026-07-11 同日，真實 gateway E2E 補完）**：三個函式已實作，
 > mock test 15/15 全過，**並對真實控制頻道跑過真實 API E2E**：
-> `list_conversations(limit=10)` 對真實 skype API 回傳 10 筆對話（含真實
-> title 如「[TC50][TA blocker] ALPS11461222...」）；
-> `_find_conv_by_display_name('ALPS11461222')` 正確比對到對應 conv_id，
+> `list_conversations(limit=10)` 對真實 skype API 回傳 10 筆對話（證據只保留
+> 非空 title 的 hash 與長度）；
+> `_find_conv_by_display_name(title)` 以同批動態標題正確比對到對應 conv_id，
 > 不存在名稱正確回傳 `None`。
 
 - [x] **G13-A.1** ✅ **已完成並真實 E2E 驗證**：`list_conversations()` —
@@ -566,9 +567,8 @@
 
 ## 6. 測試群組 Bug 修復（2026-07-10 實測發現）
 
-> 同事 Lisa-YY Chen (陳盈穎) 在測試群組
-> `19:072f8afcd2e24a48b1f89310d1abcf8f@thread.v2`
-> 實測，發現 5 個 bug，以下逐一修復。
+> 在受控測試群組實測時發現 5 個 bug；證據只保留日期、結果與
+> 去識別 hash，不記錄人名或 conversation ID。以下逐一修復。
 
 - [x] **BUG-1** ✅ 2026-07-14 review 訂正：`hermes_sender` property 可能被
       Teams API 剝除，但 HTML fingerprint 不能作 ownership 證據（真人可引用／轉寄
@@ -587,7 +587,7 @@
       的 `<at>` 替換同步修正。
       檔案：`teams_mtk.py` L2147 + L2149-2176 + L603
 - [x] **BUG-3** ✅ 已修復：冷啟動遺漏 — gateway 沒跑時 @hermes 訊息
-      不會被補處理。07/08 Lisa 發 `@hermes 找出spec 36.523-1` → Hermes
+      不會被補處理。07/08 受控測試訊息 → Hermes
       完全沒回覆（gateway 當天沒啟動）。
       **修法**：`connect()` seed 階段往前掃近日 20 條訊息，
       找到未回覆的 @hermes 訊息後，把 `_last_message_ids` seed
@@ -595,7 +595,7 @@
       檔案：`teams_mtk.py` L555-618
 - [x] **BUG-4** ✅ 確認非 bug：連發 follow-up 的
       `Suppressing normal final send` 是**正確行為** — streaming
-      已送出回覆，不需要重複 send 最終版。Lisa 的 3 條訊息
+      已送出回覆，不需要重複 send 最終版。該輪 3 條測試訊息
       都有被處理和回覆。
 - [x] **BUG-5** ✅ 已修復：`require_mention=false` 群組裡，
       超短 casual 訊息（「好」「OK」「嗯」≤2 字元且無問號/驚嘆號

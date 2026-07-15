@@ -13,8 +13,8 @@ from unittest.mock import patch, MagicMock
 
 # ── Constants ────────────────────────────────────────────────────────────
 
-GROUP_CONV = "19:072f8afcd2e24a48b1f89310d1abcf8f@thread.v2"
-DM_CONV = "19:6e8a676c_d6d4a33b@unq.gbl.spaces"
+GROUP_CONV = "19:synthetic-group@thread.v2"
+DM_CONV = "19:synthetic-dm@unq.gbl.spaces"
 
 MOCK_FULL = {
     "gateway": {

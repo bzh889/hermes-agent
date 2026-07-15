@@ -60,8 +60,8 @@ def test_list_conversations_falls_back_to_member_display_names():
             "id": "8:orgid:xyz",
             "threadProperties": {},  # no memberDisplayNames, no topic
             "members": [
-                {"imdisplayname": "Howen Pu"},
-                {"friendlyName": "Polo Yang"},
+                {"imdisplayname": "Example User"},
+                {"friendlyName": "Sample User"},
             ],
         }
     ])
@@ -73,8 +73,8 @@ def test_list_conversations_falls_back_to_member_display_names():
         convs = adapter.list_conversations(limit=50)
 
     assert convs[0]["title"] == ""
-    assert "Howen Pu" in convs[0]["member_names"]
-    assert "Polo Yang" in convs[0]["member_names"]
+    assert "Example User" in convs[0]["member_names"]
+    assert "Sample User" in convs[0]["member_names"]
 
 
 def test_list_conversations_respects_limit():
@@ -119,9 +119,9 @@ def test_find_conv_by_display_name_matches_title():
 def test_find_conv_by_display_name_matches_member_names_case_insensitive():
     adapter = _make_adapter()
     with patch.object(adapter, "list_conversations", return_value=[
-        {"id": "conv1", "title": "", "member_names": "Howen Pu, Polo Yang"},
+        {"id": "conv1", "title": "", "member_names": "Example User, Sample User"},
     ]):
-        result = adapter._find_conv_by_display_name("HOWEN")
+        result = adapter._find_conv_by_display_name("EXAMPLE")
 
     assert result == "conv1"
 
@@ -182,10 +182,10 @@ def test_send_message_contact_target_resolves_and_routes(monkeypatch):
         mock_send.side_effect = _fake_send
 
         result = send_message_tool.send_message_tool(
-            {"action": "send", "target": "teams_mtk:contact:Howen Pu", "message": "hi"}
+            {"action": "send", "target": "teams_mtk:contact:Example User", "message": "hi"}
         )
 
-    fake_adapter._find_conv_by_display_name.assert_called_once_with("Howen Pu")
+    fake_adapter._find_conv_by_display_name.assert_called_once_with("Example User")
     parsed = json.loads(result)
     assert parsed.get("success") is True
 
@@ -232,7 +232,7 @@ def test_send_message_contact_target_no_live_gateway_returns_error():
 
     with patch("gateway.run._gateway_runner_ref", return_value=None):
         result = send_message_tool.send_message_tool(
-            {"action": "send", "target": "teams_mtk:contact:Howen Pu", "message": "hi"}
+            {"action": "send", "target": "teams_mtk:contact:Example User", "message": "hi"}
         )
     parsed = json.loads(result)
     assert "error" in parsed
@@ -261,7 +261,7 @@ def test_send_message_contact_fallback_calls_people_and_enriches_error(monkeypat
     fake_runner.adapters = fake_adapters
 
     _people_json = json.dumps({
-        "people": [{"id": "oid-123", "displayName": "Polo Yang (楊智宇)"}]
+        "people": [{"id": "oid-123", "displayName": "Sample User (測試使用者)"}]
     })
 
     with patch("gateway.run._gateway_runner_ref", return_value=fake_runner), \
@@ -269,13 +269,13 @@ def test_send_message_contact_fallback_calls_people_and_enriches_error(monkeypat
          patch("os.path.expanduser", return_value="/home/u/.hermes/skills/m365/scripts/people.py"):
         mock_sub.return_value = MagicMock(returncode=0, stdout=_people_json, stderr="")
         result = send_message_tool.send_message_tool(
-            {"action": "send", "target": "teams_mtk:contact:Polo", "message": "hi"}
+            {"action": "send", "target": "teams_mtk:contact:Sample", "message": "hi"}
         )
 
     parsed = json.loads(result)
     assert "error" in parsed
     # Directory name should appear in the enriched error
-    assert "Polo Yang" in parsed["error"] or "楊智宇" in parsed["error"]
+    assert "Sample User" in parsed["error"] or "測試使用者" in parsed["error"]
 
 
 def test_send_message_contact_fallback_people_failure_still_errors(monkeypatch):
@@ -340,7 +340,7 @@ def test_send_message_contact_found_directly_skips_people():
         mock_send.side_effect = _fake_send
 
         result = send_message_tool.send_message_tool(
-            {"action": "send", "target": "teams_mtk:contact:Howen Pu", "message": "hi"}
+            {"action": "send", "target": "teams_mtk:contact:Example User", "message": "hi"}
         )
 
     mock_sub.assert_not_called()

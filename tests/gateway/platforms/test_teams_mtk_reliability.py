@@ -76,6 +76,24 @@ def _mock_session_post(status_sequence):
     return _post
 
 
+async def test_raw_fetch_connection_error_preserves_original_exception():
+    """A network failure must not be replaced by an error in logging."""
+    import requests
+
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.skype_token.return_value = "fake-skype-token"
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+
+    session = MagicMock()
+    session.get.side_effect = requests.ConnectionError("network down")
+    with patch("requests.Session", return_value=session):
+        with pytest.raises(requests.ConnectionError, match="network down"):
+            adapter._fetch_via_raw("19:test@thread.v2", 30, 0.0)
+
+    session.close.assert_called_once()
+
+
 # ── §1 edit_message 429 ──────────────────────────────────────────────────
 
 async def test_edit_message_429_backs_off_and_retries():

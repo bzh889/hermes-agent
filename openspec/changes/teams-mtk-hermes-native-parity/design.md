@@ -484,7 +484,7 @@ teams skill CLI（`~/.claude/skills/teams/`）和 teams_mtk gateway
 
 **現狀問題**：
 - `_fetch_messages(conv_id, limit=20)` 只拿最近 20 條，無翻頁
-- agent 被問「上週 Lisa 說了什麼」時只能靠 PKB cron（60m 延遲）
+- agent 被問「上週某位同事說了什麼」時只能靠 PKB cron（60m 延遲）
   或 spawn `terminal` 呼叫 `messages.py get --all`
 
 **SDK 方法**：
@@ -504,7 +504,7 @@ teams skill CLI（`~/.claude/skills/teams/`）和 teams_mtk gateway
 
 **gateway 整合**：
 - 新增 `search_messages(conv_id, query, **filters)` 方法
-- agent 在 Teams 對話裡被問「Lisa 最近說了什麼關於 X 的事」時，
+- agent 在 Teams 對話裡被問「某位同事最近說了什麼關於 X 的事」時，
   gateway 能直接搜尋，不需要 spawn subprocess 呼叫 CLI
 
 ### 8.7 S3 詳細設計：使用者查詢
@@ -933,7 +933,7 @@ graph_token（會 401），改用上述 Graph `/shares` 編碼下載路徑，
 {
   "chat_id": "...",
   "vip_oids": ["8:orgid:xxx"],
-  "vip_notify_target": "19:yyyy@thread.v2"
+  "vip_notify_target": "<conversation-id>"
 }
 ```
 

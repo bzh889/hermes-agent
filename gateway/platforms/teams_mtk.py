@@ -3140,7 +3140,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             else:
                 raise RuntimeError("_fetch_messages: all attempts exhausted")
         except requests.ConnectionError:
-            logger.warning("TeamsMTK: _fetch_messages ConnectionError after %.1fs", _t.time() - _t0)
+            logger.warning(
+                "TeamsMTK: _fetch_messages ConnectionError after %.1fs",
+                time.time() - _t0,
+            )
             raise
         finally:
             session.close()

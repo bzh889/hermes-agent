@@ -115,9 +115,9 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **操作步驟**:
   1. 呼叫 API 取得對話清單
   2. 確認回傳 10 筆真實對話
-  3. 檢查標題包含預期內容
+  3. 檢查標題為非空，證據只記錄 hash 與長度
 **Gateway log 驗證**: 出現 `list_conversations returning 10 conversations`
-**回覆內容驗證**: 回傳清單包含「[TC50][TA blocker] ALPS11461222...」等真實標題
+**回覆內容驗證**: 回傳清單包含非空真實標題，輸出只保留 hash 與長度
 **DONE 定義**: 連續 3 次呼叫均取得有效對話清單
 **驗證證據**: [teams-mtk-hermes-native-parity/tasks.md L356-360](tasks.md#L356-L360)
 
@@ -258,9 +258,9 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **觸發方式**: CLI 執行 `hermes teams-mtk group list`
 **操作步驟**:
   1. 確認 `list_conversations` 回傳 >5 筆對話
-  2. 呼叫 `_find_conv_by_display_name('ALPS11461222')`
+  2. 從清單動態選擇真實標題後呼叫 `_find_conv_by_display_name(title)`
   3. 驗證回傳 conv_id 正確
-**Gateway log 驗證**: 觀察 `gateway.log` 確認出現 `find_conv_by_display_name('ALPS11461222') → 19:xxx`
+**Gateway log 驗證**: 觀察 `gateway.log` 確認查找成功；證據只記錄 title hash 與結果狀態
 **回覆內容驗證**: CLI 輸出正確 conv_id 與標題
 **DONE 定義**: 連續 3 次呼叫均取得正確結果且無空值
 

@@ -135,8 +135,8 @@ class TestSearchUsers:
         adapter._auth.graph_token.return_value = "tok"
         graph_resp = {
             "value": [
-                {"id": "abc123", "displayName": "Alice Chen", "mail": "alice@mtk.com"},
-                {"id": "def456", "displayName": "Alice Wang", "userPrincipalName": "awang@mtk.com"},
+                {"id": "abc123", "displayName": "Example User", "mail": "user1@example.com"},
+                {"id": "def456", "displayName": "Sample User", "userPrincipalName": "user2@example.com"},
             ]
         }
         import requests as _req
@@ -145,11 +145,11 @@ class TestSearchUsers:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("requests.get", return_value=mock_resp):
-            result = adapter._search_users("Alice")
+            result = adapter._search_users("User")
 
         assert len(result) == 2
-        assert result[0] == {"display_name": "Alice Chen", "email": "alice@mtk.com", "oid": "abc123"}
-        assert result[1]["email"] == "awang@mtk.com"
+        assert result[0] == {"display_name": "Example User", "email": "user1@example.com", "oid": "abc123"}
+        assert result[1]["email"] == "user2@example.com"
 
     def test_returns_empty_on_error(self):
         adapter = _make_adapter()
@@ -165,12 +165,12 @@ class TestSearchUsers:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("requests.get", return_value=mock_resp) as mock_get:
-            adapter._search_users("hsuanchang")
+            adapter._search_users("sample")
 
         call_kwargs = mock_get.call_args
         params = call_kwargs[1]["params"] if call_kwargs[1] else call_kwargs[0][1]
-        assert "startswith(displayName,'hsuanchang')" in params["$filter"]
-        assert "startswith(mail,'hsuanchang')" in params["$filter"]
+        assert "startswith(displayName,'sample')" in params["$filter"]
+        assert "startswith(mail,'sample')" in params["$filter"]
 
 
 # ---------------------------------------------------------------------------

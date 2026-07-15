@@ -48,9 +48,36 @@ from teams_skype_sdk.graph import GraphToken
 
 # ── Configuration ──────────────────────────────────────────────────
 
-DM_CHAT_ID = "19:6e8a676c-2a6b-4d52-873d-e358f85f6ee1_d6d4a33b-60fe-49ff-b57e-baa6edbb67b8@unq.gbl.spaces"
-GROUP_CHAT_ID = "19:072f8afcd2e24a48b1f89310d1abcf8f@thread.v2"
+DM_CHAT_ID = ""
+GROUP_CHAT_ID = ""
 GATEWAY_LOG_DEFAULT = os.path.expanduser("~/.hermes/logs/gateway.log")
+
+
+def _load_configured_chat_ids() -> None:
+    """Resolve E2E targets from the active profile without storing IDs here."""
+    from hermes_cli.config import get_env_value
+
+    configured = [
+        value.strip()
+        for value in (get_env_value("MTK_TEAMS_CONVERSATION_ID") or "").split(",")
+        if value.strip()
+    ]
+    # Match TeamsMTKAdapter's runtime chat classification. The legacy
+    # no-mention list is not a chat-type registry: per-group config can
+    # override it, so using it here can silently swap the two E2E targets.
+    dm_candidates = [chat_id for chat_id in configured if "@thread" not in chat_id]
+    group_candidates = [chat_id for chat_id in configured if "@thread" in chat_id]
+    if not dm_candidates or not group_candidates:
+        raise RuntimeError(
+            "E2E requires one configured non-thread chat and one @thread group "
+            "in MTK_TEAMS_CONVERSATION_ID "
+            f"(configured={len(configured)}, dm={len(dm_candidates)}, "
+            f"group={len(group_candidates)})"
+        )
+
+    global DM_CHAT_ID, GROUP_CHAT_ID
+    DM_CHAT_ID = dm_candidates[0]
+    GROUP_CHAT_ID = group_candidates[0]
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -481,7 +508,20 @@ def test_mention_gating_ignore(log_path: str, baseline: int) -> tuple[bool, str]
     if not inspected:
         return False, f"Gateway never inspected marker {msg_id}: {evidence}"
 
-    time.sleep(2)
+    # Mention gating runs synchronously after the inspection log. Give the
+    # same poll iteration time to flush and prove the marker never reached
+    # either the adapter dispatch log or the gateway runner. This prevents a
+    # slow agent reply from turning a real dispatch into a false PASS.
+    time.sleep(5)
+    post_inspection_log = tail_log(log_path, baseline)
+    marker = "no mention — should be ignored"
+    if any(
+        marker in line and token in line
+        for line in post_inspection_log.splitlines()
+        for token in ("new message from", "inbound message:")
+    ):
+        return False, "Non-mentioned group message reached the gateway dispatch path"
+
     msgs = get_messages_raw(GROUP_CHAT_ID, page_size=30)
 
     def _after_marker(message: dict) -> bool:
@@ -1777,6 +1817,12 @@ def main():
     parser.add_argument("--skip", nargs="*", default=[], help="Test names to skip")
     parser.add_argument("--only", nargs="*", default=[], help="Only run these tests")
     args = parser.parse_args()
+
+    try:
+        _load_configured_chat_ids()
+    except RuntimeError as exc:
+        print(f"FATAL: {exc}")
+        sys.exit(1)
 
     log_path = args.gateway_log
     if not os.path.isfile(log_path):
