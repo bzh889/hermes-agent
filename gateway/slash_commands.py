@@ -1408,6 +1408,9 @@ class GatewaySlashCommandsMixin:
                         return "\n".join(lines)
 
                     metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    if getattr(source.platform, "value", source.platform) == "teams_mtk":
+                        metadata = dict(metadata or {})
+                        metadata["_authorized_picker_user_id"] = source.user_id
                     result = await adapter.send_model_picker(
                         chat_id=source.chat_id,
                         providers=providers,
