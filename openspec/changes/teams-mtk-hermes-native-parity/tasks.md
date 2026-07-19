@@ -338,21 +338,24 @@
 - [x] 1.4 **G8** ✅ 已完成：`gateway/config.py` `_PLATFORM_CONNECTED_CHECKERS` 加
       `Platform.TEAMS_MTK` lambda（既存bug修復）。測試：21/21 通過
       （`test_platform_connected_checkers.py`，含之前的既存失敗案例）
-- [ ] 1.5 **G11**（未做）評估是否要在 `hermes_cli/gateway.py` `_PLATFORMS` 加入
-      teams_mtk 設定精靈 metadata。**注意**：teams_mtk 認證方式特殊（複用 teams
-      skill 的 token cache，非標準 client_id/secret OAuth），精靈的
-      `vars`/`setup_instructions` 格式需要客製化，不是簡單複製別的平台範本；
-      可能需要一個 `_setup_teams_mtk()` 客製函式而非泛用表單
+- [x] 1.5 **G11** ✅ 已完成：`hermes_cli/gateway.py` `_all_platforms()` 已含
+      `teams_mtk` 條目（`vars[0].config_field == "conversation_ids"`），
+      `_setup_standard_platform()` 正確持久化 conversation_ids + enabled 到
+      config.yaml（不寫 .env）。測試：`test_setup_catalog_includes_teams_mtk`
+      + `test_setup_persists_teams_conversations_in_config` PASS
 - [x] 1.6 **G12** ✅ 已完成：`teams_mtk.py` 新增 `_redact_oid()` helper（比照
       `_redact_phone` 模式），套用到 `logger.info("TeamsMTK: user OID: %s", ...)`
 - [ ] 1.7 **§15**（未做）補 `website/docs/user-guide/messaging/teams-mtk.md`
       （MTK 內部 skypetoken 認證流程、`MTK_TEAMS_CONVERSATION_ID` 設定、
       群組白名單 `hermes teams-mtk group` 指令說明）
-- [ ] 1.8 **§16**（未做）補測試：
-      (a) config env loading（`MTK_TEAMS_CONVERSATION_ID` 等 env var → `PlatformConfig`
-      的載入邏輯）
-      (b) SessionSource round-trip（`to_dict()`→`from_dict()` 保留 `Platform.TEAMS_MTK`
-      與 teams_mtk 專屬欄位）
+- [x] 1.8 **§16** ✅ 已完成：
+      (a) config env loading — `test_gateway_config_bridges_teams_conversation_ids`
+      + `test_adapter_keeps_legacy_conversation_env_fallback` 驗證
+      `MTK_TEAMS_CONVERSATION_ID` env → `PlatformConfig.extra["conversation_ids"]`
+      的載入邏輯 PASS
+      (b) SessionSource round-trip — `test_session_source_roundtrip_preserves_teams_mtk`
+      驗證 `to_dict()`→`from_dict()` 保留 `Platform.TEAMS_MTK` + chat_id/
+      chat_type/user_id/thread_id PASS
 
 ## 2. 待驗證後才能判定（需要真實環境測試）
 

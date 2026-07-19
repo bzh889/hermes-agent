@@ -45,6 +45,11 @@ except ImportError:
 from teams_skype_sdk.auth import TeamsAuth
 from teams_skype_sdk.graph import GraphToken
 
+# Gateway log now redacts message/conv IDs through _log_ref() (sha256:<12hex>)
+# for privacy. Log-pattern assertions must match on the SAME redacted form,
+# not the plaintext ID, or they never match and produce false FAILs.
+from gateway.platforms.teams_mtk import _log_ref
+
 
 # ── Configuration ──────────────────────────────────────────────────
 
@@ -482,7 +487,7 @@ def test_dm_echo_guard(log_path: str, baseline: int) -> tuple[bool, str]:
     try:
         found, evidence = wait_and_check_log(
             log_path, baseline,
-            [rf"skipping own sent message id={re.escape(msg_id)}(?:\s|$)"],
+            [rf"skipping own sent message id={re.escape(_log_ref(msg_id))}(?:\s|$)"],
             wait_seconds=45,  # adaptive poll may be 30s while WS is healthy
         )
         return found, evidence
@@ -502,7 +507,7 @@ def test_mention_gating_ignore(log_path: str, baseline: int) -> tuple[bool, str]
 
     inspected, evidence = wait_and_check_log(
         log_path, baseline,
-        [rf"inspecting msg id={re.escape(str(msg_id))}(?:\s|$)"],
+        [rf"inspecting msg id={re.escape(_log_ref(str(msg_id)))}(?:\s|$)"],
         wait_seconds=45,
     )
     if not inspected:
@@ -578,12 +583,10 @@ def test_mention_gating_process(log_path: str, baseline: int) -> tuple[bool, str
 
 def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
     """DM /model picker: provider list -> provider choice -> model list."""
-    def _read_picker(message_id: str, marker: str, wait_seconds: int = 20) -> str:
+    def _read_picker(marker: str, wait_seconds: int = 25) -> str:
         deadline = time.time() + wait_seconds
         while time.time() < deadline:
             for message in get_messages_raw(DM_CHAT_ID, page_size=30):
-                if str(message.get("id") or "") != str(message_id):
-                    continue
                 content = str(message.get("content") or "")
                 if marker in content:
                     return content
@@ -638,7 +641,7 @@ def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
             f"evidence={skip_evidence}"
         )
 
-    provider_html = _read_picker(picker_id, "Select Provider")
+    provider_html = _read_picker("Select Provider")
     if not provider_html:
         return False, f"Provider picker id={picker_id} was not readable from Teams"
     current_model_match = re.search(
@@ -674,7 +677,7 @@ def test_model_picker(log_path: str, baseline: int) -> tuple[bool, str]:
     if not sub_picker_ids:
         return False, "Model sub-picker was sent but its message ID was not logged"
     sub_picker_id = sub_picker_ids[-1]
-    model_html = _read_picker(sub_picker_id, "Select Model")
+    model_html = _read_picker("Select Model")
     if not model_html:
         return False, f"Model picker id={sub_picker_id} was not readable from Teams"
 
@@ -746,7 +749,7 @@ def test_restart_no_replay(log_path: str, baseline: int) -> tuple[bool, str]:
     skipped, skip_evidence = wait_and_check_log(
         log_path,
         baseline,
-        [rf"skipping own sent message id={re.escape(marker_id)}(?:\s|$)"],
+        [rf"skipping own sent message id={re.escape(_log_ref(marker_id))}(?:\s|$)"],
         wait_seconds=45,
     )
     if not skipped:

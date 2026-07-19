@@ -312,3 +312,25 @@ def test_adapter_keeps_legacy_conversation_env_fallback(monkeypatch):
     adapter = TeamsMTKAdapter(PlatformConfig(enabled=True))
 
     assert adapter._conv_ids == ["19:example@thread.v2"]
+
+
+def test_session_source_roundtrip_preserves_teams_mtk():
+    """§16(b): SessionSource.to_dict()->from_dict() round-trips TEAMS_MTK."""
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+
+    source = SessionSource(
+        platform=Platform.TEAMS_MTK,
+        chat_id="19:072f****@thread.v2",
+        chat_type="group",
+        user_id="8:orgid:abc-123",
+        thread_id="19:072f****@thread.v2",
+    )
+
+    restored = SessionSource.from_dict(source.to_dict())
+
+    assert restored.platform == Platform.TEAMS_MTK
+    assert restored.chat_id == "19:072f****@thread.v2"
+    assert restored.chat_type == "group"
+    assert restored.user_id == "8:orgid:abc-123"
+    assert restored.thread_id == "19:072f****@thread.v2"

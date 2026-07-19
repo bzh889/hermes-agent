@@ -3877,12 +3877,17 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     _ext = ".gif"
                 elif ".webp" in url.lower():
                     _ext = ".webp"
-                return cache_image_from_bytes(data, _ext)
+                local = cache_image_from_bytes(data, _ext)
             else:
                 if not filename:
                     _parts = url.rsplit("/", 1)
                     filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
-                return cache_document_from_bytes(data, filename)
+                local = cache_document_from_bytes(data, filename)
+            logger.info(
+                "TeamsMTK: cached %d bytes from %s -> %s",
+                len(data), _log_ref(url), local,
+            )
+            return local
         except Exception as exc:
             logger.warning("TeamsMTK: attachment cache error: %s", _log_error(exc))
             return None
