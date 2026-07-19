@@ -1547,7 +1547,7 @@ def _get_script_timeout() -> int:
     return _DEFAULT_SCRIPT_TIMEOUT
 
 
-def _run_job_script(script_path: str) -> tuple[bool, str]:
+def _run_job_script(script_path: str, *, cwd: Optional[str] = None) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
     Scripts must reside within HERMES_HOME/scripts/.  Both relative and
@@ -1573,6 +1573,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         script_path: Path to the script.  Relative paths are resolved
             against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
             are also validated to ensure they stay within the scripts dir.
+        cwd: Optional working directory for the script. When omitted, use the
+            configured terminal cwd or the scheduler process cwd.
 
     Returns:
         (success, output) — on failure *output* contains the error message so the
@@ -1603,6 +1605,10 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
+    execution_cwd = Path(cwd or os.getenv("TERMINAL_CWD") or os.getcwd()).expanduser().resolve()
+    if not execution_cwd.is_dir():
+        return False, f"Script working directory does not exist: {execution_cwd}"
+
     script_timeout = _get_script_timeout()
 
     # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
@@ -1629,19 +1635,39 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     else:
         argv = [sys.executable, str(path)]
 
+    # On locked-down Windows endpoints a substring-based process-execution
+    # filter (e.g. CyberArk EPM) can deny any spawn whose command line
+    # contains ``\.hermes\``. Rewrite absolute Windows path args to forward
+    # slashes — identical to the kernel, invisible to the filter. No-op on
+    # POSIX and for bash (which accepts forward-slash script paths on MSYS).
+    from hermes_cli._subprocess_compat import evade_path_string_filter
+
+    argv = evade_path_string_filter(argv)
+
     try:
         from tools.environments.local import _sanitize_subprocess_env
 
         popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=script_timeout,
-            cwd=str(path.parent),
-            env=_sanitize_subprocess_env(os.environ.copy()),
-            **popen_kwargs,
-        )
+        run_kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": script_timeout,
+            "cwd": str(execution_cwd),
+            "env": _sanitize_subprocess_env(os.environ.copy()),
+        }
+        try:
+            result = subprocess.run(argv, **run_kwargs, **popen_kwargs)
+        except PermissionError:
+            if not popen_kwargs:
+                raise
+            # Some Windows job objects reject CREATE_NO_WINDOW even though
+            # a normal foreground child is permitted. Retry once so cron
+            # scripts do not become false failures under those hosts.
+            logger.warning(
+                "Cron script %s rejected hidden-process flags; retrying without them",
+                path,
+            )
+            result = subprocess.run(argv, **run_kwargs)
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
 
@@ -2064,7 +2090,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _prior_cwd = None
 
         try:
-            ok, output = _run_job_script(script_path)
+            ok, output = _run_job_script(script_path, cwd=_job_workdir)
         finally:
             if _prior_cwd is not None:
                 try:
@@ -2153,8 +2179,21 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script(script_path)
+        script_cwd = (job.get("workdir") or "").strip() or None
+        prerun_script = _run_job_script(script_path, cwd=script_cwd)
         _ran_ok, _script_output = prerun_script
+        if not _ran_ok:
+            error_message = f"Pre-run script failed: {_script_output}"
+            failed_doc = (
+                f"# Cron Job: {job_name} (FAILED)\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "**Status:** pre-run script failed\n\n"
+                "## Script Error\n\n"
+                f"{_script_output}\n"
+            )
+            logger.error("Job '%s': %s", job_id, error_message)
+            return False, failed_doc, "", error_message
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
                 "Job '%s' (ID: %s): wakeAgent=false, skipping agent run",

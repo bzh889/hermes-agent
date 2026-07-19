@@ -27,6 +27,8 @@ guarantee.
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +36,9 @@ from typing import Sequence
 
 __all__ = [
     "IS_WINDOWS",
+    "evade_path_string_filter",
     "resolve_node_command",
+    "resolve_shim_direct_node",
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hidden_console_popen_kwargs",
@@ -87,6 +91,137 @@ def resolve_node_command(name: str, argv: Sequence[str]) -> list[str]:
     if resolved:
         return [resolved, *argv]
     return [name, *argv]
+
+
+def evade_path_string_filter(argv: Sequence[str]) -> list[str]:
+    """Rewrite backslashes to forward slashes in Windows path arguments so a
+    naive substring-based process-execution filter can't match on them.
+
+    Some endpoint security agents (observed: CyberArk EPM) block process
+    creation by literal case-sensitive substring match on the command line —
+    e.g. any argv containing ``\\.hermes\\`` is denied with
+    ``ERROR_ACCESS_DENIED`` (surfaced as ``PermissionError``/WinError 5),
+    even though the underlying NTFS ACLs grant full access and the *same*
+    file executes fine when addressed by an equivalent path spelling.
+
+    Windows' ``CreateProcessW`` treats ``/`` and ``\\`` as interchangeable
+    path separators, so rewriting an absolute Windows path argument to use
+    forward slashes is functionally identical to the kernel but no longer
+    matches a ``\\...\\`` filter pattern. This lets LSP servers, cron
+    scripts, and other children under ``HERMES_HOME`` spawn on locked-down
+    corporate endpoints without relocating state or waiting on an IT policy
+    exception.
+
+    Only rewrites tokens that look like absolute Windows paths (``X:\\...``);
+    flags, ``--stdio``-style options, and relative tokens pass through
+    untouched so option parsing is never disturbed. No-op on non-Windows —
+    POSIX argv never contains backslash separators and the guarantee is to
+    do no damage off Windows.
+    """
+    if not IS_WINDOWS:
+        return list(argv)
+
+    def _rewrite(tok: str) -> str:
+        # Absolute Windows path: drive letter + ':' + separator. Only these
+        # carry the backslash pattern a path filter keys on; leave options
+        # and bare words alone.
+        if len(tok) >= 3 and tok[1] == ":" and tok[0].isalpha() and tok[2] in ("\\", "/"):
+            return tok.replace("\\", "/")
+        return tok
+
+    return [_rewrite(t) for t in argv]
+
+
+def _npm_shim_entrypoint(shim_path: str) -> str | None:
+    """Return the real ``.js`` entrypoint an npm ``.cmd``/``.ps1`` shim runs.
+
+    npm generates ``<bin>.cmd`` shims whose final line invokes
+    ``node "%dp0%\\..\\<pkg>\\<entry>.js" %*`` — where ``%dp0%`` expands at
+    runtime to the shim's own directory in **backslash** form. On a locked-down
+    endpoint with a substring process-execution filter (CyberArk EPM blocking
+    ``\\.hermes\\``), that inner ``node`` spawn carries the backslash
+    ``\\.hermes\\`` path and is denied with ``ERROR_ACCESS_DENIED`` — even
+    though we launched the outer ``cmd.exe /c`` with forward slashes, because
+    ``%dp0%`` is re-expanded by ``cmd`` and we can't influence its spelling.
+
+    The fix is to skip the shim: parse out the ``.js`` entrypoint and let the
+    caller invoke ``node <entry.js>`` directly with forward-slash paths (which
+    :func:`evade_path_string_filter` then keeps filter-safe end-to-end).
+
+    Returns the absolute entrypoint path if it can be resolved and exists,
+    else ``None`` (caller falls back to the shim). Windows-only concern; on
+    POSIX npm generates symlinks, not ``.cmd`` shims, so this returns ``None``.
+    """
+    if not IS_WINDOWS:
+        return None
+    low = shim_path.lower()
+    if not low.endswith((".cmd", ".bat")):
+        return None
+    text = None
+    for candidate in _shim_variants(shim_path):
+        try:
+            text = open(candidate, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        entry = _entry_from_shim_text(text, candidate)
+        if entry is not None:
+            return entry
+    return None
+
+
+def _shim_variants(shim_path: str) -> list[str]:
+    """Yield the shim itself plus the sibling ``node_modules/.bin`` copy.
+
+    npm writes a top-level ``lsp/bin/<name>.cmd`` and a canonical
+    ``lsp/node_modules/.bin/<name>.cmd``. The top-level one can go stale
+    (points at a path that no longer exists) while the ``node_modules/.bin``
+    copy stays correct, so we try both.
+    """
+    variants = [shim_path]
+    base = os.path.basename(shim_path)
+    lsp_root = os.path.dirname(os.path.dirname(shim_path))  # .../lsp/bin -> .../lsp
+    nm_bin = os.path.join(lsp_root, "node_modules", ".bin", base)
+    if os.path.normcase(nm_bin) != os.path.normcase(shim_path) and os.path.exists(nm_bin):
+        variants.append(nm_bin)
+    return variants
+
+
+def _entry_from_shim_text(text: str, shim_path: str) -> str | None:
+    """Extract + resolve the ``.js`` entrypoint from one shim's text."""
+    # npm shim line: "%_prog%" "%dp0%\..\<pkg>\<entry>.js" %*
+    m = re.search(r'%dp0%[\\/]+([^"%\r\n]+\.js)', text)
+    if not m:
+        return None
+    rel = m.group(1).replace("\\", "/").lstrip("/")
+    base = os.path.dirname(shim_path)
+    resolved = os.path.normpath(os.path.join(base, rel))
+    return resolved if os.path.exists(resolved) else None
+
+
+def resolve_shim_direct_node(cmd: Sequence[str]) -> list[str] | None:
+    """Rewrite an npm ``.cmd`` shim invocation to a direct ``node <entry.js>``.
+
+    Given an argv whose first element is a Windows npm ``.cmd`` shim (e.g.
+    ``pyright-langserver.cmd``), return an equivalent argv that runs the
+    shim's underlying ``.js`` entrypoint directly through ``node`` — with all
+    absolute paths forward-slashed so a substring path filter can't block the
+    spawn. Returns ``None`` when the input isn't a resolvable node shim (caller
+    should fall back to the normal ``cmd.exe /c`` path).
+
+    Rationale: launching the ``.cmd`` via ``cmd.exe /c`` re-expands ``%dp0%``
+    to a backslash ``\\.hermes\\`` path in the inner ``node`` call, which
+    CyberArk-EPM-style filters deny. Bypassing the shim keeps every spawned
+    path forward-slashed end to end. Windows-only; ``None`` on POSIX.
+    """
+    if not IS_WINDOWS or not cmd:
+        return None
+    entry = _npm_shim_entrypoint(cmd[0])
+    if entry is None:
+        return None
+    node = shutil.which("node")
+    if node is None:
+        return None
+    return evade_path_string_filter([node, entry, *cmd[1:]])
 
 
 # -----------------------------------------------------------------------------

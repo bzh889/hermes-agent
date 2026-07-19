@@ -99,6 +99,56 @@ class TestRunJobScript:
         assert success is True
         assert output == "hello from script"
 
+    def test_script_honors_explicit_workdir(self, cron_env, monkeypatch):
+        from cron import scheduler
+
+        script = cron_env / "scripts" / "test.py"
+        script.write_text('print("ignored")\n')
+        workdir = cron_env.parent
+        captured = {}
+
+        def fake_run(*_args, **kwargs):
+            captured["cwd"] = kwargs["cwd"]
+            return type("Result", (), {
+                "returncode": 0,
+                "stdout": "ok",
+                "stderr": "",
+            })()
+
+        monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+        success, output = scheduler._run_job_script("test.py", cwd=str(workdir))
+
+        assert success is True
+        assert output == "ok"
+        assert captured["cwd"] == str(workdir)
+
+    def test_permission_denied_hidden_spawn_retries_without_creation_flags(
+        self, cron_env, monkeypatch
+    ):
+        from cron import scheduler
+
+        script = cron_env / "scripts" / "test.py"
+        script.write_text('print("ignored")\n')
+        calls = []
+
+        def fake_run(*_args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise PermissionError(5, "Access is denied")
+            return type("Result", (), {
+                "returncode": 0,
+                "stdout": "retry-ok",
+                "stderr": "",
+            })()
+
+        monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+        success, output = scheduler._run_job_script("test.py", cwd=str(cron_env.parent))
+
+        assert success is True
+        assert output == "retry-ok"
+        assert "creationflags" in calls[0]
+        assert "creationflags" not in calls[1]
+
     def test_script_relative_path(self, cron_env):
         from cron.scheduler import _run_job_script
 
@@ -227,6 +277,55 @@ class TestBuildJobPromptWithScript:
         assert "## Script Error" in prompt
         assert "not found" in prompt.lower()
         assert "Report status." in prompt
+
+    def test_failed_prerun_marks_agent_job_failed_without_model_call(self, cron_env, monkeypatch):
+        """A failed data-collection script is a failed cron job, not LLM input."""
+        from cron import scheduler
+
+        monkeypatch.setattr(
+            scheduler, "_run_job_script", lambda _path, **_kwargs: (False, "probe failed")
+        )
+        monkeypatch.setattr(
+            scheduler,
+            "_build_job_prompt",
+            lambda _job, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM path reached")),
+        )
+
+        success, doc, final_response, error = scheduler.run_job({
+            "id": "script-failure",
+            "name": "Broken probe",
+            "prompt": "Summarize the probe.",
+            "script": "broken_probe.py",
+        })
+
+        assert success is False
+        assert final_response == ""
+        assert error == "Pre-run script failed: probe failed"
+        assert "pre-run script failed" in doc.lower()
+
+    def test_run_job_precheck_uses_job_workdir(self, cron_env, monkeypatch):
+        from cron import scheduler
+
+        workdir = cron_env.parent
+        captured = {}
+
+        def fake_run_script(_path, *, cwd=None):
+            captured["cwd"] = cwd
+            return True, '{"wakeAgent": false}'
+
+        monkeypatch.setattr(scheduler, "_run_job_script", fake_run_script)
+        success, _doc, final_response, error = scheduler.run_job({
+            "id": "script-workdir",
+            "name": "Script workdir",
+            "prompt": "unused",
+            "script": "probe.py",
+            "workdir": str(workdir),
+        })
+
+        assert success is True
+        assert final_response == scheduler.SILENT_MARKER
+        assert error is None
+        assert captured["cwd"] == str(workdir)
 
     def test_no_script_unchanged(self, cron_env):
         from cron.scheduler import _build_job_prompt

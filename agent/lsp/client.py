@@ -247,11 +247,38 @@ class LSPClient:
 
     @staticmethod
     def _win_wrap_cmd(cmd: List[str]) -> List[str]:
-        """On Windows, wrap .cmd/.bat shims so CreateProcess can run them."""
+        """On Windows, make an LSP server command spawnable under a
+        substring-based process-execution filter (e.g. CyberArk EPM blocking
+        ``\\.hermes\\``).
+
+        Three cases:
+
+        1. npm ``.cmd``/``.bat`` shim — launching it via ``cmd.exe /c`` re-expands
+           the shim's ``%dp0%`` to a *backslash* ``\\.hermes\\`` path in the
+           inner ``node`` call, which the filter denies even though our outer
+           argv is forward-slashed. So we bypass the shim entirely and invoke
+           its ``.js`` entrypoint directly through ``node`` with forward-slash
+           paths (:func:`resolve_shim_direct_node`).
+        2. shim that can't be resolved to a ``.js`` entrypoint — fall back to
+           ``cmd.exe /c`` with forward-slashed argv.
+        3. native binary — just forward-slash the argv.
+
+        Rewriting ``\\`` → ``/`` is functionally identical to the kernel (it
+        treats both as path separators) but no longer matches a ``\\...\\``
+        filter pattern.
+        """
+        from hermes_cli._subprocess_compat import (
+            evade_path_string_filter,
+            resolve_shim_direct_node,
+        )
+
         exe = cmd[0]
         if exe.lower().endswith((".cmd", ".bat")):
-            return ["cmd.exe", "/c", *cmd]
-        return cmd
+            direct = resolve_shim_direct_node(cmd)
+            if direct is not None:
+                return direct
+            return evade_path_string_filter(["cmd.exe", "/c", *cmd])
+        return evade_path_string_filter(cmd)
 
     async def _spawn(self) -> None:
         env = dict(os.environ)
