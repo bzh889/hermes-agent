@@ -1083,6 +1083,50 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 400
 
     @pytest.mark.asyncio
+    async def test_disabled_toolsets_are_normalized_and_forwarded(self, adapter):
+        app = _create_app(adapter)
+        result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        with patch.object(
+            adapter,
+            "_run_agent",
+            new_callable=AsyncMock,
+            return_value=(result, usage),
+        ) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "disabled_toolsets": ["web", "terminal", "web"],
+                    },
+                )
+
+        assert resp.status == 200
+        assert mock_run.await_args.kwargs["disabled_toolsets"] == [
+            "terminal",
+            "web",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_invalid_disabled_toolsets_return_400(self, adapter):
+        app = _create_app(adapter)
+        with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "disabled_toolsets": "terminal",
+                    },
+                )
+
+        assert resp.status == 400
+        mock_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_stream_true_returns_sse(self, adapter):
         """stream=true returns SSE format with the full response."""
         app = _create_app(adapter)

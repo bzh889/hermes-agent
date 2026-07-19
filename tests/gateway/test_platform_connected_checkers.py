@@ -122,6 +122,8 @@ def test_checker_returns_true_when_configured(platform, checker, monkeypatch):
         mock_config.extra = {"client_id": "id", "client_secret": "sec"}
     elif platform == Platform.RELAY:
         mock_config.extra = {"relay_url": "wss://connector.example/relay"}
+    elif platform == Platform.TEAMS_MTK:
+        mock_config.extra = {"conversation_id": "19:example@thread.v2"}
     else:
         pytest.skip(f"No synthetic config defined for {platform.value}")
 

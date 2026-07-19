@@ -1085,6 +1085,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        disabled_toolsets: Optional[List[str]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1144,6 +1145,7 @@ class APIServerAdapter(BasePlatformAdapter):
             verbose_logging=False,
             ephemeral_system_prompt=ephemeral_system_prompt or None,
             enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
             session_id=session_id,
             platform="api_server",
             stream_delta_callback=stream_delta_callback,
@@ -1945,6 +1947,30 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
+        raw_disabled_toolsets = body.get("disabled_toolsets")
+        disabled_toolsets: Optional[List[str]] = None
+        if raw_disabled_toolsets is not None:
+            if (
+                not isinstance(raw_disabled_toolsets, list)
+                or len(raw_disabled_toolsets) > 128
+                or any(
+                    not isinstance(item, str)
+                    or not item.strip()
+                    or len(item) > 128
+                    for item in raw_disabled_toolsets
+                )
+            ):
+                return web.json_response(
+                    _openai_error(
+                        "'disabled_toolsets' must be a list of non-empty strings",
+                        err_type="invalid_request_error",
+                    ),
+                    status=400,
+                )
+            disabled_toolsets = sorted({
+                item.strip() for item in raw_disabled_toolsets
+            }) or None
+
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
         conversation_messages: List[Dict[str, str]] = []
@@ -2153,11 +2179,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                disabled_toolsets=disabled_toolsets,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
-            fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
+            fp = _make_request_fingerprint(
+                body,
+                keys=[
+                    "model", "messages", "tools", "tool_choice", "stream",
+                    "disabled_toolsets",
+                ],
+            )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
@@ -3879,6 +3912,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        disabled_toolsets: Optional[List[str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3910,6 +3944,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    disabled_toolsets=disabled_toolsets,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent

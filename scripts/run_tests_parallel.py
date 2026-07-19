@@ -32,7 +32,7 @@ Usage:
 
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
-    HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_TEST_PATHS    Override discovery roots (OS path-sep, default: 'tests')
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -49,6 +49,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+try:
+    # Reuse the canonical Windows hidden-console helper so per-file pytest
+    # subprocesses (and their Python/console grandchildren) share one hidden
+    # console instead of each allocating a visible conhost window that steals
+    # the user's foreground focus. No-op ({}) on non-Windows.
+    from hermes_cli._subprocess_compat import (
+        windows_hidden_console_popen_kwargs as _win_hidden_console_kwargs,
+    )
+except Exception:  # pragma: no cover - fallback if run standalone before install
+    def _win_hidden_console_kwargs() -> dict:
+        return {}
+
 
 
 # Default test discovery roots.
@@ -251,23 +264,47 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    # Skip bytecode writes: many parallel pytest processes hit the same
+    # source tree and racing .pyc writes waste work / can collide.
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
     subproc_start = time.monotonic()
     # launch the pytest process
+    #
+    # Windows foreground-focus fix: each per-file pytest subprocess (and the
+    # Python/console grandchildren it spawns) would otherwise allocate a
+    # visible conhost window that steals the user's foreground focus while a
+    # full run is in flight. windows_hidden_console_popen_kwargs() gives the
+    # subprocess tree one shared HIDDEN console (CREATE_NEW_CONSOLE +
+    # SW_HIDE), which is mutually exclusive with CREATE_NEW_PROCESS_GROUP
+    # (what start_new_session maps to on Windows) — so we drop
+    # start_new_session there. _kill_tree already handles Windows teardown via
+    # taskkill /F /T (PID-based), so losing the process-group flag doesn't
+    # regress cleanup. On POSIX the helper returns {} and we keep
+    # start_new_session=True for atomic process-group SIGKILL.
+    _popen_extra: dict = {}
+    if sys.platform == "win32":
+        _popen_extra = _win_hidden_console_kwargs()
+    if not _popen_extra:
+        _popen_extra = {"start_new_session": True}
     proc = subprocess.Popen(
         cmd,
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        # skipping writing bytecode because we're running a bunch of parallel python processes on the same code
-        env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+        encoding="utf-8",
+        errors="replace",
+        env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
-        start_new_session=True,
+        # Windows: a hidden CREATE_NEW_CONSOLE (from _popen_extra) prevents
+        # conhost focus-stealing; _kill_tree handles teardown via taskkill /F /T.
+        **_popen_extra,
     )
+
 
     # Capture the pgid NOW, before the leader can exit and be reaped. Once
     # the leader is reaped, os.getpgid(proc.pid) raises ProcessLookupError
@@ -462,9 +499,9 @@ def _print_inline_failure(
     print(f"  ╔╍ Failed: {rel} ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍", flush=True)
     for line in tail.splitlines():
         print(f"  ║ {line}", flush=True)
-    print(f"  ║", flush=True)
+    print("  ║", flush=True)
     print(f"  ║  Repro: {repro}", flush=True)
-    print(f"  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍", flush=True)
+    print("  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍", flush=True)
     print(flush=True)
 
 
@@ -605,8 +642,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--paths",
-        default=os.environ.get("HERMES_TEST_PATHS", ":".join(_DEFAULT_ROOTS)),
-        help="Colon-separated discovery roots (default: 'tests')",
+        default=os.environ.get("HERMES_TEST_PATHS", os.pathsep.join(_DEFAULT_ROOTS)),
+        help="OS-path-separator-delimited discovery roots (default: 'tests')",
     )
     parser.add_argument(
         "--include-integration",
@@ -652,7 +689,7 @@ def main() -> int:
         "--files",
         metavar="LIST",
         help=(
-            "Explicit colon-separated list of test files to run. Bypasses "
+            "Explicit OS-path-separator-delimited list of test files to run. Bypasses "
             "discovery entirely — used by CI matrix jobs that receive their "
             "file list from the generate job."
         ),
@@ -749,7 +786,7 @@ def main() -> int:
 
     # --files: explicit file list from the CI generate job — skip discovery.
     if args.files:
-        files = [repo_root / f for f in args.files.split(":") if f.strip()]
+        files = [repo_root / f for f in args.files.split(os.pathsep) if f.strip()]
         roots = []
     else:
         # Resolve discovery roots: positional path args override --paths if any
@@ -757,7 +794,7 @@ def main() -> int:
         if args.paths_positional:
             roots = [repo_root / p for p in args.paths_positional]
         else:
-            roots = [repo_root / p for p in args.paths.split(":") if p]
+            roots = [repo_root / p for p in args.paths.split(os.pathsep) if p]
 
         if args.include_integration:
             # Caller takes responsibility — typically used via explicit -k filter.
@@ -767,7 +804,7 @@ def main() -> int:
         files = _discover_files(roots)
 
     if not files:
-        print(f"No test files to run", file=sys.stderr)
+        print("No test files to run", file=sys.stderr)
         return 1
 
     # --generate-slices: compute LPT distribution and emit JSON, then exit.
@@ -780,7 +817,7 @@ def main() -> int:
             "slice": [
                 {
                     "index": i + 1,
-                    "files": ":".join(_format_file(f, repo_root) for f in bucket),
+                    "files": os.pathsep.join(_format_file(f, repo_root) for f in bucket),
                 }
                 for i, bucket in enumerate(slices)
             ]
@@ -914,14 +951,14 @@ def main() -> int:
         fast = sum(1 for t in times if t < 1.0)
         fast_2s = sum(1 for t in times if t < 2.0)
         print()
-        print(f"=== Per-file subprocess time distribution ===")
+        print("=== Per-file subprocess time distribution ===")
         print(f"  Files:   {len(times)}")
         print(f"  Total subprocess CPU-wall: {total_subproc:.1f}s  (runner wall: {elapsed:.1f}s, parallelism: {args.jobs}x)")
         print(f"  P50: {p50:.2f}s  P90: {p90:.2f}s  P95: {p95:.2f}s  P99: {p99:.2f}s  Max: {max_t:.2f}s")
         print(f"  <1s: {fast} files ({fast/len(times)*100:.0f}%)  <2s: {fast_2s} files ({fast_2s/len(times)*100:.0f}%)")
         # Top 10 slowest files — likely the ones dragging the run.
         slowest = sorted(file_times, key=lambda x: x[1], reverse=True)[:10]
-        print(f"  Top 10 slowest:")
+        print("  Top 10 slowest:")
         for f, t in slowest:
             print(f"    {t:>6.2f}s  {_format_file(f, repo_root)}")
 

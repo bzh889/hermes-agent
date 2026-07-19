@@ -147,6 +147,8 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
 
@@ -221,8 +223,40 @@ def _run_runner(probe_dir: Path, *extra: str) -> subprocess.CompletedProcess:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
+
+
+def test_per_file_runner_decodes_utf8_output_under_legacy_windows_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UTF-8 pytest output must not be decoded with the Windows code page."""
+    from scripts import run_tests_parallel
+
+    probe = tmp_path / "test_unicode_output.py"
+    probe.write_text(
+        "def test_unicode_output():\n"
+        "    print('unicode probe: →')\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp950")
+
+    _file, returncode, output, summary, _duration = (
+        run_tests_parallel._run_one_file(
+            probe,
+            ["-q", "-s"],
+            Path(__file__).resolve().parent.parent,
+            30,
+        )
+    )
+
+    assert returncode == 0, output
+    assert "unicode probe: →" in output
+    assert summary.get("passed") == 1
 
 
 def test_bare_q_flag_passes_through(tmp_path: Path) -> None:
@@ -271,7 +305,7 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
         [sys.executable, str(runner), str(probe_dir), "-j", "1",
          "--file-timeout", "30", "-q"],
         cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, timeout=60,
+        text=True, encoding="utf-8", errors="replace", timeout=60,
     )
     assert proc.returncode == 0, proc.stdout
     # Discovery found the probe file (2 tests), proving the positional path
