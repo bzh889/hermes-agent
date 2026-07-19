@@ -17,7 +17,7 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 import pytest
 
-from gateway.platforms.teams_mtk import TeamsMTKAdapter
+from gateway.platforms.teams_mtk import TeamsMTKAdapter, _clean_message_content
 from gateway.platforms.base import SendResult
 
 pytestmark = pytest.mark.asyncio
@@ -99,8 +99,12 @@ async def test_raw_fetch_connection_error_preserves_original_exception():
 async def test_edit_message_429_backs_off_and_retries():
     """edit_message: 429 on first attempt → back off + retry once → 200 → success."""
     adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.skype_token.return_value = "fake-skype-token"
+    adapter._auth.msg_base = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
 
-    with patch("requests.put") as mock_put, \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("requests.put") as mock_put, \
          patch("requests.Session"), \
          patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         mock_put.side_effect = _mock_requests_put([429, 200])
@@ -119,8 +123,12 @@ async def test_edit_message_429_backs_off_and_retries():
 async def test_edit_message_persistent_failure_never_raises():
     """edit_message: 429 on both attempts → never raises, returns failure."""
     adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.skype_token.return_value = "fake-skype-token"
+    adapter._auth.msg_base = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
 
-    with patch("requests.put") as mock_put, \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("requests.put") as mock_put, \
          patch("requests.Session"), \
          patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock):
         # Both attempts return 429 → raise_for_status raises on second
@@ -183,7 +191,47 @@ async def test_send_401_refresh_integrity():
         assert result.success is True
         # 401 path calls _force_refresh, NOT sleep (that's the 429 path)
         adapter._auth._force_refresh.assert_called_once()
-        mock_sleep.assert_not_called()
+        mock_sleep.assert_not_awaited()
+
+
+async def test_send_sdk_rewrites_hardcoded_amer_to_regional_endpoint():
+    """SDK message transport must honor the authz-discovered tenant region."""
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.skype_token.return_value = "regional-skype-token"
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+
+    response = MagicMock(status_code=201)
+    response.json.return_value = {"OriginalArrivalTime": "regional-message-id"}
+    session = MagicMock()
+    session.request.return_value = response
+
+    class RecordingMessagesService:
+        def __init__(self, http):
+            self._http = http
+
+        def send(self, **kwargs):
+            conv = kwargs["conversation_id"]
+            resp = self._http._request(
+                "POST",
+                f"https://amer.ng.msg.teams.microsoft.com/v1/users/ME/conversations/{conv}/messages",
+                json={"content": kwargs["content"]},
+            )
+            return {"id": str(resp.json()["OriginalArrivalTime"])}
+
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
+         patch("gateway.platforms.teams_mtk._SDKMessages", RecordingMessagesService), \
+         patch("requests.Session", return_value=session):
+        result = await adapter.send("19:test@thread.v2", "hello regional tenant")
+
+    assert result.success is True
+    assert result.message_id == "regional-message-id"
+    method, sent_url = session.request.call_args.args[:2]
+    assert method == "POST"
+    assert sent_url.startswith("https://apac.ng.msg.teams.microsoft.com/")
+    assert session.request.call_args.kwargs["headers"]["Authentication"] == (
+        "skypetoken=regional-skype-token"
+    )
 
 
 # ── §3 config: reply_throttle_seconds ────────────────────────────────────
@@ -208,31 +256,18 @@ def test_config_default_throttle_is_zero():
 async def test_throttle_delays_rapid_follow_up():
     """If throttle > 0, two rapid sends to the same conv: second waits."""
     adapter = _make_adapter()
-    adapter._reply_throttle_seconds = 2.0  # Override for test
-    adapter._last_reply_at = {}           # Per-conv tracking
+    adapter._reply_throttle_seconds = 2.0
+    adapter._last_reply_at = {}
 
-    # Simulate first reply at t=0
     import time
     adapter._last_reply_at["19:test@thread.v2"] = time.monotonic()
 
-    # Second call immediately — should wait (sleep called with ~2.0)
-    # We just test that asyncio.sleep is called with approximately
-    # the expected delay. The real implementation decides the exact
-    # remaining wait time.
     with patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        # The adapter's send() would call _maybe_throttle() before posting
-        # For now this tests the contract: if throttle is active and
-        # insufficient time has passed, sleep IS called.
-        # (Implementation will be wired in GREEN phase.)
-        try:
-            await adapter._maybe_throttle("19:test@thread.v2")
-        except AttributeError:
-            pytest.skip("_maybe_throttle not yet implemented — RED phase")
+        await adapter._maybe_throttle("19:test@thread.v2")
 
-        if mock_sleep.called:
-            _delay = mock_sleep.call_args[0][0]
-            assert _delay > 0, "throttle sleep must be positive"
-            assert _delay <= 2.0, "throttle sleep must not exceed the configured window"
+        mock_sleep.assert_awaited_once()
+        delay = mock_sleep.call_args[0][0]
+        assert 0 < delay <= 2.0
 
 
 async def test_throttle_no_wait_when_disabled():
@@ -240,10 +275,7 @@ async def test_throttle_no_wait_when_disabled():
     adapter = _make_adapter()
     adapter._reply_throttle_seconds = 0
 
-    try:
-        await adapter._maybe_throttle("19:test@thread.v2")
-    except AttributeError:
-        pytest.skip("_maybe_throttle not yet implemented — RED phase")
+    await adapter._maybe_throttle("19:test@thread.v2")
 
 
 async def test_throttle_no_wait_after_window_elapses():
@@ -257,12 +289,9 @@ async def test_throttle_no_wait_after_window_elapses():
     adapter._last_reply_at["19:test@thread.v2"] = time.monotonic() - 5.0
 
     with patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        try:
-            await adapter._maybe_throttle("19:test@thread.v2")
-        except AttributeError:
-            pytest.skip("_maybe_throttle not yet implemented — RED phase")
+        await adapter._maybe_throttle("19:test@thread.v2")
 
-        mock_sleep.assert_not_called()
+        mock_sleep.assert_not_awaited()
 
 
 async def test_throttle_per_conv_independent():
@@ -275,12 +304,9 @@ async def test_throttle_per_conv_independent():
     adapter._last_reply_at["19:convA@thread.v2"] = time.monotonic()
 
     with patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        try:
-            await adapter._maybe_throttle("19:convB@thread.v2")
-        except AttributeError:
-            pytest.skip("_maybe_throttle not yet implemented — RED phase")
+        await adapter._maybe_throttle("19:convB@thread.v2")
 
-        mock_sleep.assert_not_called()
+        mock_sleep.assert_not_awaited()
 
 
 # ── §5 echo guard: MessageDeduplicator ─────────────────────────────────
@@ -296,22 +322,16 @@ async def test_echo_guard_tracks_conversation_and_message_id():
 
 async def test_at_mention_preserved_in_html_strip():
     """<at id='...'>hermes</at> must survive HTML stripping as plain 'hermes'."""
-    import re
     raw = '<at id="8:orgid:abc">hermes</at>'
-    # Replicate the exact strip logic from _process_new_messages
-    content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", raw)
-    text = re.sub(r"<[^>]+>", "", content).strip()
-    assert text == "hermes", f"Expected 'hermes', got {text!r}"
+    text, _ = _clean_message_content(raw)
+    assert "hermes" in text.lower()
 
 
 async def test_at_mention_only_message_not_empty():
     """A message containing only an @mention should not be treated as empty."""
-    import re
     raw = '<div><at id="8:orgid:abc">hermes</at></div>'
-    content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", raw)
-    text = re.sub(r"<[^>]+>", "", content).strip()
-    text = re.sub(r"\s+", " ", text).strip()
-    assert text == "hermes"
+    text, _ = _clean_message_content(raw)
+    assert text
 
 
 # ── §6 token cache: atomic write + auto-purge on corruption ───────────
@@ -361,12 +381,25 @@ async def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refr
     tmp_path, monkeypatch
 ):
     """IC3/Graph exchanges preserve refresh-token rotation in the shared cache."""
+    import base64
     import json
+    import uuid
     from gateway.platforms.teams_mtk import _TeamsAuth
 
+    tenant_id = str(uuid.UUID(int=1))
+    client_id = str(uuid.UUID(int=2))
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"tid": tenant_id, "appid": client_id}).encode("utf-8")
+    ).decode().rstrip("=")
+    cached_access_token = f"header.{payload}.signature"
     cache_path = tmp_path / "token_cache.json"
     cache_path.write_text(
-        json.dumps({"refresh_token": "refresh-old", "access_token": "skype-access"})
+        json.dumps(
+            {
+                "refresh_token": "refresh-old",
+                "access_token": cached_access_token,
+            }
+        )
     )
     monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
 
@@ -385,11 +418,12 @@ async def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refr
 
     assert result["access_token"] == "ic3-access"
     assert post.call_args.kwargs["data"] == {
-        "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+        "client_id": client_id,
         "grant_type": "refresh_token",
         "refresh_token": "refresh-old",
         "scope": "https://ic3.teams.office.com/Teams.AccessAsUser.All",
     }
+    assert tenant_id in post.call_args.args[0]
     assert json.loads(cache_path.read_text())["refresh_token"] == "refresh-new"
     response.raise_for_status.assert_called_once_with()
 

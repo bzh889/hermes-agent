@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 import pytest
 
-from gateway.platforms.teams_mtk import TeamsMTKAdapter, _POLL_INTERVAL
+from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
 
 def _make_adapter():
@@ -38,6 +38,7 @@ class TestGetActivity:
         mock_items = [{"id": "s1", "type": "Space"}]
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKActivity") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             mock_svc = MagicMock()
             mock_svc.list_spaces.return_value = mock_items
@@ -85,6 +86,7 @@ class TestForwardMessage:
         adapter = _make_adapter()
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             adapter._auth._skype_token = "fake"
             mock_svc = MagicMock()
@@ -101,6 +103,7 @@ class TestForwardMessage:
         adapter = _make_adapter()
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             adapter._auth._skype_token = "fake"
             mock_svc = MagicMock()

@@ -4782,6 +4782,39 @@ _PLATFORMS = [
             },
         ],
     },
+    {
+        "key": "teams_mtk",
+        "label": "TeamsMTK",
+        "emoji": "💼",
+        # The token itself is managed by the configured Teams authentication helper;
+        # configured conversation IDs are the local readiness signal.
+        "token_var": "MTK_TEAMS_CONVERSATION_ID",
+        "setup_instructions": [
+            "1. Authenticate with the configured Teams helper to create its token cache",
+            "2. Enter one or more Teams conversation IDs below (comma-separated)",
+            "3. Optionally list group conversations that do not require @mentions",
+        ],
+        "vars": [
+            {
+                "name": "MTK_TEAMS_CONVERSATION_ID",
+                "config_field": "conversation_ids",
+                "config_list": True,
+                "redact_display": True,
+                "prompt": "Conversation IDs (comma-separated)",
+                "password": False,
+                "help": "Teams conversations Hermes should monitor and reply in.",
+            },
+            {
+                "name": "MTK_TEAMS_NO_MENTION_CONVS",
+                "config_field": "no_mention_conversations",
+                "config_list": True,
+                "redact_display": True,
+                "prompt": "Conversation IDs not requiring @mention (optional)",
+                "password": False,
+                "help": "Comma-separated group conversation IDs; leave empty for none.",
+            },
+        ],
+    },
 ]
 
 
@@ -4978,6 +5011,22 @@ def _setup_standard_platform(platform: dict):
     label = platform["label"]
     token_var = platform["token_var"]
 
+    def _existing_value(var: dict) -> str:
+        config_field = var.get("config_field")
+        if not config_field:
+            return get_env_value(var["name"]) or ""
+        raw_config = read_raw_config()
+        platforms_config = raw_config.get("platforms", {})
+        if not isinstance(platforms_config, dict):
+            return ""
+        platform_config = platforms_config.get(platform["key"], {})
+        if not isinstance(platform_config, dict):
+            return ""
+        value = platform_config.get(config_field)
+        if isinstance(value, list):
+            return ",".join(str(item) for item in value if str(item).strip())
+        return str(value or "")
+
     print()
     print(color(f"  ─── {emoji} {label} Setup ───", Colors.CYAN))
 
@@ -4988,7 +5037,11 @@ def _setup_standard_platform(platform: dict):
         for line in instructions:
             print_info(f"  {line}")
 
-    existing_token = get_env_value(token_var)
+    token_definition = next(
+        (var for var in platform["vars"] if var["name"] == token_var),
+        {"name": token_var},
+    )
+    existing_token = _existing_value(token_definition)
     if existing_token:
         print()
         print_success(f"{label} is already configured.")
@@ -5029,9 +5082,10 @@ def _setup_standard_platform(platform: dict):
     for var in platform["vars"]:
         print()
         print_info(f"  {var['help']}")
-        existing = get_env_value(var["name"])
+        existing = _existing_value(var)
         if existing and var["name"] != token_var:
-            print_info(f"  Current: {existing}")
+            current = "configured" if var.get("redact_display") else existing
+            print_info(f"  Current: {current}")
 
         if auto_token_saved and var["name"] == token_var:
             print_info("  Token saved by automatic setup.")
@@ -5126,8 +5180,25 @@ def _setup_standard_platform(platform: dict):
 
         value = prompt(f"  {var['prompt']}", password=var.get("password", False))
         if value:
-            save_env_value(var["name"], value)
-            print_success(f"  Saved {var['name']}")
+            config_field = var.get("config_field")
+            if config_field:
+                stored_value = value
+                if var.get("config_list"):
+                    stored_value = [
+                        item.strip() for item in value.split(",") if item.strip()
+                    ]
+                write_platform_config_field(
+                    platform["key"], config_field, stored_value, raw=True
+                )
+                write_platform_config_field(
+                    platform["key"], "enabled", True, raw=True
+                )
+                print_success(
+                    f"  Saved platforms.{platform['key']}.{config_field}"
+                )
+            else:
+                save_env_value(var["name"], value)
+                print_success(f"  Saved {var['name']}")
         elif var["name"] == token_var:
             print_warning(f"  Skipped — {label} won't work without this.")
             return

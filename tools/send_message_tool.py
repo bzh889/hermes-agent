@@ -760,6 +760,13 @@ async def _send_via_adapter(
     try:
         from gateway.platform_registry import platform_registry
         entry = platform_registry.get(platform_name)
+        if entry is None and platform_name == "teams_mtk":
+            # TeamsMTK is a built-in adapter rather than a bundled platform
+            # plugin, so registry discovery has no deferred loader for it.
+            # Import only on this cold standalone path; the module registers
+            # its PlatformEntry as an import side effect.
+            from gateway.platforms import teams_mtk as _teams_mtk  # noqa: F401
+            entry = platform_registry.get(platform_name)
     except Exception:
         entry = None
 

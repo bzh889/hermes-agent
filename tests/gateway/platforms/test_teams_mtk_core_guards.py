@@ -1,13 +1,18 @@
 """Unit tests for TeamsMTKAdapter core guard features.
 
-Covers: C-2 echo guard (HTML fingerprint), C-5 short-msg gating,
+Covers: C-2 echo ownership, C-5 short-msg gating,
 control command bypass, PLATFORM_HINTS injection, and poll adaptive logic.
 """
+
+import ast
+import asyncio
+import inspect
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from gateway.platforms.teams_mtk import TeamsMTKAdapter
+import gateway.platforms.teams_mtk as teams_mtk_module
+from gateway.platforms.teams_mtk import TeamsMTKAdapter, _log_error, _log_ref
 
 
 def _make_adapter():
@@ -18,42 +23,125 @@ def _make_adapter():
     return adapter
 
 
-# ── C-2: HTML fingerprint echo guard (4th line) ─────────────────────────
+def test_http_calls_never_disable_tls_verification():
+    """HTTP and WebSocket clients must keep certificate validation enabled."""
+    source = inspect.getsource(teams_mtk_module)
+    assert "verify=False" not in source
+    assert "verify_ssl=False" not in source
+    assert "ssl=False" not in source
+    assert "CERT_NONE" not in source
+    assert "check_hostname = False" not in source
+    assert "disable_warnings" not in source
+    assert "_sdk_download, url, _sk, _at, False" not in source
 
-class TestHTMLFingerprintEchoGuard:
-    def test_own_html_fingerprint_detected(self):
-        """Messages with our HTML blockquote fingerprint are detected as own."""
-        html = ('<div style="border-left:#6264A7 3px solid">'
-                '<b>🤖 Hermes</b></div><p>response</p>')
-        assert 'border-left:#6264A7' in html
-        assert '<b>🤖 Hermes</b>' in html
 
-    def test_fingerprint_not_in_normal_message(self):
-        html = '<p>Hello world</p>'
-        assert 'border-left:#6264A7' not in html
-        assert '<b>🤖 Hermes</b>' not in html
+def test_log_refs_are_deterministic_and_non_reversible():
+    raw = "sensitive-routing-id"
+    ref = _log_ref(raw)
+
+    assert ref == _log_ref(raw)
+    assert ref.startswith("sha256:")
+    assert raw not in ref
+
+
+def test_log_error_drops_exception_message_but_keeps_status():
+    error = RuntimeError("GET https://secret.example/path?token=super-secret")
+    error.status_code = 401
+
+    safe = _log_error(error)
+
+    assert safe == "RuntimeError status=401"
+    assert "secret" not in safe
+    assert "http" not in safe
+
+
+def test_logger_calls_never_emit_exception_text_or_tracebacks():
+    source = inspect.getsource(teams_mtk_module)
+    tree = ast.parse(source)
+    exception_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler) and isinstance(node.name, str)
+    }
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+        ):
+            continue
+        direct_exception_args = []
+        for arg in node.args:
+            is_sanitized = (
+                isinstance(arg, ast.Call)
+                and isinstance(arg.func, ast.Name)
+                and arg.func.id == "_log_error"
+            )
+            if is_sanitized:
+                continue
+            direct_exception_args.extend(
+                child.id
+                for child in ast.walk(arg)
+                if isinstance(child, ast.Name) and child.id in exception_names
+            )
+        assert not direct_exception_args, (node.lineno, direct_exception_args)
+        assert not any(
+            keyword.arg == "exc_info"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        ), node.lineno
+
+
+def test_source_does_not_log_message_text_or_raw_routing_ids():
+    source = inspect.getsource(teams_mtk_module)
+
+    assert "text[:60]" not in source
+    assert "url=%.60s" not in source
+    assert "chat_id[:30]" not in source
+    assert "conv_id[:30]" not in source
 
 
 # ── C-5: Short-message gating ──────────────────────────────────────────
 
 class TestShortMessageGating:
-    @pytest.mark.parametrize("text,should_ignore", [
-        ("ok", True),        # ≤2, no punct, no mention
-        ("好", True),        # 1 char, no punct
-        ("嗯", True),        # 1 char
-        ("嗨？", False),      # has ？
-        ("what?", False),     # has ?
-        ("!", False),        # has !
-        ("@hermes", False),  # has @
-        ("hello there", False),  # >2 chars
-        ("OK!", False),      # has !
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text,short_message_ignore,should_dispatch", [
+        ("好", True, False),
+        ("嗯", True, False),
+        ("?", True, True),
+        ("！", True, True),
+        ("好了啊", True, True),
+        ("好", False, True),
+        ("@hermes 好", True, True),
     ])
-    def test_short_msg_gating(self, text, should_ignore):
-        has_punct = any(c in text for c in "?？！!")
-        has_mention = "@" in text
-        is_short = len(text) <= 2
-        result = is_short and not has_punct and not has_mention
-        assert result == should_ignore
+    async def test_short_message_policy_dispatches_through_adapter(
+        self, text, short_message_ignore, should_dispatch,
+    ):
+        adapter = _make_adapter()
+        conv_id = "19:group@thread.v2"
+        adapter._last_message_ids[conv_id] = "0"
+        adapter._group_config = MagicMock(return_value={
+            "require_mention": False,
+            "short_message_ignore": short_message_ignore,
+        })
+        message = {
+            "id": "1",
+            "messagetype": "Text",
+            "content": text,
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Test User",
+            "from": "8:orgid:test-user",
+        }
+
+        with patch.object(adapter, "handle_message", new_callable=AsyncMock) as handle:
+            await adapter._process_new_messages(conv_id, [message])
+
+        assert handle.await_count == int(should_dispatch)
+        assert adapter._last_message_ids[conv_id] == "1"
 
 
 # ── Control command bypass ─────────────────────────────────────────────
@@ -114,11 +202,141 @@ class TestPlatformHintsInjection:
 # ── Poll adaptive logic ────────────────────────────────────────────────
 
 class TestPollAdaptiveLogic:
-    def test_adaptive_thresholds(self):
-        """Verify the threshold constants are reasonable."""
-        # 5 ticks → 15s, 20 ticks → 30s — these are just sanity checks
-        assert 5 * 3 == 15  # 5 ticks * 3s = 15s base
-        assert 20 >= 5  # 20-tick threshold is higher than 5-tick
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "health_sequence, expected_intervals",
+        [
+            ([True] * 5, [2, 2, 2, 2, 15]),
+            ([True] * 20, [2, 2, 2, 2] + [15] * 15 + [30]),
+            ([True] * 5 + [False], [2, 2, 2, 2, 15, 2]),
+        ],
+    )
+    async def test_poll_loop_adapts_to_websocket_health(
+        self,
+        health_sequence,
+        expected_intervals,
+    ):
+        """Drive the real loop and assert its observable sleep cadence."""
+        adapter = _make_adapter()
+        adapter._conv_ids = []
+        adapter._poll_interval = 2
+        adapter._running = True
+        adapter._ws_listener = MagicMock()
+        adapter._ws_listener.is_healthy.side_effect = health_sequence
+        intervals = []
+
+        async def record_sleep(interval):
+            intervals.append(interval)
+            if len(intervals) == len(health_sequence):
+                adapter._running = False
+
+        with patch(
+            "gateway.platforms.teams_mtk.asyncio.sleep",
+            side_effect=record_sleep,
+        ):
+            await adapter._poll_loop()
+
+        assert intervals == expected_intervals
+
+
+# ── Model picker authorization ─────────────────────────────────────────
+
+class TestModelPickerAuthorization:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sender_id, should_select",
+        [("picker-owner", True), ("other-member", False)],
+    )
+    async def test_group_picker_accepts_only_the_authorized_user(
+        self,
+        sender_id,
+        should_select,
+    ):
+        adapter = _make_adapter()
+        conv_id = "19:group@thread.v2"
+        adapter._last_message_ids[conv_id] = "0"
+        adapter._group_config = MagicMock(return_value={"require_mention": True})
+        adapter._model_picker_states[conv_id] = {
+            "step": "provider",
+            "prov_entries": [("openai", "OpenAI", 1, True)],
+            "allowed_user_id": "picker-owner",
+        }
+        adapter._send_model_sub_picker = AsyncMock()
+        adapter.handle_message = AsyncMock()
+        message = {
+            "id": "1",
+            "messagetype": "Text",
+            "content": "@hermes 1",
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Member",
+            "from": f"8:orgid:{sender_id}",
+        }
+
+        await adapter._process_new_messages(conv_id, [message])
+
+        assert adapter._send_model_sub_picker.await_count == int(should_select)
+        assert adapter.handle_message.await_count == int(not should_select)
+
+
+# ── Poll/WS cursor serialization ───────────────────────────────────────
+
+class TestMessageCursorSerialization:
+    @staticmethod
+    def _message(message_id, content):
+        return {
+            "id": message_id,
+            "messagetype": "Text",
+            "content": content,
+            "properties": {},
+            "_raw_properties": {},
+            "imdisplayname": "Member",
+            "from": "8:orgid:member",
+        }
+
+    @pytest.mark.asyncio
+    async def test_numeric_ids_are_processed_oldest_first_without_cursor_regression(self):
+        adapter = _make_adapter()
+        adapter._last_message_ids["conv1"] = "8"
+        received = []
+
+        async def capture(event):
+            received.append(event.text)
+
+        adapter.handle_message = AsyncMock(side_effect=capture)
+        messages = [
+            self._message("10", "ten"),
+            self._message("9", "nine"),
+        ]
+
+        await adapter._process_new_messages("conv1", messages)
+        await adapter._process_new_messages("conv1", messages)
+
+        assert received == ["nine", "ten"]
+        assert adapter._last_message_ids["conv1"] == "10"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ws_and_poll_fetches_dispatch_once(self):
+        adapter = _make_adapter()
+        adapter._last_message_ids["conv1"] = "8"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def block_first_dispatch(event):
+            entered.set()
+            await release.wait()
+
+        adapter.handle_message = AsyncMock(side_effect=block_first_dispatch)
+        message = [self._message("9", "once")]
+
+        first = asyncio.create_task(adapter._process_new_messages("conv1", message))
+        await entered.wait()
+        second = asyncio.create_task(adapter._process_new_messages("conv1", message))
+        release.set()
+        await asyncio.gather(first, second)
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter._last_message_ids["conv1"] == "9"
 
 
 # ── Delete-only-own guard ──────────────────────────────────────────────
@@ -173,6 +391,7 @@ class TestForwardWhitelistGuard:
         adapter = _make_adapter()
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             adapter._auth.skype_token = MagicMock(return_value="tok")
             mock_svc = MagicMock()
@@ -187,6 +406,7 @@ class TestForwardWhitelistGuard:
         adapter = _make_adapter()
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             adapter._auth.skype_token = MagicMock(return_value="tok")
             mock_svc = MagicMock()

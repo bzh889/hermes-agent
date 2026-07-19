@@ -8,7 +8,6 @@ not just the intended group. This adds a config-driven per-conv_id whitelist
 (gateway.teams_mtk.groups in config.yaml) that authorizes any sender in a
 listed group conversation, independent of the individual allowlist.
 
-See openspec/changes/teams-mtk-group-whitelist/ for the design rationale.
 """
 
 from unittest.mock import patch

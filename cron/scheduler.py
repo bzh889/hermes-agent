@@ -717,6 +717,31 @@ def _resolve_home_env_var(platform_name: str) -> str:
 
 def _get_home_target_chat_id(platform_name: str) -> str:
     """Return the configured home target chat/room ID for a delivery platform."""
+    if platform_name.lower() == "teams_mtk":
+        try:
+            from gateway.config import Platform, load_gateway_config
+
+            platform_config = load_gateway_config().platforms.get(
+                Platform.TEAMS_MTK
+            )
+            configured = (
+                platform_config.extra.get("conversation_ids")
+                or platform_config.extra.get("conversation_id")
+                if platform_config is not None
+                else None
+            )
+            if isinstance(configured, str):
+                configured = configured.split(",")
+            if isinstance(configured, (list, tuple, set)):
+                first = next(
+                    (str(item).strip() for item in configured if str(item).strip()),
+                    "",
+                )
+                if first:
+                    return first
+        except Exception as exc:
+            logger.debug("TeamsMTK cron home config lookup failed: %s", exc)
+
     env_var = _resolve_home_env_var(platform_name)
     if not env_var:
         return ""
@@ -725,6 +750,11 @@ def _get_home_target_chat_id(platform_name: str) -> str:
         legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
         if legacy:
             value = os.getenv(legacy, "")
+    if platform_name.lower() == "teams_mtk":
+        return next(
+            (item.strip() for item in value.split(",") if item.strip()),
+            "",
+        )
     return value
 
 

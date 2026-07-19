@@ -16,6 +16,39 @@ from gateway.platforms.base import MessageEvent, MessageType
 pytestmark = pytest.mark.asyncio
 
 
+class _ChunkedBody:
+    def __init__(self, *chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, _size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _aiohttp_response(*, status=200, body=b"content", headers=None):
+    response = AsyncMock()
+    response.status = status
+    response.headers = headers or {}
+    response.content = _ChunkedBody(body)
+
+    response_context = AsyncMock()
+    response_context.__aenter__ = AsyncMock(return_value=response)
+    response_context.__aexit__ = AsyncMock(return_value=False)
+    return response, response_context
+
+
+def _aiohttp_module(*response_contexts):
+    session = AsyncMock()
+    session.get = MagicMock(side_effect=response_contexts)
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+
+    aiohttp = MagicMock()
+    aiohttp.ClientSession = MagicMock(return_value=session)
+    aiohttp.ClientTimeout = MagicMock(return_value=object())
+    return aiohttp, session
+
+
 def _make_adapter():
     """Build a TeamsMTKAdapter without touching the real Teams token cache."""
     return TeamsMTKAdapter(config=None)
@@ -29,11 +62,12 @@ def _make_adapter():
 async def test_download_attachment_image():
     """_download_attachment for image: aiohttp get → cache_image_from_bytes."""
     adapter = _make_adapter()
-    fake_bytes = b"\x89PNG\r\n\x1a\n"
+    fake_bytes = bytes.fromhex("89504e470d0a1a0a")
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
-    mock_resp.read = AsyncMock(return_value=fake_bytes)
+    mock_resp.headers = {}
+    mock_resp.content = _ChunkedBody(fake_bytes)
 
     mock_get_ctx = AsyncMock()
     mock_get_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -74,7 +108,8 @@ async def test_download_attachment_file():
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
-    mock_resp.read = AsyncMock(return_value=fake_bytes)
+    mock_resp.headers = {}
+    mock_resp.content = _ChunkedBody(fake_bytes)
 
     mock_get_ctx = AsyncMock()
     mock_get_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -140,7 +175,8 @@ async def test_download_attachment_cache_error_returns_none():
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
-    mock_resp.read = AsyncMock(return_value=fake_bytes)
+    mock_resp.headers = {}
+    mock_resp.content = _ChunkedBody(fake_bytes)
 
     mock_get_ctx = AsyncMock()
     mock_get_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -190,7 +226,8 @@ async def test_download_attachment_fallback_uses_domain_auth(url, expected_heade
     adapter = _make_adapter()
     response = AsyncMock()
     response.status = 200
-    response.read = AsyncMock(return_value=b"content")
+    response.headers = {}
+    response.content = _ChunkedBody(b"content")
 
     response_context = AsyncMock()
     response_context.__aenter__ = AsyncMock(return_value=response)
@@ -205,15 +242,144 @@ async def test_download_attachment_fallback_uses_domain_auth(url, expected_heade
     aiohttp.ClientSession = MagicMock(return_value=session)
     aiohttp.ClientTimeout = MagicMock(return_value=object())
 
-    with patch.dict("sys.modules", {"aiohttp": aiohttp}), \
-         patch("gateway.platforms.teams_mtk._sdk_download", None), \
-         patch("gateway.platforms.base.cache_document_from_bytes", return_value="cached"), \
-         patch.object(adapter._auth, "skype_token", return_value="skype-token"), \
-         patch.object(adapter._auth, "access_token", return_value="access-token"):
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch("tools.url_safety.async_is_safe_url", return_value=True),
+        patch("gateway.platforms.base.cache_document_from_bytes", return_value="cached"),
+        patch.object(adapter._auth, "skype_token", return_value="skype-token"),
+        patch.object(adapter._auth, "access_token", return_value="access-token"),
+    ):
         result = await adapter._download_attachment(url, "file", "file.txt")
 
     assert result == "cached"
-    aiohttp.ClientSession.assert_called_once_with(headers=expected_headers)
+    aiohttp.ClientSession.assert_called_once_with()
+    assert session.get.call_args.kwargs["headers"] == expected_headers
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://tenant.sharepoint.com/file.txt",
+        "https://127.0.0.1/file.txt",
+        "https://169.254.169.254/latest/meta-data",
+    ],
+)
+async def test_download_attachment_rejects_unsafe_url_before_reading_tokens(url):
+    adapter = _make_adapter()
+    aiohttp, _session = _aiohttp_module()
+
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch.object(adapter._auth, "skype_token") as skype_token,
+        patch.object(adapter._auth, "access_token") as access_token,
+    ):
+        result = await adapter._download_attachment(url, "file", "file.txt")
+
+    assert result is None
+    skype_token.assert_not_called()
+    access_token.assert_not_called()
+    aiohttp.ClientSession.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://public.example/file.txt",
+        "https://teams.microsoft.com.attacker.example/file.txt",
+        "https://sharepoint.com.attacker.example/file.txt",
+    ],
+)
+async def test_download_attachment_unknown_or_lookalike_host_sends_no_credentials(url):
+    adapter = _make_adapter()
+    _response, response_context = _aiohttp_response()
+    aiohttp, session = _aiohttp_module(response_context)
+
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch("tools.url_safety.async_is_safe_url", return_value=True),
+        patch("gateway.platforms.base.cache_document_from_bytes", return_value="cached"),
+        patch.object(adapter._auth, "skype_token") as skype_token,
+        patch.object(adapter._auth, "access_token") as access_token,
+    ):
+        result = await adapter._download_attachment(url, "file", "file.txt")
+
+    assert result == "cached"
+    skype_token.assert_not_called()
+    access_token.assert_not_called()
+    assert session.get.call_args.kwargs["headers"] == {}
+
+
+async def test_download_attachment_redirect_revalidates_and_drops_credentials():
+    adapter = _make_adapter()
+    _redirect, redirect_context = _aiohttp_response(
+        status=302,
+        body=b"",
+        headers={"Location": "https://public.example/download.txt"},
+    )
+    _final, final_context = _aiohttp_response(body=b"safe")
+    aiohttp, session = _aiohttp_module(redirect_context, final_context)
+
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch("tools.url_safety.async_is_safe_url", return_value=True),
+        patch("gateway.platforms.base.cache_document_from_bytes", return_value="cached"),
+        patch.object(adapter._auth, "access_token", return_value="access-token"),
+    ):
+        result = await adapter._download_attachment(
+            "https://tenant.sharepoint.com/file.txt", "file", "file.txt"
+        )
+
+    assert result == "cached"
+    assert session.get.call_count == 2
+    first, second = session.get.call_args_list
+    assert first.kwargs["headers"] == {"Authorization": "Bearer access-token"}
+    assert first.kwargs["allow_redirects"] is False
+    assert second.args[0] == "https://public.example/download.txt"
+    assert second.kwargs["headers"] == {}
+
+
+async def test_download_attachment_blocks_unsafe_redirect_before_request():
+    adapter = _make_adapter()
+    _redirect, redirect_context = _aiohttp_response(
+        status=302,
+        body=b"",
+        headers={"Location": "https://169.254.169.254/latest/meta-data"},
+    )
+    aiohttp, session = _aiohttp_module(redirect_context)
+
+    async def safe_initial_only(candidate):
+        return candidate.startswith("https://tenant.sharepoint.com/")
+
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch("tools.url_safety.async_is_safe_url", side_effect=safe_initial_only),
+        patch.object(adapter._auth, "access_token", return_value="access-token"),
+    ):
+        result = await adapter._download_attachment(
+            "https://tenant.sharepoint.com/file.txt", "file", "file.txt"
+        )
+
+    assert result is None
+    assert session.get.call_count == 1
+
+
+async def test_download_attachment_rejects_oversized_stream_before_cache():
+    adapter = _make_adapter()
+    _response, response_context = _aiohttp_response(body=b"1234")
+    aiohttp, _session = _aiohttp_module(response_context)
+
+    with (
+        patch.dict("sys.modules", {"aiohttp": aiohttp}),
+        patch("tools.url_safety.async_is_safe_url", return_value=True),
+        patch("gateway.platforms.base.get_inbound_media_max_bytes", return_value=3),
+        patch("gateway.platforms.base.cache_document_from_bytes") as cache,
+    ):
+        result = await adapter._download_attachment(
+            "https://public.example/file.txt", "file", "file.txt"
+        )
+
+    assert result is None
+    cache.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

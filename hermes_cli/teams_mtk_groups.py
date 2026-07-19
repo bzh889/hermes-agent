@@ -10,13 +10,13 @@ Usage:
                                           [--user OID --block-toolset NAME]...
     hermes teams-mtk group remove <conv_id>
 
-Writes to gateway.teams_mtk.groups in ~/.hermes/config.yaml. Changes to a
+Writes to gateway.teams_mtk.groups in the active profile's config.yaml. Changes to a
 running gateway require a restart to take effect (gateway/platforms/teams_mtk.py
 and gateway/authz_mixin.py read this config fresh on each poll tick, but the
 adapter's own long-lived state — e.g. TEAMS_MTK_REQUIRE_MENTION-derived
 defaults — is only evaluated at process start).
 
-See openspec/changes/teams-mtk-group-whitelist/ for the design rationale.
+See openspec/changes/teams-mtk-hermes-native-parity/ for the design rationale.
 """
 
 RESTART_NOTICE = "  Note: restart the gateway for this change to take effect.\n"

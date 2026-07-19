@@ -3,6 +3,7 @@
 Covers _VIPBuffer pure logic + adapter wiring.
 """
 
+import asyncio
 import time
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -165,3 +166,38 @@ class TestAdapterVIPWiring:
         buf = adapter._vip_buffers.get(conv_id)
         assert buf is not None, f"VIP buffer not created; _vip_config={adapter._vip_config}"
         assert len(buf._messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_timeout_flushes_without_another_poll_or_ws_event(self):
+        adapter = _make_adapter()
+        conv_id = "19:dm@unq"
+        target = "19:target@thread.v2"
+        adapter._last_message_ids[conv_id] = "0"
+        adapter._vip_config = {
+            "enabled": True,
+            "oids": ["vip-oid"],
+            "notify_targets": [target],
+            "buffer_timeout_seconds": 0.01,
+        }
+        adapter._message_handler = lambda *args, **kwargs: None
+        flushed = asyncio.Event()
+
+        async def capture_send(*args, **kwargs):
+            flushed.set()
+
+        adapter.send = AsyncMock(side_effect=capture_send)
+        message = [{
+            "id": "1",
+            "messagetype": "Text",
+            "content": "short fragment",
+            "imdisplayname": "VIP User",
+            "from": "8:orgid:vip-oid",
+            "properties": {},
+        }]
+
+        await adapter._process_new_messages(conv_id, message)
+        await asyncio.wait_for(flushed.wait(), timeout=0.2)
+
+        adapter.send.assert_awaited_once()
+        assert adapter.send.await_args.args[0] == target
+        assert adapter._vip_buffers[conv_id]._messages == []

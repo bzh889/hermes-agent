@@ -1,15 +1,15 @@
 """Unit tests for TeamsMTKAdapter G13-A: read-only contact lookup.
 
-Covers teams-mtk-hermes-native-parity change, G13-A (Phase A — read-only,
-no new OAuth scope, no separate authorization gate by construction):
+Covers read-only directory contact lookup with no new OAuth scope or
+separate authorization gate by construction:
 - list_conversations(): parses the Skype chatSvc /conversations response
 - _find_conv_by_display_name(): case-insensitive match against title/members
 - send_message_tool routing for "teams_mtk:contact:<name>" targets
 
-See openspec/changes/teams-mtk-hermes-native-parity/design.md "G13".
 """
-
+import asyncio
 import json
+import uuid
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -346,3 +346,22 @@ def test_send_message_contact_found_directly_skips_people():
     mock_sub.assert_not_called()
     parsed = json.loads(result)
     assert parsed.get("success") is True
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "19:example@thread.v2",
+        "19:example@unq.gbl.spaces",
+        f"8:orgid:{uuid.UUID(int=0)}",
+        "48:notes",
+    ],
+)
+def test_send_message_parser_accepts_raw_teams_targets(target):
+    from tools.send_message_tool import _parse_target_ref
+
+    chat_id, thread_id, is_explicit = _parse_target_ref("teams_mtk", target)
+
+    assert chat_id == target
+    assert thread_id is None
+    assert is_explicit is True

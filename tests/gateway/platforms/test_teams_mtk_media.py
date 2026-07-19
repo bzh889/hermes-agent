@@ -1,6 +1,6 @@
 """Unit tests for TeamsMTKAdapter G-MEDIA: send_image_file, send_image, send_document.
 
-Covers teams-mtk-hermes-native-parity change:
+Covers TeamsMTK media delivery behavior:
 - send_image_file(): AMS 3-step upload flow (create -> upload -> send)
 - send_image(): remote URL download -> AMS -> inline, or AMS URL direct embed
 - send_document(): OneDrive Graph upload + share link + message
@@ -37,7 +37,7 @@ def _make_adapter():
     adapter = TeamsMTKAdapter(config=None)
     mock_auth = MagicMock(spec=_TeamsAuth)
     mock_auth.skype_token.return_value = "fake_skype_token_123"
-    mock_auth.graph_token.return_value = "fake_graph_token_456"
+    mock_auth.graph_token.return_value = "test-graph-token"
     mock_auth.msg_base = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
     mock_auth._inject_truststore = MagicMock()
     adapter._auth = mock_auth
@@ -76,14 +76,22 @@ class TestGraphToken:
 
     def test_graph_token_uses_refresh_token(self, tmp_path):
         """graph_token() should call the token endpoint with graph scope."""
-        import threading, time
+        import base64
+        import threading
+        import uuid
         from gateway.platforms.teams_mtk import _TeamsAuth
 
+        tenant_id = str(uuid.UUID(int=1))
+        client_id = str(uuid.UUID(int=2))
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"tid": tenant_id, "appid": client_id}).encode("utf-8")
+        ).decode().rstrip("=")
         auth = _TeamsAuth.__new__(_TeamsAuth)
         auth._lock = threading.Lock()
         auth._inject_truststore = MagicMock()
         auth._load = MagicMock(return_value={
             "refresh_token": "rt_123",
+            "access_token": f"header.{payload}.signature",
             "graph_token_saved_at": 0,  # expired → force refresh
             "graph_token_expires_in": 0,
         })
@@ -101,6 +109,8 @@ class TestGraphToken:
             body = mock_post.call_args.kwargs.get("data") or mock_post.call_args[1].get("data", {})
             scope_val = body.get("scope", "") if isinstance(body, dict) else ""
             assert "graph.microsoft.com" in scope_val
+            assert body["client_id"] == client_id
+            assert tenant_id in mock_post.call_args.args[0]
 
     def test_graph_token_caches_result(self, tmp_path):
         """graph_token() should use cached result when still valid."""
@@ -300,7 +310,7 @@ class TestSendDocument:
             url = put_call.args[0] if put_call.args else put_call.kwargs.get("url", "")
             assert "graph.microsoft.com" in url
             headers = put_call.kwargs.get("headers") or put_call[1].get("headers")
-            assert headers["Authorization"] == "Bearer fake_graph_token_456"
+            assert headers["Authorization"] == "Bearer test-graph-token"
 
     def test_document_creates_share_link(self, adapter, doc_file):
         """Verify sharing link creation via Graph createLink."""

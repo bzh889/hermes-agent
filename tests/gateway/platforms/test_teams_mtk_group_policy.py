@@ -1,15 +1,10 @@
 """Unit tests for TeamsMTKAdapter per-group config helpers and keyword filtering.
 
-Covers the new methods added for the per-group whitelist/policy feature:
-_group_config, _group_blocked_toolsets, _group_blocked_keyword_patterns,
-_find_blocked_keyword, and the require_mention resolution order used inside
-_process_new_messages (replicated here as a pure function, following the
-existing test_teams_mtk_footer_picker.py convention of copying logic out of
-the giant async method for isolated testing).
+Covers the production per-group config, policy, keyword, and
+require-mention resolution helpers.
 
-See openspec/changes/teams-mtk-group-whitelist/ for the design rationale.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -177,45 +172,56 @@ def test_find_blocked_keyword_regex_pattern_matches():
     assert adapter._find_blocked_keyword("call 0912345678 now", [r"\d{10}"]) == r"\d{10}"
 
 
-# ---------------------------------------------------------------------------
-# require_mention resolution order (replicated pure logic — see module
-# docstring; mirrors the resolution block inside _process_new_messages)
-# ---------------------------------------------------------------------------
-
-
-def _resolve_require_mention(group_cfg: dict, no_mention_convs: set, conv_id: str, global_default: bool) -> bool:
-    """Pure replica of the resolution order added to _process_new_messages."""
-    cfg_value = group_cfg.get("require_mention")
-    if cfg_value is not None:
-        return bool(cfg_value)
-    if conv_id in no_mention_convs:
-        return False
-    return global_default
-
-
 class TestRequireMentionResolutionOrder:
     def test_group_config_override_wins_over_everything(self):
-        assert _resolve_require_mention(
-            {"require_mention": True}, no_mention_convs={"19:abc@thread.v2"}, conv_id="19:abc@thread.v2", global_default=False
+        adapter = _make_adapter()
+        adapter._no_mention_convs = {"19:abc@thread.v2"}
+        adapter.require_mention = False
+        assert adapter._require_mention_for_conv(
+            "19:abc@thread.v2", {"require_mention": True}
         ) is True
 
     def test_legacy_env_fallback_when_no_group_config(self):
-        assert _resolve_require_mention(
-            {}, no_mention_convs={"19:abc@thread.v2"}, conv_id="19:abc@thread.v2", global_default=True
-        ) is False
+        adapter = _make_adapter()
+        adapter._no_mention_convs = {"19:abc@thread.v2"}
+        adapter.require_mention = True
+        assert adapter._require_mention_for_conv("19:abc@thread.v2", {}) is False
 
     def test_global_default_when_neither_configured(self):
-        assert _resolve_require_mention(
-            {}, no_mention_convs=set(), conv_id="19:abc@thread.v2", global_default=True
-        ) is True
+        adapter = _make_adapter()
+        adapter._no_mention_convs = set()
+        adapter.require_mention = True
+        assert adapter._require_mention_for_conv("19:abc@thread.v2", {}) is True
 
     def test_group_config_false_overrides_legacy_env_true_membership(self):
-        """Even if the conv_id happens to ALSO be in the legacy env list,
-        an explicit group config value of False -> resolves to False either way,
-        but this asserts the group config path is checked first (not OR'd)."""
-        assert _resolve_require_mention(
-            {"require_mention": False}, no_mention_convs=set(), conv_id="19:abc@thread.v2", global_default=True
+        adapter = _make_adapter()
+        adapter._no_mention_convs = set()
+        adapter.require_mention = True
+        assert adapter._require_mention_for_conv(
+            "19:abc@thread.v2", {"require_mention": False}
         ) is False
+
+
+@pytest.mark.asyncio
+async def test_edit_message_applies_outbound_blocked_keyword_policy():
+    adapter = _make_adapter()
+    chat_id = "19:abc@thread.v2"
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    adapter._auth.skype_token.return_value = "token"
+    response = MagicMock(status_code=200, content=b"")
+
+    with (
+        _mock_config({chat_id: {"blocked_keywords": ["secret"]}}),
+        patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False),
+        patch("requests.put", return_value=response) as put,
+    ):
+        result = await adapter.edit_message(chat_id, "msg-1", "contains secret")
+
+    assert result.success is True
+    payload_content = put.call_args.kwargs["json"]["content"]
+    assert adapter._BLOCKED_KEYWORD_NOTICE in payload_content
+    assert "contains secret" not in payload_content
 
 
 if __name__ == "__main__":

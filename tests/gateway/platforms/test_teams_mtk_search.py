@@ -186,25 +186,25 @@ class TestGetSchedule:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "value": [
-                {"availabilityView": "002200", "scheduleId": "alice@co.com"},
+                {"availabilityView": "002200", "scheduleId": "alice@example.com"},
             ]
         }
         mock_resp.raise_for_status = MagicMock()
 
         with patch("requests.post", return_value=mock_resp) as mock_post:
-            result = adapter._get_schedule(["alice@co.com"], date_str="2026-07-14")
+            result = adapter._get_schedule(["alice@example.com"], date_str="2026-07-14")
 
         assert len(result) == 1
         assert result[0]["availabilityView"] == "002200"
         # Verify POST body contains schedules
         call_kwargs = mock_post.call_args
         body = call_kwargs[1]["json"] if "json" in call_kwargs[1] else call_kwargs[0][1]
-        assert "alice@co.com" in body["schedules"]
+        assert "alice@example.com" in body["schedules"]
 
     def test_returns_empty_on_error(self):
         adapter = _make_adapter()
         adapter._auth.graph_token.side_effect = Exception("no token")
-        result = adapter._get_schedule(["alice@co.com"])
+        result = adapter._get_schedule(["alice@example.com"])
         assert result == []
 
 
@@ -217,14 +217,14 @@ class TestFindCommonAvailability:
 
         # _search_users returns 1 match for "Alice"
         with patch.object(adapter, "_search_users", return_value=[
-            {"display_name": "Alice Chen", "email": "alice@co.com", "oid": "abc"},
+            {"display_name": "Alice Example", "email": "alice@example.com", "oid": "abc"},
         ]):
             # _get_schedule returns both-free view (0000 = 4 free slots)
             with patch.object(adapter, "_get_schedule", return_value=[
-                {"availabilityView": "0000", "scheduleId": "alice@co.com"},
-                {"availabilityView": "0000", "scheduleId": "bob@co.com"},
+                {"availabilityView": "0000", "scheduleId": "alice@example.com"},
+                {"availabilityView": "0000", "scheduleId": "bob@example.com"},
             ]):
-                result = adapter._find_common_availability(["Alice", "bob@co.com"], date_str="2026-07-14")
+                result = adapter._find_common_availability(["Alice", "bob@example.com"], date_str="2026-07-14")
 
         assert result["available_slots"] == [{"start": "09:00", "end": "11:00"}]
         assert len(result["resolved_users"]) == 2
@@ -232,8 +232,8 @@ class TestFindCommonAvailability:
     def test_ambiguity_guard(self):
         adapter = _make_adapter()
         with patch.object(adapter, "_search_users", return_value=[
-            {"display_name": "Alice Chen", "email": "alice1@co.com", "oid": "a"},
-            {"display_name": "Alice Wang", "email": "alice2@co.com", "oid": "b"},
+            {"display_name": "Alice Example", "email": "alice1@example.com", "oid": "a"},
+            {"display_name": "Alice Sample", "email": "alice2@example.com", "oid": "b"},
         ]):
             result = adapter._find_common_availability(["Alice"], date_str="2026-07-14")
 
@@ -253,12 +253,12 @@ class TestFindCommonAvailability:
         adapter._auth.graph_token.return_value = "tok"
 
         with patch.object(adapter, "_search_users", return_value=[
-            {"display_name": "A", "email": "a@co.com", "oid": "a"},
+            {"display_name": "A", "email": "a@example.com", "oid": "a"},
         ]):
             with patch.object(adapter, "_get_schedule", return_value=[
-                {"availabilityView": "000", "scheduleId": "a@co.com"},
+                {"availabilityView": "000", "scheduleId": "a@example.com"},
             ]):
-                result = adapter._find_common_availability(["a@co.com"], date_str="2026-07-14")
+                result = adapter._find_common_availability(["a@example.com"], date_str="2026-07-14")
 
         # 3 × 30min free slots (09:00–10:30) should merge into 1 slot
         assert len(result["available_slots"]) == 1

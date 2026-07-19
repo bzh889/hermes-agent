@@ -534,11 +534,11 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.RELAY: lambda cfg: bool(
         cfg.extra.get("relay_url") or cfg.extra.get("url")
     ),
-    # TeamsMTK authenticates via a local skypetoken cache (no client_id/secret
-    # OAuth, no bot token) — the only config-level signal is the conversation
-    # ID being monitored (extra["conversation_id"], set from
-    # MTK_TEAMS_CONVERSATION_ID). See gateway/platforms/teams_mtk.py.
-    Platform.TEAMS_MTK: lambda cfg: bool(cfg.extra.get("conversation_id")),
+    # TeamsMTK authenticates through the local Teams token cache. A monitored
+    # conversation is the only configuration required at this layer.
+    Platform.TEAMS_MTK: lambda cfg: bool(
+        cfg.extra.get("conversation_ids") or cfg.extra.get("conversation_id")
+    ),
 }
 
 
@@ -1034,6 +1034,14 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["reply_in_thread"] = platform_cfg["reply_in_thread"]
                 if "require_mention" in platform_cfg:
                     bridged["require_mention"] = platform_cfg["require_mention"]
+                if plat == Platform.TEAMS_MTK:
+                    for key in (
+                        "conversation_ids",
+                        "no_mention_conversations",
+                        "poll_interval_seconds",
+                    ):
+                        if key in platform_cfg:
+                            bridged[key] = platform_cfg[key]
                 if plat == Platform.TELEGRAM and "allowed_chats" in platform_cfg:
                     bridged["allowed_chats"] = platform_cfg["allowed_chats"]
                 if plat == Platform.TELEGRAM and "group_allowed_chats" in platform_cfg:

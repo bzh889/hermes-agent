@@ -1,33 +1,29 @@
 """Microsoft Teams gateway adapter for MTK internal environment.
 
-Uses the existing teams skill token cache (~/.teams-tokens/token_cache.json)
+Uses the configured Teams authentication provider's token cache
+(~/.teams-tokens/token_cache.json)
 for authentication — no separate bot token needed. Polls a configured
 conversation for new messages.
 
-Environment variables:
-    MTK_TEAMS_CONVERSATION_ID   Conversation ID to monitor (required)
-                                Format: 19:xxx@thread.v2  or  8:orgid:xxx
-                                or 48:notes (self-chat)
-
-    MTK_TEAMS_POLL_INTERVAL     Poll interval in seconds (default: 3)
-
-    TEAMS_MTK_REQUIRE_MENTION   "true" (default) — in groups, only respond
-                                when message contains @hermes. Set "false"
-                                to process all messages.
+Configure ``platforms.teams_mtk`` in config.yaml with ``conversation_ids``,
+``poll_interval_seconds``, and ``require_mention``. Legacy environment
+variables remain supported for backward compatibility.
 
 Setup:
-    1. Run teams skill auth: python ~/.claude/skills/teams/auth_run.py
+    1. Authenticate with the configured Teams authentication helper
     2. hermes setup gateway  → select "Microsoft Teams (MTK)"
     3. Enter your conversation ID
     4. hermes gateway
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import ssl
+import stat
 import time
 import threading
 import uuid
@@ -51,53 +47,165 @@ try:
 except ImportError:
     _strip_teams_html = None  # fallback to regex if SDK not on path
 
-# SDK download_with_auth_url for domain-appropriate attachment downloads
-try:
-    from teams_skype_sdk.api._http import download_with_auth_url as _sdk_download
-except ImportError:
-    _sdk_download = None  # fallback to aiohttp when SDK not on path
-
 # SDK MessagesService for normalized message fetching
 try:
-    from teams_skype_sdk.api._http import HTTPLayer as _SDKHTTPLayer
+    from teams_skype_sdk.api._http import HTTPLayer as _SDKBaseHTTPLayer
     from teams_skype_sdk.api._messages import MessagesService as _SDKMessages
     from teams_skype_sdk.api._files import FilesService as _SDKFiles
     from teams_skype_sdk.api._conversations import ConversationsService as _SDKConvs
     from teams_skype_sdk.api._reactions import ReactionsService as _SDKReactions
-    from teams_skype_sdk.api._constants import VALID_REACTIONS as _VALID_REACTIONS
+    from teams_skype_sdk.api._constants import (
+        REACTION_EMOJI_MAP as _REACTION_EMOJI,
+        VALID_REACTIONS as _VALID_REACTIONS,
+    )
     from teams_skype_sdk.api._activity import ActivityService as _SDKActivity
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
+    _SDKBaseHTTPLayer = None
+    _SDKMessages = None
+    _SDKFiles = None
+    _SDKConvs = None
+    _SDKReactions = None
+    _SDKActivity = None
     _VALID_REACTIONS = {"like", "heart", "laugh", "surprised", "sad", "angry"}
+    _REACTION_EMOJI = {
+        "like": "👍",
+        "heart": "❤️",
+        "laugh": "😄",
+        "surprised": "😮",
+        "sad": "😢",
+        "angry": "😡",
+    }
 
 logger = logging.getLogger(__name__)
 
-# Teams API constants (from teams skill src/config.py)
-_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
-_TENANT = "a7687ede-7a6b-4ef6-bace-642f677fbe31"
-_TOKEN_URL = f"https://login.microsoftonline.com/{_TENANT}/oauth2/v2.0/token"
+# OAuth tenant and client IDs are derived from the authenticated user's cached
+# JWT so organization-specific identifiers are never embedded in source.
 _SKYPE_TOKEN_URL = "https://authsvc.teams.microsoft.com/v1.0/authz"
 # Default MSG endpoint; overridden at runtime by region from Skype token exchange.
 _DEFAULT_MSG_BASE = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
-_POLL_INTERVAL = int(os.getenv("MTK_TEAMS_POLL_INTERVAL", "2"))  # seconds
+
+_ATTACHMENT_REDIRECT_LIMIT = 5
+_ATTACHMENT_SKYPE_AUTH_HOSTS = ("asm.skype.com",)
+_ATTACHMENT_SKYPETOKEN_HOSTS = ("teams.microsoft.com", "skype.com")
+_ATTACHMENT_BEARER_HOSTS = (
+    "sharepoint.com",
+    "sharepoint-df.com",
+    "onedrive.com",
+    "onedrive.live.com",
+    "1drv.ms",
+)
+
+
+def _host_matches_suffix(hostname: str, suffix: str) -> bool:
+    """Match a hostname exactly or at a DNS label boundary."""
+    return hostname == suffix or hostname.endswith(f".{suffix}")
+
+
+def _attachment_auth_kind(hostname: str) -> Optional[str]:
+    """Return the credential type permitted for an attachment hostname."""
+    host = hostname.lower().rstrip(".")
+    if any(_host_matches_suffix(host, suffix) for suffix in _ATTACHMENT_SKYPE_AUTH_HOSTS):
+        return "skype_authorization"
+    if any(_host_matches_suffix(host, suffix) for suffix in _ATTACHMENT_SKYPETOKEN_HOSTS):
+        return "skype_authentication"
+    if any(_host_matches_suffix(host, suffix) for suffix in _ATTACHMENT_BEARER_HOSTS):
+        return "azure_bearer"
+    return None
+
+
+def _message_id_key(value: Any) -> tuple:
+    """Sort Teams OriginalArrivalTime IDs numerically, with a text fallback."""
+    text = str(value or "")
+    if text.isdigit():
+        return 1, int(text)
+    return 0, text
+
+
+def _log_ref(value: Any) -> str:
+    """Return a non-reversible identifier suitable for log correlation."""
+    if value in (None, ""):
+        return "<none>"
+    digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest[:12]}"
+
+
+def _log_error(exc: BaseException) -> str:
+    """Return exception metadata without leaking URLs or response bodies."""
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status", None) or getattr(response, "status_code", None)
+    suffix = f" status={status}" if isinstance(status, int) else ""
+    return f"{type(exc).__name__}{suffix}"
 
 
 def _redact_oid(oid: Optional[str], visible: int = 8) -> str:
-    """G12: Redact AAD Object ID for logging. Keeps first *visible* chars, masks rest.
+    """Return a non-reversible AAD Object ID reference for logging."""
+    del visible  # Retained for compatibility with older callers.
+    return _log_ref(oid)
 
-    Example: ``abc12345-de67-89ab-cdef-0123456789ab`` → ``abc12345****``
-    """
-    if not oid:
-        return "<none>"
-    return oid[:visible] + "****"
+
+def _clean_message_content(content: str) -> tuple[str, List[dict]]:
+    """Normalize Teams HTML and preserve only useful forwarded context."""
+    if _strip_teams_html is not None:
+        return _strip_teams_html(content)
+
+    normalized = content or ""
+    normalized = re.sub(
+        r"<at\s[^>]*>([^<]*)</at>",
+        lambda match: match.group(1) if match.group(1).startswith("@") else f"@{match.group(1)}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    blockquotes = re.findall(
+        r"<blockquote[^>]*>.*?</blockquote>",
+        normalized,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    without_quotes = re.sub(
+        r"<blockquote[^>]*>.*?</blockquote>",
+        "",
+        normalized,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    user_text = re.sub(r"<[^>]+>", "", without_quotes)
+    user_text = re.sub(r"\s+", " ", user_text).strip()
+    if blockquotes and user_text:
+        quote_text = re.sub(r"<[^>]+>", "", blockquotes[0])
+        quote_text = re.sub(r"\s+", " ", quote_text).strip()[:80]
+        if quote_text:
+            user_text = f"{user_text}\n[forwarded message: {quote_text}…]"
+    return user_text, []
 
 
 def check_teams_mtk_requirements() -> bool:
-    """Return True if Teams MTK adapter can start."""
+    """Return True when the external Teams authentication cache exists."""
     token_cache = Path.home() / ".teams-tokens" / "token_cache.json"
-    conv_id = os.getenv("MTK_TEAMS_CONVERSATION_ID", "").strip()
-    return bool(conv_id and token_cache.exists())
+    return token_cache.exists()
+
+
+def _normalize_conversation_ids(value: Any) -> List[str]:
+    """Normalize a scalar or sequence of conversation IDs."""
+    if isinstance(value, str):
+        candidates = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        candidates = value
+    else:
+        candidates = []
+    return [str(item).strip() for item in candidates if str(item).strip()]
+
+
+def _configured_conversation_ids(config: Any = None) -> List[str]:
+    """Resolve config.yaml IDs first, then the legacy environment variable."""
+    extra = getattr(config, "extra", None)
+    if isinstance(extra, dict):
+        configured = extra.get("conversation_ids") or extra.get("conversation_id")
+        normalized = _normalize_conversation_ids(configured)
+        if normalized:
+            return normalized
+    return _normalize_conversation_ids(os.getenv("MTK_TEAMS_CONVERSATION_ID", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -115,18 +223,69 @@ class _TeamsAuth:
     _SKYPE_SCOPE = "https://api.spaces.skype.com/.default offline_access"
     _my_oid: Optional[str] = None
 
+    @staticmethod
+    def _jwt_claim(token: str, claim: str) -> str:
+        """Read one claim from a cached JWT without logging token content."""
+        try:
+            import base64
+
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(payload))
+            value = decoded.get(claim, "")
+            return value if isinstance(value, str) else ""
+        except (IndexError, ValueError, TypeError, json.JSONDecodeError):
+            return ""
+
+    @classmethod
+    def _oauth_uuid_claim(
+        cls,
+        tokens: dict,
+        claims: tuple[str, ...],
+        label: str,
+    ) -> str:
+        value = ""
+        for key in ("access_token", "graph_token"):
+            for claim in claims:
+                value = cls._jwt_claim(tokens.get(key, ""), claim)
+                if value:
+                    break
+            if value:
+                break
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            raise RuntimeError(
+                f"Teams token cache does not contain a valid {label} claim; "
+                "re-authenticate with the Teams authentication helper"
+            ) from None
+
+    @classmethod
+    def _oauth_token_url(cls, tokens: dict) -> str:
+        """Build the tenant-scoped OAuth URL from an existing cached JWT."""
+        tenant_id = cls._oauth_uuid_claim(tokens, ("tid",), "tenant")
+        return f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+
+    @classmethod
+    def _oauth_client_id(cls, tokens: dict) -> str:
+        """Return the OAuth client ID recorded in an existing cached JWT."""
+        return cls._oauth_uuid_claim(
+            tokens,
+            ("appid", "azp"),
+            "client application",
+        )
+
+    def client_id(self) -> str:
+        """Return the cached OAuth client ID without exposing token content."""
+        return self._oauth_client_id(self._load())
+
     def _get_my_oid(self) -> str:
         """Extract current user OID from the access token JWT (matches teams skill)."""
         if self._my_oid:
             return self._my_oid
         try:
-            import base64
             tok = self._load()
-            parts = tok.get("access_token", "").split(".")
-            if len(parts) >= 2:
-                payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                decoded = json.loads(base64.urlsafe_b64decode(payload))
-                self._my_oid = decoded.get("oid", "")
+            self._my_oid = self._jwt_claim(tok.get("access_token", ""), "oid")
         except Exception:
             self._my_oid = ""
         return self._my_oid or ""
@@ -135,6 +294,12 @@ class _TeamsAuth:
         self._lock = threading.Lock()
         self._truststore_injected = False
         self._msg_base: Optional[str] = None  # set from Skype authz region
+        self._msg_base_discovery_attempted = False
+        # Compatibility/injection seam used by SDK-backed call paths.  Normal
+        # production auth leaves this unset and reads the secure token cache;
+        # embedders that already supplied an in-memory Skype token must not be
+        # forced through an unrelated OAuth refresh first.
+        self._skype_token: Optional[str] = None
 
     def _inject_truststore(self):
         """Inject OS cert store via truststore (MTK SSL proxy compatibility)."""
@@ -151,7 +316,7 @@ class _TeamsAuth:
         if not self.TOKEN_CACHE.exists():
             raise RuntimeError(
                 "Teams token cache not found. "
-                "Authenticate first: python ~/.claude/skills/teams/auth_run.py"
+                "Authenticate first with the Teams authentication helper"
             )
         with open(self.TOKEN_CACHE, encoding="utf-8") as f:
             raw = f.read()
@@ -170,7 +335,7 @@ class _TeamsAuth:
                 logger.warning(
                     "TeamsMTK: token cache corrupted and unrecoverable (%s) — "
                     "deleting cache to force re-authentication on next poll",
-                    self.TOKEN_CACHE,
+                    self.TOKEN_CACHE.name,
                 )
                 try:
                     self.TOKEN_CACHE.unlink(missing_ok=True)
@@ -178,16 +343,33 @@ class _TeamsAuth:
                     pass
                 raise RuntimeError(
                     f"Teams token cache was corrupted and has been deleted: "
-                    f"{self.TOKEN_CACHE}. Re-authenticate: python ~/.claude/skills/teams/auth_run.py"
+                    f"{self.TOKEN_CACHE}. Re-authenticate with the Teams authentication helper"
                 )
 
     def _save(self, tokens: dict) -> None:
-        """Atomic write: write to temp file then rename to prevent corruption
-        from concurrent writes or power loss mid-write."""
+        """Atomic, owner-only write of the token cache.
+
+        The cache holds long-lived OAuth access + refresh tokens, so it must
+        never be group/world-readable. We create the temp file atomically at
+        0o600 via ``O_CREAT | O_EXCL`` (no TOCTOU window where it briefly
+        inherits the process umask, commonly 0o644), fsync, then ``replace()``
+        onto the destination — which carries the temp's 0o600 mode with it. A
+        per-pid + random temp name avoids collisions between concurrent writers
+        and stale leftovers from a crashed write. On Windows the mode bits are
+        advisory (ACLs govern access), but O_EXCL + replace still gives an
+        atomic, corruption-safe write.
+        """
+        import secrets as _secrets
+
         self.TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.TOKEN_CACHE.with_suffix(".json.tmp")
+        tmp = self.TOKEN_CACHE.with_suffix(f".json.tmp.{os.getpid()}.{_secrets.token_hex(4)}")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            fd = os.open(
+                str(tmp),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,  # 0o600
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(tokens, f)
                 f.flush()
                 os.fsync(f.fileno())
@@ -205,26 +387,98 @@ class _TeamsAuth:
         expires_in = tokens.get("expires_in", 3600)
         return time.time() > saved_at + expires_in - buffer
 
+    @staticmethod
+    def _normalize_msg_base(value: Any) -> Optional[str]:
+        """Validate and canonicalize a Teams regional MSG endpoint.
+
+        This value is persisted beside bearer credentials. Treat the cache as
+        untrusted input so a modified file cannot redirect Skype credentials to
+        an arbitrary host.
+        """
+        if not isinstance(value, str) or not value.strip():
+            return None
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(value.strip())
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if (
+                parsed.scheme.lower() != "https"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in (None, 443)
+                or not host.endswith(".ng.msg.teams.microsoft.com")
+                or parsed.path.rstrip("/") not in ("", "/v1/users/ME")
+                or parsed.query
+                or parsed.fragment
+            ):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return f"https://{host}/v1/users/ME"
+
+    def _apply_skype_authz(self, tokens: dict, body: dict) -> bool:
+        """Apply Skype authz token + regional endpoint to *tokens*.
+
+        Returns whether the persisted token dictionary changed.
+        """
+        before = (tokens.get("skype_token"), tokens.get("msg_base"))
+        skype_token = (
+            body.get("tokens", {}).get("skypeToken")
+            or body.get("skypeToken")
+            or tokens.get("skype_token", "")
+        )
+        if skype_token:
+            tokens["skype_token"] = skype_token
+
+        chat_service = (body.get("regionGtms") or {}).get("chatService", "")
+        regional_base = self._normalize_msg_base(chat_service)
+        if regional_base:
+            self._msg_base = regional_base
+            tokens["msg_base"] = regional_base
+            logger.info("TeamsMTK: regional chat endpoint discovered")
+        elif chat_service:
+            logger.warning("TeamsMTK: ignored invalid regional chat endpoint")
+
+        return before != (tokens.get("skype_token"), tokens.get("msg_base"))
+
+    def _discover_msg_base(self, tokens: dict) -> None:
+        """Migrate a valid legacy cache by querying Skype authz once."""
+        import requests
+
+        access_token = tokens.get("access_token", "")
+        if not access_token:
+            return
+        response = requests.post(
+            _SKYPE_TOKEN_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={},
+            verify=True,
+            timeout=30,
+        )
+        response.raise_for_status()
+        if self._apply_skype_authz(tokens, response.json()):
+            self._save(tokens)
+
     def _refresh(self, tokens: dict) -> dict:
-        import requests, urllib3
-        urllib3.disable_warnings()
+        import requests
         self._inject_truststore()
         refresh_token = tokens.get("refresh_token", "")
         if not refresh_token:
             raise RuntimeError(
-                "No refresh_token in cache — re-authenticate: "
-                "python ~/.claude/skills/teams/auth_run.py"
+                "No refresh_token in cache — re-authenticate with the "
+                "Teams authentication helper"
             )
 
         resp = requests.post(
-            _TOKEN_URL,
+            self._oauth_token_url(tokens),
             data={
-                "client_id": _CLIENT_ID,
+                "client_id": self._oauth_client_id(tokens),
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
                 "scope": self._SKYPE_SCOPE,
             },
-            verify=False,
+            verify=True,
             timeout=30,
         )
         resp.raise_for_status()
@@ -235,26 +489,15 @@ class _TeamsAuth:
             _SKYPE_TOKEN_URL,
             headers={"Authorization": f"Bearer {new_tok['access_token']}"},
             json={},
-            verify=False,
+            verify=True,
             timeout=30,
         )
         sk_resp.raise_for_status()
         sk_body = sk_resp.json()
 
-        # Skype token may be nested under "tokens" (newer API) or at top level
-        skype_token = (
-            sk_body.get("tokens", {}).get("skypeToken")
-            or sk_body.get("skypeToken")
-            or tokens.get("skype_token", "")
-        )
-
-        # Discover regional chat service URL from authz response
-        chat_svc = (sk_body.get("regionGtms") or {}).get("chatService", "")
-        if chat_svc:
-            # chatService is like "https://apac.ng.msg.teams.microsoft.com"
-            # MSG_BASE needs "/v1/users/ME" appended
-            self._msg_base = chat_svc.rstrip("/") + "/v1/users/ME"
-            logger.info("TeamsMTK: regional chat endpoint: %s", self._msg_base)
+        self._msg_base_discovery_attempted = True
+        self._apply_skype_authz(tokens, sk_body)
+        skype_token = tokens.get("skype_token", "")
 
         tokens.update({
             "access_token": new_tok["access_token"],
@@ -272,12 +515,30 @@ class _TeamsAuth:
         self._inject_truststore()
         with self._lock:
             tok = self._load()
+            cached_base = self._normalize_msg_base(tok.get("msg_base"))
+            if cached_base:
+                self._msg_base = cached_base
+            elif tok.get("msg_base"):
+                logger.warning("TeamsMTK: ignored invalid cached regional endpoint")
             if self._expired(tok):
                 logger.info("TeamsMTK: refreshing tokens...")
                 tok = self._refresh(tok)
+            elif self._msg_base is None and not self._msg_base_discovery_attempted:
+                self._msg_base_discovery_attempted = True
+                try:
+                    self._discover_msg_base(tok)
+                except Exception as exc:
+                    # Preserve the established Amer fallback when authz is
+                    # temporarily unavailable; do not hammer it on every poll.
+                    logger.warning(
+                        "TeamsMTK: regional endpoint discovery failed: %s",
+                        _log_error(exc),
+                    )
             return tok
 
     def skype_token(self) -> str:
+        if self._skype_token:
+            return self._skype_token
         return self.tokens()["skype_token"]
 
     def access_token(self) -> str:
@@ -312,18 +573,18 @@ class _TeamsAuth:
             refresh_token = tok.get("refresh_token", "")
             if not refresh_token:
                 raise RuntimeError(
-                    "No refresh_token in cache — re-authenticate: "
-                    "python ~/.claude/skills/teams/auth_run.py"
+                    "No refresh_token in cache — re-authenticate with the "
+                    "Teams authentication helper"
                 )
             resp = requests.post(
-                _TOKEN_URL,
+                self._oauth_token_url(tok),
                 data={
-                    "client_id": _CLIENT_ID,
+                    "client_id": self._oauth_client_id(tok),
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
                     "scope": self._GRAPH_SCOPE,
                 },
-                verify=False,
+                verify=True,
                 timeout=30,
             )
             resp.raise_for_status()
@@ -351,20 +612,20 @@ class _TeamsAuth:
             refresh_token = tok.get("refresh_token", "")
             if not refresh_token:
                 raise RuntimeError(
-                    "No refresh_token in cache — re-authenticate: "
-                    "python ~/.claude/skills/teams/auth_run.py"
+                    "No refresh_token in cache — re-authenticate with the "
+                    "Teams authentication helper"
                 )
 
             self._inject_truststore()
             response = requests.post(
-                _TOKEN_URL,
+                self._oauth_token_url(tok),
                 data={
-                    "client_id": _CLIENT_ID,
+                    "client_id": self._oauth_client_id(tok),
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
                     "scope": scope,
                 },
-                verify=False,
+                verify=True,
                 timeout=30,
             )
             response.raise_for_status()
@@ -391,7 +652,7 @@ class _TeamsAuth:
             method,
             url,
             headers=headers,
-            verify=False,
+            verify=True,
             timeout=30,
             **kwargs,
         )
@@ -428,6 +689,26 @@ class _SDKAuthAdapter:
         return self._gw.access_token()
 
 
+if _SDK_AVAILABLE:
+    class _SDKHTTPLayer(_SDKBaseHTTPLayer):
+        """SDK transport with gateway-discovered regional MSG routing.
+
+        The SDK currently builds message URLs from its Amer constant. Rewrite
+        only that exact trusted prefix at the transport boundary; payload,
+        retry, TLS, and authentication behavior remain SDK-owned.
+        """
+
+        def _request(self, method: str, url: str, **kwargs):
+            if url == _DEFAULT_MSG_BASE or url.startswith(_DEFAULT_MSG_BASE + "/"):
+                # Hydrates/migrates msg_base before selecting the endpoint.
+                self.auth.get_skype_token()
+                regional_base = self.auth._gw.msg_base
+                url = regional_base + url[len(_DEFAULT_MSG_BASE):]
+            return super()._request(method, url, **kwargs)
+else:
+    _SDKHTTPLayer = None
+
+
 class _SDKGraphAdapter:
     """Minimal Graph API adapter for SDK FilesService.send_file().
 
@@ -436,7 +717,7 @@ class _SDKGraphAdapter:
     delete_onedrive_item.  Delegates to raw Graph HTTP using the
     gateway's graph_token().
     """
-    def __init__(self, gw_auth: _TeamsAuth, verify_ssl: bool = False):
+    def __init__(self, gw_auth: _TeamsAuth, verify_ssl: bool = True):
         self._gw = gw_auth
         self.verify_ssl = verify_ssl
 
@@ -598,8 +879,6 @@ class _TrouterListener:
         """Main loop: connect, listen, reconnect on failure."""
         import websockets
         ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
 
         while self._running:
             try:
@@ -640,7 +919,7 @@ class _TrouterListener:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("TeamsMTK/WS: error (%s), reconnect=%d/%d", e, self._reconnect_count, _WS_MAX_RECONNECT)
+                logger.warning("TeamsMTK/WS: error (%s), reconnect=%d/%d", _log_error(e), self._reconnect_count, _WS_MAX_RECONNECT)
 
             self._connected = False
             self._ws = None
@@ -692,7 +971,7 @@ class _TrouterListener:
                     elif event_name == "trouter.message_loss":
                         logger.debug("TeamsMTK/WS: message_loss notification")
             except Exception as e:
-                logger.debug("TeamsMTK/WS: parse error: %s", e)
+                logger.debug("TeamsMTK/WS: parse error: %s", _log_error(e))
 
     @staticmethod
     def _parse_event(message: str) -> Optional[Dict[str, Any]]:
@@ -727,7 +1006,8 @@ class _TrouterListener:
         """POST to Trouter registration endpoint."""
         import urllib.request, certifi
         epid = uuid.uuid4().hex[:32]
-        url = f"{_TROUTER_URL}?con_num={_CLIENT_ID}_1&epid={epid}"
+        client_id = self._auth.client_id()
+        url = f"{_TROUTER_URL}?con_num={client_id}_1&epid={epid}"
         ctx = ssl.create_default_context(cafile=certifi.where())
         req = urllib.request.Request(url, method="POST")
         req.add_header("Authorization", f"Bearer {ic3_token}")
@@ -748,7 +1028,7 @@ class _TrouterListener:
         params = {
             "v": "v4",
             "tc": json.dumps({"cv": "2024.19.01.3", "ua": "SkypeSpaces", "hr": "", "v": "0.0.0"}),
-            "con_num": f"{_CLIENT_ID}_1",
+            "con_num": f"{self._auth.client_id()}_1",
             **connect_params,
         }
         ccid = trouter_info.get("ccid")
@@ -761,7 +1041,7 @@ class _TrouterListener:
                 "Authorization": f"Bearer {ic3_token}",
                 "Authentication": f"skypetoken={skype_token}",
             },
-            verify=False,
+            verify=True,
             timeout=15,
         )
         r.raise_for_status()
@@ -829,7 +1109,7 @@ class _VIPBuffer:
     _LONG_MSG_THRESHOLD = 100  # chars
 
     def __init__(self, conv_id: str, oids: List[str], notify_targets: List[str],
-                 buffer_timeout_seconds: float = 60.0):
+                 buffer_timeout_seconds: float = 60.0, on_stale=None):
         self.conv_id = conv_id
         self.oids = set(oids)
         self.notify_targets = notify_targets
@@ -837,6 +1117,7 @@ class _VIPBuffer:
         self._messages: List[Dict[str, Any]] = []
         self._first_msg_at: Optional[float] = None
         self._flush_task: Optional[asyncio.Task] = None
+        self._on_stale = on_stale
 
     def is_vip(self, sender_oid: str) -> bool:
         return sender_oid in self.oids
@@ -854,11 +1135,12 @@ class _VIPBuffer:
                 or len(text) >= self._LONG_MSG_THRESHOLD):
             return "immediate"
 
-        # Start/reset stale timeout
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
-        loop = asyncio.get_event_loop()
-        self._flush_task = loop.create_task(self._stale_timeout())
+        # Pure buffers used outside an adapter have no callback and need no
+        # background task. The adapter injects the real flush callback.
+        if self._on_stale is not None:
+            if self._flush_task and not self._flush_task.done():
+                self._flush_task.cancel()
+            self._flush_task = asyncio.create_task(self._stale_timeout())
         return "buffered"
 
     async def _stale_timeout(self) -> None:
@@ -866,6 +1148,14 @@ class _VIPBuffer:
             await asyncio.sleep(self.buffer_timeout)
         except asyncio.CancelledError:
             return
+        if not self._messages or self._on_stale is None:
+            return
+        try:
+            await self._on_stale()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("TeamsMTK: VIP stale flush failed: %s", _log_error(exc))
 
     def should_flush(self) -> bool:
         """Check if the stale timeout has expired."""
@@ -878,10 +1168,18 @@ class _VIPBuffer:
         msgs = self._messages
         self._messages = []
         self._first_msg_at = None
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
+        task = self._flush_task
         self._flush_task = None
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
         return msgs
+
+    def cancel(self) -> None:
+        """Cancel a pending stale timer during adapter shutdown."""
+        task = self._flush_task
+        self._flush_task = None
+        if task and not task.done():
+            task.cancel()
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +1222,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 if _re.search(pattern, text, _re.IGNORECASE):
                     return pattern
             except _re.error as e:
-                logger.warning("TeamsMTK: invalid blocked_keywords pattern %r: %s", pattern, e)
+                logger.warning(
+                    "TeamsMTK: invalid blocked_keywords pattern ref=%s: %s",
+                    _log_ref(pattern),
+                    _log_error(e),
+                )
         return None
 
     # Teams Skype API supports large HTML payloads (100k+ chars in practice).
@@ -941,8 +1243,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         _cfg = config if config is not None else PlatformConfig()
         super().__init__(_cfg, Platform.TEAMS_MTK)
 
-        _raw = os.getenv("MTK_TEAMS_CONVERSATION_ID", "").strip()
-        self._conv_ids: List[str] = [c.strip() for c in _raw.split(",") if c.strip()]
+        _extra = _cfg.extra if isinstance(_cfg.extra, dict) else {}
+        self._conv_ids = _configured_conversation_ids(_cfg)
         self._conv_id: Optional[str] = self._conv_ids[0] if self._conv_ids else None  # back-compat
         self._auth = _TeamsAuth()
         self._poll_task: Optional[asyncio.Task] = None
@@ -959,17 +1261,37 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         # Per-conversation last-seen message id (avoids replay on startup).
         self._last_message_ids: Dict[str, str] = {cid: None for cid in self._conv_ids}
-        # Legacy single-conversation alias (kept so other call sites compile;
-        # the active value now lives in _last_message_ids).
+        # WS and poll can fetch the same conversation concurrently. Serialize
+        # cursor read → dispatch → advance per conversation to prevent duplicates.
+        self._message_process_locks: Dict[str, asyncio.Lock] = {}
+        # Legacy single-conversation alias; the active value now lives in
+        # _last_message_ids.
         self._last_message_id: Optional[str] = None
 
         # Mention gating: default on for groups, off for DMs.
         # A comma-separated list of conv IDs that should be treated as DMs
         # (no @mention required) even though they contain @thread in the ID.
-        _no_mention_raw = os.getenv("MTK_TEAMS_NO_MENTION_CONVS", "").strip()
-        self._no_mention_convs: set = {c.strip() for c in _no_mention_raw.split(",") if c.strip()}
-        _rm = os.getenv("TEAMS_MTK_REQUIRE_MENTION", "true").lower()
-        self.require_mention = _rm in ("true", "1", "yes", "on")
+        _no_mention_value = _extra.get("no_mention_conversations")
+        if _no_mention_value is None:
+            _no_mention_value = os.getenv("MTK_TEAMS_NO_MENTION_CONVS", "")
+        self._no_mention_convs = set(_normalize_conversation_ids(_no_mention_value))
+        _require_mention = _extra.get("require_mention")
+        if _require_mention is None:
+            _require_mention = os.getenv("TEAMS_MTK_REQUIRE_MENTION", "true")
+        if isinstance(_require_mention, str):
+            self.require_mention = _require_mention.strip().lower() in (
+                "true", "1", "yes", "on"
+            )
+        else:
+            self.require_mention = bool(_require_mention)
+
+        _poll_interval = _extra.get("poll_interval_seconds")
+        if _poll_interval is None:
+            _poll_interval = os.getenv("MTK_TEAMS_POLL_INTERVAL", "2")
+        try:
+            self._poll_interval = max(1, int(_poll_interval))
+        except (TypeError, ValueError):
+            self._poll_interval = 2
 
         # Reply throttle: minimum seconds between consecutive sends to the
         # same conversation. 0 = disabled. Read from
@@ -1012,7 +1334,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._vip_config = _vip_cfg
                 logger.info("TeamsMTK: VIP monitor enabled (oids=%s, targets=%s)",
                             [_redact_oid(o) for o in _vip_cfg.get("oids", [])],
-                            _vip_cfg.get("notify_targets", []))
+                            [_log_ref(t) for t in _vip_cfg.get("notify_targets", [])])
         except Exception:
             pass
 
@@ -1065,6 +1387,70 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         entry = groups.get(conv_id, {})
         return entry if isinstance(entry, dict) else {}
 
+    def _require_mention_for_conv(
+        self,
+        conv_id: str,
+        group_cfg: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Resolve per-group config before legacy and global defaults."""
+        if group_cfg is None:
+            group_cfg = self._group_config(conv_id)
+        configured = group_cfg.get("require_mention")
+        if configured is not None:
+            return bool(configured)
+        if conv_id in self._no_mention_convs:
+            return False
+        return self.require_mention
+
+    def _cold_start_seed_id(self, conv_id: str, messages: List[dict]) -> str:
+        """Choose a replay boundary that preserves one unanswered user turn."""
+        ordered = sorted(
+            (msg for msg in messages if msg.get("id")),
+            key=lambda msg: _message_id_key(msg["id"]),
+        )
+        if not ordered:
+            return ""
+        latest_id = str(max(ordered, key=lambda msg: _message_id_key(msg["id"]))["id"])
+
+        is_group = "@thread" in conv_id
+        group_cfg = self._group_config(conv_id) if is_group else {}
+        require_mention = self._require_mention_for_conv(conv_id, group_cfg)
+
+        for index in range(len(ordered) - 1, -1, -1):
+            msg = ordered[index]
+            props = msg.get("properties") or {}
+            raw_props = msg.get("_raw_properties") or {}
+            if isinstance(props, str):
+                try:
+                    props = json.loads(props)
+                except (json.JSONDecodeError, TypeError):
+                    props = {}
+            if isinstance(raw_props, str):
+                try:
+                    raw_props = json.loads(raw_props)
+                except (json.JSONDecodeError, TypeError):
+                    raw_props = {}
+            sender_marker = props.get("hermes_sender") or raw_props.get("hermes_sender")
+            if sender_marker in ("agent", "bot"):
+                return latest_id
+
+            msg_type = msg.get("messagetype", "")
+            if msg_type in ("ThreadActivity/MemberJoined", "ThreadActivity/TopicUpdate"):
+                continue
+            text, _ = _clean_message_content(msg.get("content", "") or "")
+            if not text:
+                continue
+            if is_group and require_mention and self._MENTION_TAG.lower() not in text.lower():
+                continue
+
+            if index > 0:
+                return str(ordered[index - 1]["id"])
+            candidate_id = str(msg["id"])
+            if candidate_id.isdigit():
+                return str(max(int(candidate_id) - 1, 0))
+            return ""
+        return latest_id
+
     def _group_blocked_toolsets(self, conv_id: str, user_id: Optional[str]) -> List[str]:
         """Union of group-level and per-user blocked_toolsets for *conv_id*/*user_id*."""
         group_cfg = self._group_config(conv_id)
@@ -1080,6 +1466,23 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         patterns = self._group_config(conv_id).get("blocked_keywords") or []
         return [p for p in patterns if isinstance(p, str) and p.strip()]
 
+    def _filter_outbound_content(self, chat_id: str, content: str) -> str:
+        """Apply the per-group blocked-keyword policy to outbound content."""
+        if not content or content == self._BLOCKED_KEYWORD_NOTICE:
+            return content
+        hit = self._find_blocked_keyword(
+            content,
+            self._group_blocked_keyword_patterns(chat_id),
+        )
+        if not hit:
+            return content
+        logger.warning(
+            "TeamsMTK: blocked outbound reply in conv=%s (pattern ref=%s)",
+            _log_ref(chat_id),
+            _log_ref(hit),
+        )
+        return self._BLOCKED_KEYWORD_NOTICE
+
     # ---- BasePlatformAdapter required overrides ----
 
     async def connect(self, is_reconnect: bool = False) -> bool:
@@ -1091,18 +1494,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # Validate token on startup
             self._auth.skype_token()
         except Exception as e:
-            logger.error("TeamsMTK: auth failed — %s", e)
+            logger.error("TeamsMTK: auth failed — %s", _log_error(e))
             return False
 
-        # Seed last_message_ids per conversation to avoid replaying old messages
+        # Seed each conversation at the latest safe replay boundary. This skips
+        # history while allowing one unanswered user turn to survive a restart.
         for _conv_id in self._conv_ids:
             try:
-                msgs = self._fetch_messages(conv_id=_conv_id, limit=5)
+                msgs = self._fetch_messages(conv_id=_conv_id, limit=20)
                 if msgs:
-                    # After reverse(), msgs are oldest-first; max id = newest.
-                    # Use the max id so we skip all historical messages.
-                    _max_id = max(m.get("id", "") for m in msgs if m.get("id"))
-                    self._last_message_ids[_conv_id] = _max_id
+                    _max_id = str(max(
+                        (m for m in msgs if m.get("id")),
+                        key=lambda m: _message_id_key(m["id"]),
+                    )["id"])
+                    _seed_id = self._cold_start_seed_id(_conv_id, msgs)
+                    self._last_message_ids[_conv_id] = _seed_id
+                    if _seed_id != _max_id:
+                        logger.info(
+                            "TeamsMTK: cold-start catchup armed after msg=%s for conv=%s",
+                            _log_ref(_seed_id),
+                            _log_ref(_conv_id),
+                        )
                     # Extract user OID from first message's "from" URL
                     for m in msgs:
                         from_url = m.get("from", "")
@@ -1110,9 +1522,17 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             self._user_oid = from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
                             logger.info("TeamsMTK: user OID: %s", _redact_oid(self._user_oid))
                             break
-                    logger.debug("TeamsMTK: seeded last_message_id=%s for conv=%s", self._last_message_ids[_conv_id], _conv_id[:30])
+                    logger.debug(
+                        "TeamsMTK: seeded last_message_id=%s for conv=%s",
+                        _log_ref(self._last_message_ids[_conv_id]),
+                        _log_ref(_conv_id),
+                    )
             except Exception as e:
-                logger.warning("TeamsMTK: could not seed last message id for conv=%s: %s", _conv_id[:30], e)
+                logger.warning(
+                    "TeamsMTK: could not seed last message id for conv=%s: %s",
+                    _log_ref(_conv_id),
+                    _log_error(e),
+                )
 
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -1128,8 +1548,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._mark_connected()
         logger.info(
             "TeamsMTK: connected — polling %d conversation(s) every %ds: %s",
-            len(self._conv_ids), _POLL_INTERVAL,
-            ", ".join(c[:40] for c in self._conv_ids),
+            len(self._conv_ids), self._poll_interval,
+            ", ".join(_log_ref(c) for c in self._conv_ids),
         )
         return True
 
@@ -1159,21 +1579,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=True)
 
-        # Outbound keyword blocking: if this group has blocked_keywords and
-        # the agent's composed reply matches one, refuse to deliver the
-        # original text and send the fixed notice instead. Skip the check
-        # for the notice itself (avoids a pointless self-match) and for
-        # metadata-flagged internal sends (skip_footer_extract covers
-        # streaming footer merges, which are never a first-class reply).
-        if content != self._BLOCKED_KEYWORD_NOTICE:
-            _out_patterns = self._group_blocked_keyword_patterns(chat_id)
-            _out_hit = self._find_blocked_keyword(content, _out_patterns)
-            if _out_hit:
-                logger.warning(
-                    "TeamsMTK: blocked outbound reply in conv=%s (matched keyword pattern=%r)",
-                    chat_id[:30], _out_hit,
-                )
-                content = self._BLOCKED_KEYWORD_NOTICE
+        content = self._filter_outbound_content(chat_id, content)
 
         _skip_footer_extract = bool(metadata and metadata.get("skip_footer_extract"))
         try:
@@ -1207,12 +1613,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         )
                         if _edit_res.success:
                             logger.info(
-                                "TeamsMTK: merged trailing footer into msg %s: %s",
-                                self._last_sent_message_id, runtime_footer,
+                                "TeamsMTK: merged trailing footer into msg %s",
+                                _log_ref(self._last_sent_message_id),
                             )
                             return SendResult(success=True)
                     except Exception as _ee:
-                        logger.debug("TeamsMTK: footer edit failed, falling back to send: %s", _ee)
+                        logger.debug("TeamsMTK: footer edit failed, falling back to send: %s", _log_error(_ee))
                 html_content, _ = self._build_html(runtime_footer, _skip_footer_extract=True)
 
             # SDK-3b: delegate to SDK MessagesService.send() when available.
@@ -1220,7 +1626,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if _SDK_AVAILABLE:
                 try:
                     adapter = _SDKAuthAdapter(self._auth)
-                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
                     svc = _SDKMessages(http_layer)
                     result = svc.send(
                         conversation_id=chat_id,
@@ -1243,21 +1649,25 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                     msg_id = m.get("id", "")
                                     break
                             if msg_id:
-                                logger.info("TeamsMTK: recovered msg id=%s from read-back", msg_id)
+                                logger.info(
+                                    "TeamsMTK: recovered msg id=%s from read-back",
+                                    _log_ref(msg_id),
+                                )
                         except Exception:
-                            logger.debug("TeamsMTK: msg-id read-back failed", exc_info=True)
+                            logger.debug("TeamsMTK: msg-id read-back failed")
                     if msg_id:
                         self._remember_sent_message(chat_id, msg_id)
                         if html_content:
                             self._last_sent_message_html = html_content
                     logger.info(
                         "TeamsMTK: sent message id=%s to %s via SDK (html=%d chars)",
-                        msg_id, chat_id, len(html_content) if html_content else 0,
+                        _log_ref(msg_id), _log_ref(chat_id), len(html_content) if html_content else 0,
                     )
                     return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
                 except Exception as _sdk_err:
                     logger.warning(
-                        "TeamsMTK: SDK send failed (%s) — falling back to raw HTTP", _sdk_err,
+                        "TeamsMTK: SDK send failed (%s) — falling back to raw HTTP",
+                        _log_error(_sdk_err),
                     )
 
             # Raw HTTP fallback (SDK unavailable or SDK send failed)
@@ -1283,7 +1693,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             "Authentication": f"skypetoken={skype_token}",
                             "Content-Type": "application/json",
                         },
-                        verify=False,
+                        verify=True,
                         timeout=15,
                     )
                     if resp.status_code == 401 and attempt == 0:
@@ -1292,7 +1702,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     if resp.status_code == 429 and attempt == 0:
                         logger.warning(
                             "TeamsMTK: send hit 429 rate limit for conv=%s — backing off %.1fs then retrying once",
-                            chat_id[:30], self._RATE_LIMIT_BACKOFF_S,
+                            _log_ref(chat_id), self._RATE_LIMIT_BACKOFF_S,
                         )
                         await asyncio.sleep(self._RATE_LIMIT_BACKOFF_S)
                         continue
@@ -1312,11 +1722,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     self._last_sent_message_html = html_content
             logger.info(
                 "TeamsMTK: sent message id=%s to %s via raw HTTP (html=%d chars)",
-                msg_id, chat_id, len(html_content) if html_content else 0,
+                _log_ref(msg_id), _log_ref(chat_id), len(html_content) if html_content else 0,
             )
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
-            logger.error("TeamsMTK: send failed: %s", e)
+            logger.error("TeamsMTK: send failed: %s", _log_error(e))
             return SendResult(success=False, error=str(e))
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -1504,7 +1914,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if remaining > 0:
                 logger.info(
                     "TeamsMTK: throttling conv=%s — %.1fs since last reply, waiting %.1fs",
-                    chat_id[:30], elapsed, remaining,
+                    _log_ref(chat_id), elapsed, remaining,
                 )
                 await asyncio.sleep(remaining)
         # Record the *intended* send time (before the actual POST) so
@@ -1520,6 +1930,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         progress sender or the stream consumer.
         """
         from gateway.platforms.base import SendResult
+        content = self._filter_outbound_content(chat_id, content)
         try:
             await self._maybe_throttle(chat_id)
 
@@ -1536,25 +1947,26 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             logger.info(
                 "TeamsMTK: editing message %s — content=%d chars, html=%d chars, finalize=%s",
-                message_id, len(content), len(html_content), finalize,
+                _log_ref(message_id), len(content), len(html_content), finalize,
             )
 
             # SDK-3c: delegate to SDK MessagesService.edit() when available.
             if _SDK_AVAILABLE:
                 try:
                     adapter = _SDKAuthAdapter(self._auth)
-                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
                     svc = _SDKMessages(http_layer)
                     svc.edit(
                         conversation_id=chat_id,
                         message_id=message_id,
                         content=html_content,
                     )
-                    logger.info("TeamsMTK: edited message %s via SDK", message_id)
+                    logger.info("TeamsMTK: edited message %s via SDK", _log_ref(message_id))
                     return SendResult(success=True, message_id=message_id)
                 except Exception as _sdk_err:
                     logger.warning(
-                        "TeamsMTK: SDK edit failed (%s) — falling back to raw HTTP", _sdk_err,
+                        "TeamsMTK: SDK edit failed (%s) — falling back to raw HTTP",
+                        _log_error(_sdk_err),
                     )
 
             # Raw HTTP fallback
@@ -1563,19 +1975,23 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             url = f"{self._auth.msg_base}/conversations/{chat_id}/messages/{message_id}"
             payload = {"content": html_content, "messagetype": "RichText/Html", "contenttype": "text"}
             headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
-            resp = requests.put(url, json=payload, headers=headers, verify=False, timeout=30)
+            resp = requests.put(url, json=payload, headers=headers, verify=True, timeout=30)
             if resp.status_code == 429:
                 logger.warning(
                     "TeamsMTK: edit hit 429 rate limit for msg %s — backing off %.1fs then retrying once",
-                    message_id, self._RATE_LIMIT_BACKOFF_S,
+                    _log_ref(message_id), self._RATE_LIMIT_BACKOFF_S,
                 )
                 await asyncio.sleep(self._RATE_LIMIT_BACKOFF_S)
-                resp = requests.put(url, json=payload, headers=headers, verify=False, timeout=30)
+                resp = requests.put(url, json=payload, headers=headers, verify=True, timeout=30)
             resp.raise_for_status()
-            logger.info("TeamsMTK: edited message %s via raw HTTP (resp=%d bytes)", message_id, len(resp.content))
+            logger.info(
+                "TeamsMTK: edited message %s via raw HTTP (resp=%d bytes)",
+                _log_ref(message_id),
+                len(resp.content),
+            )
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
-            logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", e)
+            logger.warning("TeamsMTK: edit failed (%s) — streaming will fall back to new message", _log_error(e))
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str, metadata=None) -> bool:
@@ -1599,18 +2015,19 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             payload = {"messagetype": "Control/Typing", "content": ""}
             headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
             with requests.Session() as session:
-                resp = session.post(url, json=payload, headers=headers, verify=False, timeout=10)
+                resp = session.post(url, json=payload, headers=headers, verify=True, timeout=10)
             if resp.status_code != 201:
                 logger.warning(
-                    "TeamsMTK: send_typing got status %s for conv=%s: %s",
-                    resp.status_code, chat_id[:30], (resp.text or "")[:200],
+                    "TeamsMTK: send_typing got status %s for conv=%s",
+                    resp.status_code,
+                    _log_ref(chat_id),
                 )
                 return False
             else:
-                logger.info("TeamsMTK: send_typing ok conv=%s", chat_id[:30])
+                logger.info("TeamsMTK: send_typing ok conv=%s", _log_ref(chat_id))
                 return True
         except Exception as e:
-            logger.debug("TeamsMTK: send_typing failed (non-fatal): %s", e)
+            logger.debug("TeamsMTK: send_typing failed (non-fatal): %s", _log_error(e))
             return False
 
     # ---- G-MEDIA: image / document / adaptive card sending ----
@@ -1643,7 +2060,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             try:
                 self._auth._inject_truststore()
                 adapter = _SDKAuthAdapter(self._auth)
-                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
                 svc = _SDKFiles(http_layer, _SDKMessages(http_layer))
                 result = svc.send_image(chat_id, image_data, content_type, caption=caption)
                 msg_id = result.get("id", "")
@@ -1652,7 +2069,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as _sdk_err:
                 logger.warning(
-                    "TeamsMTK: SDK send_image failed (%s) — falling back to raw HTTP", _sdk_err,
+                    "TeamsMTK: SDK send_image failed (%s) — falling back to raw HTTP",
+                    _log_error(_sdk_err),
                 )
 
         # Fallback: raw HTTP AMS 3-step flow
@@ -1670,7 +2088,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._AMS_BASE_URL,
                 headers={**ams_headers, "Content-Type": "application/json"},
                 json={"type": "pish/image", "permissions": {chat_id: ["read"]}},
-                verify=False,
+                verify=True,
                 timeout=30,
             )
             create_resp.raise_for_status()
@@ -1681,7 +2099,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 f"{self._AMS_BASE_URL}/{ams_id}/content/imgpsh",
                 headers={**ams_headers, "Content-Type": content_type},
                 data=image_data,
-                verify=False,
+                verify=True,
                 timeout=(10, 120),
             )
             upload_resp.raise_for_status()
@@ -1711,7 +2129,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "Authentication": f"skypetoken={skype_token}",
                     "Content-Type": "application/json",
                 },
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             msg_resp.raise_for_status()
@@ -1720,7 +2138,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
-            logger.warning("TeamsMTK: send_image_file failed: %s", e)
+            logger.warning("TeamsMTK: send_image_file failed: %s", _log_error(e))
             return SendResult(success=False, error=str(e))
 
     async def send_image(self, chat_id: str, image_url_or_path: str, caption: str = "") -> "SendResult":
@@ -1766,7 +2184,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "Authentication": f"skypetoken={skype_token}",
                         "Content-Type": "application/json",
                     },
-                    verify=False,
+                    verify=True,
                     timeout=15,
                 )
                 resp.raise_for_status()
@@ -1775,14 +2193,14 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     self._remember_sent_message(chat_id, msg_id)
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as e:
-                logger.warning("TeamsMTK: send_image (AMS direct embed) failed: %s", e)
+                logger.warning("TeamsMTK: send_image (AMS direct embed) failed: %s", _log_error(e))
                 return SendResult(success=False, error=str(e))
 
         if _re.match(r"^https?://", image_url_or_path):
             # Remote (non-AMS) URL — download then delegate to send_image_file.
             import tempfile, os as _os
             try:
-                dl_resp = requests.get(image_url_or_path, timeout=30, verify=False)
+                dl_resp = requests.get(image_url_or_path, timeout=30, verify=True)
                 dl_resp.raise_for_status()
                 content_type = dl_resp.headers.get("Content-Type", "image/png")
                 ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
@@ -1799,7 +2217,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     except OSError:
                         pass
             except Exception as e:
-                logger.warning("TeamsMTK: send_image (remote download) failed: %s", e)
+                logger.warning("TeamsMTK: send_image (remote download) failed: %s", _log_error(e))
                 return SendResult(success=False, error=str(e))
 
         # Local filesystem path.
@@ -1826,10 +2244,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             try:
                 self._auth._inject_truststore()
                 adapter = _SDKAuthAdapter(self._auth)
-                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
                 msg_svc = _SDKMessages(http_layer)
                 file_svc = _SDKFiles(http_layer, msg_svc)
-                graph_api = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                graph_api = _SDKGraphAdapter(self._auth, verify_ssl=True)
                 result = file_svc.send_file(chat_id, file_bytes, filename, graph_api, caption=caption)
                 msg_id = result.get("id", "")
                 if msg_id:
@@ -1837,7 +2255,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
             except Exception as _sdk_err:
                 logger.warning(
-                    "TeamsMTK: SDK send_file failed (%s) — falling back to raw HTTP", _sdk_err,
+                    "TeamsMTK: SDK send_file failed (%s) — falling back to raw HTTP", _log_error(_sdk_err),
                 )
 
         # Fallback: raw HTTP Graph upload + Skype send
@@ -1854,12 +2272,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             target_path = f"/Microsoft Teams Chat Files/TeamsMCP/{unique_name}"
             upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:{target_path}:/content"
             upload_resp = requests.put(
-                upload_url, headers=headers, data=file_bytes, verify=False, timeout=(10, 120),
+                upload_url, headers=headers, data=file_bytes, verify=True, timeout=(10, 120),
             )
             if upload_resp.status_code not in (200, 201):
-                logger.warning(
-                    "TeamsMTK: send_document upload failed (%s): %s",
-                    upload_resp.status_code, upload_resp.text[:300],
+                logger.error(
+                    "TeamsMTK: send_document upload failed (status=%s)",
+                    upload_resp.status_code,
                 )
                 fallback_text = f"{caption}\n\n[Could not upload {filename} — Graph API error]".strip()
                 await self.send(chat_id=chat_id, content=fallback_text)
@@ -1875,7 +2293,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink",
                     headers={"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"},
                     json={"type": "view", "scope": "organization"},
-                    verify=False,
+                    verify=True,
                     timeout=30,
                 )
                 share_resp.raise_for_status()
@@ -1896,7 +2314,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 msg_url,
                 json=payload,
                 headers={"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"},
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             msg_resp.raise_for_status()
@@ -1905,7 +2323,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
-            logger.warning("TeamsMTK: send_document failed: %s", e)
+            logger.warning("TeamsMTK: send_document failed: %s", _log_error(e))
             try:
                 await self.send(chat_id=chat_id, content=f"{caption}\n\n[Could not send document {filename}: {e}]".strip())
             except Exception:
@@ -1967,7 +2385,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 msg_url,
                 json=payload,
                 headers={"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"},
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             resp.raise_for_status()
@@ -1976,7 +2394,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
-            logger.warning("TeamsMTK: send_adaptive_card failed (%s) — falling back to text", e)
+            logger.warning("TeamsMTK: send_adaptive_card failed (%s) — falling back to text", _log_error(e))
             if fallback_text:
                 return await self.send(chat_id=chat_id, content=fallback_text, metadata=None)
             return SendResult(success=False, error=str(e))
@@ -1994,7 +2412,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             try:
                 self._auth._inject_truststore()
                 adapter = _SDKAuthAdapter(self._auth)
-                http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
                 msg_svc = _SDKMessages(http_layer)
                 svc = _SDKConvs(http_layer, msg_svc)
                 raw = svc.list(limit=limit)
@@ -2011,7 +2429,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 return results
             except Exception as _sdk_err:
                 logger.warning(
-                    "TeamsMTK: SDK list_conversations failed (%s) — falling back to raw HTTP", _sdk_err,
+                    "TeamsMTK: SDK list_conversations failed (%s) — falling back to raw HTTP", _log_error(_sdk_err),
                 )
 
         # Fallback: raw HTTP
@@ -2024,13 +2442,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             resp = session.get(
                 url,
                 headers={"Authentication": f"skypetoken={skype_token}"},
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.warning("TeamsMTK: list_conversations failed: %s", e)
+            logger.warning("TeamsMTK: list_conversations failed: %s", _log_error(e))
             return []
 
         results: List[Dict[str, Any]] = []
@@ -2078,8 +2496,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """S3-1: Search AAD/M365 users by display name or email prefix via Graph API.
 
         Uses the gateway's existing graph_token() so no extra OAuth scope is needed.
-        Delegates to Graph /users?$filter=startswith(...) (same logic as
-        ~/.claude/skills/teams/scripts/users.py search).
+        Delegates to Graph /users?$filter=startswith(...), matching the
+        configured Teams directory helper's lookup semantics.
 
         Args:
             query: Name or email prefix to search (e.g. "Alice", "alice@").
@@ -2100,7 +2518,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "https://graph.microsoft.com/v1.0/users",
                 params={"$filter": filter_str, "$top": 10},
                 headers={"Authorization": f"Bearer {graph_token}"},
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             resp.raise_for_status()
@@ -2114,7 +2532,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 for u in users
             ]
         except Exception as e:
-            logger.warning("TeamsMTK: _search_users failed (%s)", e)
+            logger.warning("TeamsMTK: _search_users failed (%s)", _log_error(e))
             return []
 
     def _get_schedule(
@@ -2166,13 +2584,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "Authorization": f"Bearer {graph_token}",
                     "Content-Type": "application/json",
                 },
-                verify=False,
+                verify=True,
                 timeout=30,
             )
             resp.raise_for_status()
             return resp.json().get("value", [])
         except Exception as e:
-            logger.warning("TeamsMTK: _get_schedule failed (%s)", e)
+            logger.warning("TeamsMTK: _get_schedule failed (%s)", _log_error(e))
             return []
 
     def _find_common_availability(
@@ -2302,7 +2720,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "notes": notes,
             }
         except Exception as e:
-            logger.warning("TeamsMTK: _find_common_availability failed (%s)", e)
+            logger.warning("TeamsMTK: _find_common_availability failed (%s)", _log_error(e))
             return {
                 "resolved_users": [],
                 "date": date_str or "unknown",
@@ -2331,13 +2749,15 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         for _target in _buf.notify_targets:
             try:
                 await self.send(_target, f"📋 VIP buffered ({len(msgs)} msg):\n{_summary}")
-                logger.info("TeamsMTK: VIP flush %d msgs → %s", len(msgs), _target[:30])
+                logger.info("TeamsMTK: VIP flush %d msgs → %s", len(msgs), _log_ref(_target))
             except Exception as e:
-                logger.error("TeamsMTK: VIP flush send error to %s: %s", _target[:30], e)
+                logger.error("TeamsMTK: VIP flush send error to %s: %s", _log_ref(_target), _log_error(e))
 
     async def cancel_background_tasks(self) -> None:
         """Cancel poll + WS tasks, then delegate to base for in-flight message tasks."""
         self._running = False
+        for vip_buffer in self._vip_buffers.values():
+            vip_buffer.cancel()
         if self._ws_listener:
             await self._ws_listener.stop()
             self._ws_listener = None
@@ -2363,7 +2783,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not conv_id or conv_id not in self._last_message_ids:
             # Not a monitored conversation — ignore
             return
-        logger.info("TeamsMTK/WS: message event for conv=%s — triggering immediate fetch", conv_id[:40])
+        logger.info(
+            "TeamsMTK/WS: message event for conv=%s — triggering immediate fetch",
+            _log_ref(conv_id),
+        )
         try:
             import concurrent.futures
             loop = asyncio.get_event_loop()
@@ -2377,7 +2800,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 await self._flush_vip_buffer(conv_id)
             executor.shutdown(wait=False)
         except Exception as e:
-            logger.warning("TeamsMTK/WS: immediate fetch failed (%s) — poll will catch it", e)
+            logger.warning("TeamsMTK/WS: immediate fetch failed (%s) — poll will catch it", _log_error(e))
 
     # ---- S7: Reactions (send/remove) ----
 
@@ -2392,20 +2815,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _graph = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                _graph = _SDKGraphAdapter(self._auth, verify_ssl=True)
                 _svc = _SDKReactions(_graph)
                 result = _svc.send(chat_id, message_id, reaction)
-                logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, message_id)
+                logger.info("TeamsMTK: sent reaction %s to msg=%s", reaction, _log_ref(message_id))
                 return result
             # Raw fallback
             url = (f"https://graph.microsoft.com/beta/chats/{chat_id}"
                    f"/messages/{message_id}/setReaction")
-            _resp = self._auth._graph_request("POST", url,
-                                              json={"reactionType": reaction})
-            logger.info("TeamsMTK: sent reaction %s to msg=%s (raw)", reaction, message_id)
+            import requests as _requests
+            try:
+                self._auth._graph_request(
+                    "POST", url, json={"reactionType": _REACTION_EMOJI[reaction]}
+                )
+            except _requests.HTTPError as exc:
+                response = getattr(exc, "response", None)
+                if response is None or response.status_code != 409:
+                    raise
+            logger.info("TeamsMTK: sent reaction %s to msg=%s (raw)", reaction, _log_ref(message_id))
             return {"status": "reacted", "reaction": reaction, "message_id": message_id}
         except Exception as e:
-            logger.error("TeamsMTK: send_reaction error: %s", e)
+            logger.error("TeamsMTK: send_reaction error: %s", _log_error(e))
             return {"status": "error", "error": str(e)}
 
     async def remove_reaction(self, chat_id: str, message_id: str, reaction: str) -> dict:
@@ -2415,20 +2845,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     f"Valid: {', '.join(sorted(_VALID_REACTIONS))}"}
         try:
             if _SDK_AVAILABLE and self._auth.graph_token():
-                _graph = _SDKGraphAdapter(self._auth, verify_ssl=False)
+                _graph = _SDKGraphAdapter(self._auth, verify_ssl=True)
                 _svc = _SDKReactions(_graph)
                 result = _svc.remove(chat_id, message_id, reaction)
-                logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, message_id)
+                logger.info("TeamsMTK: removed reaction %s from msg=%s", reaction, _log_ref(message_id))
                 return result
             # Raw fallback
             url = (f"https://graph.microsoft.com/beta/chats/{chat_id}"
                    f"/messages/{message_id}/unsetReaction")
-            _resp = self._auth._graph_request("POST", url,
-                                              json={"reactionType": reaction})
-            logger.info("TeamsMTK: removed reaction %s from msg=%s (raw)", reaction, message_id)
+            import requests as _requests
+            try:
+                self._auth._graph_request(
+                    "POST", url, json={"reactionType": _REACTION_EMOJI[reaction]}
+                )
+            except _requests.HTTPError as exc:
+                response = getattr(exc, "response", None)
+                if response is None or response.status_code != 404:
+                    raise
+            logger.info("TeamsMTK: removed reaction %s from msg=%s (raw)", reaction, _log_ref(message_id))
             return {"status": "removed", "reaction": reaction, "message_id": message_id}
         except Exception as e:
-            logger.error("TeamsMTK: remove_reaction error: %s", e)
+            logger.error("TeamsMTK: remove_reaction error: %s", _log_error(e))
             return {"status": "error", "error": str(e)}
 
     # ---- S9: Message deletion ----
@@ -2442,22 +2879,33 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         try:
             if _SDK_AVAILABLE and self._auth.skype_token():
                 _adapter = _SDKAuthAdapter(self._auth)
-                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=True)
                 _svc = _SDKMessages(_http)
                 result = _svc.delete(chat_id, message_id)
-                logger.info("TeamsMTK: deleted msg=%s in conv=%s", message_id, chat_id[:30])
+                logger.info(
+                    "TeamsMTK: deleted msg=%s in conv=%s",
+                    _log_ref(message_id),
+                    _log_ref(chat_id),
+                )
                 return result
-            # Raw fallback
+            # Raw fallback — regional MSG endpoint + MSG-API auth header.
+            # NOT hardcoded amer / ``Authorization: skype_token`` (that 401s and
+            # targets the wrong region for non-amer tenants). Mirrors send/edit.
             _enc = __import__("urllib.parse", fromlist=["quote"]).quote(chat_id, safe="")
-            url = (f"https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
+            url = (f"{self._auth.msg_base}"
                    f"/conversations/{_enc}/messages/{message_id}")
             import requests as _req
-            _headers = {"Authorization": f"skype_token {self._auth.skype_token}"}
-            _req.delete(url, headers=_headers)
-            logger.info("TeamsMTK: deleted msg=%s in conv=%s (raw)", message_id, chat_id[:30])
+            _headers = {"Authentication": f"skypetoken={self._auth.skype_token()}"}
+            response = _req.delete(url, headers=_headers, verify=True, timeout=30)
+            response.raise_for_status()
+            logger.info(
+                "TeamsMTK: deleted msg=%s in conv=%s (raw)",
+                _log_ref(message_id),
+                _log_ref(chat_id),
+            )
             return {"id": message_id, "status": "deleted"}
         except Exception as e:
-            logger.error("TeamsMTK: delete_message error: %s", e)
+            logger.error("TeamsMTK: delete_message error: %s", _log_error(e))
             return {"status": "error", "error": str(e)}
 
     # ---- S4: Activity feed (spaces, notes, call logs, threads, saved) ----
@@ -2468,28 +2916,28 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         ``kind`` is one of: spaces, notes, call_logs, threads, saved.
         Uses SDK ActivityService when available.
         """
+        valid_kinds = {"spaces", "notes", "call_logs", "threads", "saved"}
+        if kind not in valid_kinds:
+            return [{"error": f"Unknown activity kind '{kind}'. "
+                     f"Valid: {', '.join(sorted(valid_kinds))}"}]
         if not _SDK_AVAILABLE or not self._auth.skype_token():
             return [{"error": "SDK or auth unavailable"}]
         try:
-            _adapter = _SDKAuthAdapter(self._auth)
-            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
-            _svc = _SDKActivity(_http)
-            _method_map = {
-                "spaces": _svc.list_spaces,
-                "notes": _svc.list_notes,
-                "call_logs": _svc.list_call_logs,
-                "threads": _svc.list_threads,
-                "saved": _svc.list_saved,
+            adapter = _SDKAuthAdapter(self._auth)
+            http = _SDKHTTPLayer(adapter, verify_ssl=True)
+            service = _SDKActivity(http)
+            method_map = {
+                "spaces": service.list_spaces,
+                "notes": service.list_notes,
+                "call_logs": service.list_call_logs,
+                "threads": service.list_threads,
+                "saved": service.list_saved,
             }
-            _fn = _method_map.get(kind)
-            if not _fn:
-                return [{"error": f"Unknown activity kind '{kind}'. "
-                         f"Valid: {', '.join(sorted(_method_map))}"}]
-            result = _fn(limit=limit, offset=offset)
+            result = method_map[kind](limit=limit, offset=offset)
             logger.info("TeamsMTK: get_activity kind=%s → %d items", kind, len(result))
             return result
         except Exception as e:
-            logger.error("TeamsMTK: get_activity error: %s", e)
+            logger.error("TeamsMTK: get_activity error: %s", _log_error(e))
             return [{"error": str(e)}]
 
     # ---- S5: Call logs (via ActivityService) ----
@@ -2510,25 +2958,35 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         # Whitelist check
         if allowed_targets and target_conv not in allowed_targets:
             logger.warning("TeamsMTK: forward rejected — target %s not in whitelist",
-                           target_conv[:30])
+                           _log_ref(target_conv))
             return {"status": "error",
                     "error": f"Target conversation not in allowed list"}
         try:
             if _SDK_AVAILABLE and self._auth.skype_token():
                 _adapter = _SDKAuthAdapter(self._auth)
-                _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+                _http = _SDKHTTPLayer(_adapter, verify_ssl=True)
                 _svc = _SDKMessages(_http)
                 result = _svc.forward(source_conv, message_id, target_conv)
-                logger.info("TeamsMTK: forwarded msg=%s %s→%s", message_id,
-                            source_conv[:20], target_conv[:20])
+                logger.info(
+                    "TeamsMTK: forwarded msg=%s %s→%s",
+                    _log_ref(message_id), _log_ref(source_conv), _log_ref(target_conv),
+                )
                 return result
-            # Raw fallback: fetch original then send as blockquote
+            # Raw fallback: fetch original then send as blockquote.
+            # Regional MSG endpoint + MSG-API auth header; skype_token() is a
+            # METHOD — call it (the old code formatted the bound method object).
             _enc = __import__("urllib.parse", fromlist=["quote"]).quote(source_conv, safe="")
-            url = (f"https://amer.ng.msg.teams.microsoft.com/v1/users/ME"
+            url = (f"{self._auth.msg_base}"
                    f"/conversations/{_enc}/messages")
             import requests as _req
-            _headers = {"Authorization": f"skype_token {self._auth.skype_token}"}
-            resp = _req.get(url, headers=_headers, params={"pageSize": 50})
+            _headers = {"Authentication": f"skypetoken={self._auth.skype_token()}"}
+            resp = _req.get(
+                url,
+                headers=_headers,
+                params={"pageSize": 50},
+                verify=True,
+                timeout=30,
+            )
             raw_msgs = resp.json().get("messages", [])
             original = None
             for m in raw_msgs:
@@ -2544,7 +3002,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         f'{content}</blockquote>')
             return await self.send(target_conv, fwd_html)
         except Exception as e:
-            logger.error("TeamsMTK: forward_message error: %s", e)
+            logger.error("TeamsMTK: forward_message error: %s", _log_error(e))
             return {"status": "error", "error": str(e)}
 
     # ---- S7-3 / S9-2~3: PLATFORM_HINTS injection ----
@@ -2570,7 +3028,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "Short-msg gating: ≤2 chars ignored in non-mention groups (no ?/!/mention)",
         ]
         if self._vip_config:
-            hints.append(f"  - VIP monitor: buffered → {self._vip_config.get('notify_targets', [])}")
+            targets = self._vip_config.get("notify_targets", [])
+            hints.append(f"  - VIP monitor: buffered → {len(targets)} configured target(s)")
         return "\n".join(hints)
 
     # ---- S9-2: Enforce delete-only-own ----
@@ -2621,12 +3080,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if _pkb_dir:
                 import os
                 os.makedirs(_pkb_dir, exist_ok=True)
-                _fname = chat_id.replace(":", "_").replace("@", "_")[:40] + ".md"
+                _fname = _log_ref(chat_id).replace(":", "_") + ".md"
                 with open(os.path.join(_pkb_dir, _fname), "a", encoding="utf-8") as f:
                     f.write(_entry + "\n\n")
                 logger.debug("TeamsMTK: PKB landed msg to %s", _fname)
         except Exception as e:
-            logger.warning("TeamsMTK: PKB landing error: %s", e)
+            logger.warning("TeamsMTK: PKB landing error: %s", _log_error(e))
 
     # ---- S2-4: Cross-conversation global search ----
 
@@ -2643,7 +3102,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     r["_source_conv"] = cid
                 all_results.extend(results or [])
             except Exception as e:
-                logger.debug("TeamsMTK: search conv=%s error: %s", cid[:20], e)
+                logger.debug("TeamsMTK: search conv=%s error: %s", _log_ref(cid), _log_error(e))
         # Sort by relevance (if timestamp available)
         all_results.sort(key=lambda r: r.get("originalarrivaltime", ""), reverse=True)
         return all_results[:limit]
@@ -2693,7 +3152,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return []
         try:
             _adapter = _SDKAuthAdapter(self._auth)
-            _http = _SDKHTTPLayer(_adapter, verify_ssl=False)
+            _http = _SDKHTTPLayer(_adapter, verify_ssl=True)
             _msg_svc = _SDKMessages(_http)
             _svc = _SDKConvs(_http, _msg_svc)
             results = _svc.find(name)
@@ -2852,7 +3311,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "Authentication": f"skypetoken={skype_token}",
                     "Content-Type": "application/json",
                 },
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             resp.raise_for_status()
@@ -2861,9 +3320,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             msg_id = data.get("id") or data.get("OriginalArrivalTime")
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
-            logger.info("TeamsMTK: model picker step 1 (providers) sent (id=%s)", msg_id)
+            logger.info(
+                "TeamsMTK: model picker step 1 (providers) sent (id=%s)",
+                _log_ref(msg_id),
+            )
         except Exception as e:
-            logger.error("TeamsMTK: model picker step 1 send failed: %s", e)
+            logger.error("TeamsMTK: model picker step 1 send failed: %s", _log_error(e))
             return SendResult(success=False, error=str(e))
 
         # Store picker state — step 1: waiting for provider selection
@@ -2875,6 +3337,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "on_model_selected": on_model_selected,
             "current_model": current_model,
             "current_provider": current_provider,
+            "allowed_user_id": (metadata or {}).get(
+                "_authorized_picker_user_id"
+            ),
         }
 
         return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
@@ -3000,7 +3465,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     "Authentication": f"skypetoken={skype_token}",
                     "Content-Type": "application/json",
                 },
-                verify=False,
+                verify=True,
                 timeout=15,
             )
             resp.raise_for_status()
@@ -3011,10 +3476,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._remember_sent_message(chat_id, msg_id)
             logger.info(
                 "TeamsMTK: model picker step 2 (models for %s) sent (id=%s)",
-                chosen_name, msg_id,
+                _log_ref(chosen_name), _log_ref(msg_id),
             )
         except Exception as e:
-            logger.error("TeamsMTK: model picker step 2 send failed: %s", e)
+            logger.error("TeamsMTK: model picker step 2 send failed: %s", _log_error(e))
             return
 
         # Update picker state — step 2: waiting for model selection
@@ -3024,6 +3489,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "on_model_selected": picker["on_model_selected"],
             "current_model": picker.get("current_model"),
             "current_provider": picker.get("current_provider"),
+            "allowed_user_id": picker.get("allowed_user_id"),
         }
     def _fetch_messages(self, conv_id: str = None, limit: Optional[int] = None) -> List[dict]:
         """Fetch messages from a conversation (sync, called from thread).
@@ -3064,7 +3530,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         an integer, uses get_page() for a single-page bounded fetch (poll loop).
         """
         adapter = _SDKAuthAdapter(self._auth)
-        http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+        http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
         svc = _SDKMessages(http_layer)
         try:
             if limit is None:
@@ -3074,7 +3540,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 norm_msgs = svc.get(conv_id)
                 logger.debug(
                     "TeamsMTK: SDK full-history fetch: %d messages for conv=%s",
-                    len(norm_msgs), conv_id[:40],
+                    len(norm_msgs), _log_ref(conv_id),
                 )
             else:
                 # Bounded single-page fetch (poll loop, S1-2 unchanged path)
@@ -3109,7 +3575,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             norm_msgs.reverse()
             return norm_msgs
         except Exception as e:
-            logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", e)
+            logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", _log_error(e))
             return self._fetch_via_raw(conv_id, limit if limit is not None else 30, _t0)
 
     def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
@@ -3129,7 +3595,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     url,
                     params={"pageSize": limit, "startTime": 0},
                     headers={"Authentication": f"skypetoken={skype_token}"},
-                    verify=False,
+                    verify=True,
                     timeout=15,
                 )
                 if resp.status_code == 401 and attempt == 0:
@@ -3176,7 +3642,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             )
         self._auth._inject_truststore()
         adapter = _SDKAuthAdapter(self._auth)
-        http_layer = _SDKHTTPLayer(adapter, verify_ssl=False)
+        http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
         svc = _SDKMessages(http_layer)
 
         norm_msgs = svc.get_by_date(
@@ -3184,7 +3650,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         )
         logger.debug(
             "TeamsMTK: _fetch_messages_by_date: %d messages for conv=%s [%s → %s]",
-            len(norm_msgs), conv_id[:40], date_from, date_to,
+            len(norm_msgs), _log_ref(conv_id), date_from, date_to,
         )
         # Back-fill raw-compatible fields (same as _fetch_via_sdk)
         for m in norm_msgs:
@@ -3196,7 +3662,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         return norm_msgs
 
     async def _poll_loop(self) -> None:
-        """Poll all monitored conversations for new messages every _POLL_INTERVAL seconds.
+        """Poll all monitored conversations at the configured interval.
 
         On consecutive errors, backs off up to 5× the normal interval to avoid
         hammering a downed proxy. Resets on first successful fetch.
@@ -3204,7 +3670,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         import concurrent.futures
         loop = asyncio.get_event_loop()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(len(self._conv_ids), 1))
-        _backoff = 1  # multiplier for _POLL_INTERVAL on errors
+        _backoff = 1  # multiplier for the configured poll interval on errors
         _ws_stable_ticks = 0  # consecutive successful ticks with WS healthy
         _ws_stats = {"healthy_ticks": 0, "unhealthy_ticks": 0, "ws_reconnects": 0,
                      "poll_interval_changes": 0}  # WS-8: stability metrics
@@ -3214,7 +3680,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 # WS-7: Adaptive poll interval — when WS listener is healthy
                 # and stable, poll less frequently (15s) since WS pushes
                 # events in real-time. When WS is down, revert to 2s.
-                _active_interval = _POLL_INTERVAL
+                _active_interval = self._poll_interval
                 if self._ws_listener and self._ws_listener.is_healthy():
                     _ws_stable_ticks += 1
                     _ws_stats["healthy_ticks"] += 1
@@ -3251,14 +3717,18 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 }
                 fetch_results = await asyncio.gather(*fetch_tasks.values())
                 for _conv_id, msgs in zip(fetch_tasks, fetch_results):
-                    logger.info("TeamsMTK: poll conv=%s got %d messages", _conv_id[:40], len(msgs) if msgs else 0)
+                    logger.info(
+                        "TeamsMTK: poll conv=%s got %d messages",
+                        _log_ref(_conv_id),
+                        len(msgs) if msgs else 0,
+                    )
                     await self._process_new_messages(_conv_id, msgs)
                 _backoff = 1  # reset backoff on success
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 _backoff = min(_backoff * 2, 5)
-                logger.warning("TeamsMTK: poll error (backoff=%dx): %s", _backoff, e, exc_info=True)
+                logger.warning("TeamsMTK: poll error (backoff=%dx): %s", _backoff, _log_error(e))
 
             try:
                 await asyncio.sleep(_active_interval * _backoff)
@@ -3270,71 +3740,132 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     async def _download_attachment(self, url: str, kind: str, filename: str) -> Optional[str]:
         """Download a Teams attachment and cache it locally.
 
-        When the SDK is available, delegates to ``download_with_auth_url()``
-        which picks the correct auth strategy per domain (skype_token for
-        Skype/Teams, Bearer for SharePoint/OneDrive).  Runs in a thread
-        pool via ``asyncio.to_thread`` to avoid blocking the event loop.
-
-        Falls back to ``aiohttp`` with the same domain-specific authentication
-        rules when the SDK is unavailable or the SDK request fails.
+        Only HTTPS URLs that pass the shared SSRF guard are fetched. Teams
+        credentials are attached solely to boundary-matched Microsoft hosts;
+        unknown public hosts are fetched anonymously. Redirects are followed
+        manually so every target is revalidated and its auth is recomputed.
         """
-        from gateway.platforms.base import cache_image_from_bytes, cache_document_from_bytes
+        from urllib.parse import urljoin, urlparse
 
-        # --- SDK path: domain-appropriate auth, thread-pooled ---
-        if _sdk_download is not None:
-            try:
-                _sk = self._auth.skype_token()
-                _at = self._auth.access_token()
-                data = await asyncio.to_thread(
-                    _sdk_download, url, _sk, _at, False, 30,
-                )
-            except Exception as exc:
-                logger.warning("TeamsMTK: SDK download failed (%s), falling back to aiohttp url=%.60s", exc, url)
-                # Fall through to aiohttp below
-                data = None
-            if data is not None:
-                try:
-                    if kind == "image":
-                        _ext = ".jpg"
-                        if ".png" in url.lower():
-                            _ext = ".png"
-                        elif ".gif" in url.lower():
-                            _ext = ".gif"
-                        elif ".webp" in url.lower():
-                            _ext = ".webp"
-                        _path = cache_image_from_bytes(data, _ext)
-                        logger.info("TeamsMTK: cached %d bytes from %.60s -> %s", len(data), url, _path)
-                        return _path
-                    else:
-                        if not filename:
-                            _parts = url.rsplit("/", 1)
-                            filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
-                        _path = cache_document_from_bytes(data, filename)
-                        logger.info("TeamsMTK: cached %d bytes from %.60s -> %s", len(data), url, _path)
-                        return _path
-                except Exception as exc:
-                    logger.warning("TeamsMTK: attachment cache error: %s", exc)
-                    return None
-
-        # --- Fallback: aiohttp with domain-appropriate auth (mirrors SDK logic) ---
         import aiohttp
-        from urllib.parse import urlparse
-        _netloc = urlparse(url).netloc.lower()
-        if "api.asm.skype.com" in _netloc:
-            _headers = {"Authorization": f"skype_token {self._auth.skype_token()}"}
-        elif "teams.microsoft.com" in _netloc or "skype.com" in _netloc:
-            _headers = {"Authentication": f"skypetoken={self._auth.skype_token()}"}
-        else:
-            _headers = {"Authorization": f"Bearer {self._auth.access_token()}"}
+        from gateway.platforms.base import (
+            cache_document_from_bytes,
+            cache_image_from_bytes,
+            get_inbound_media_max_bytes,
+            validate_inbound_media_size,
+        )
+        from tools.url_safety import async_is_safe_url
+
+        def _headers_for(candidate_url: str) -> Dict[str, str]:
+            hostname = (urlparse(candidate_url).hostname or "").lower().rstrip(".")
+            auth_kind = _attachment_auth_kind(hostname)
+            if auth_kind == "skype_authorization":
+                return {"Authorization": f"skype_token {self._auth.skype_token()}"}
+            if auth_kind == "skype_authentication":
+                return {"Authentication": f"skypetoken={self._auth.skype_token()}"}
+            if auth_kind == "azure_bearer":
+                return {"Authorization": f"Bearer {self._auth.access_token()}"}
+            return {}
+
+        current_url = str(url or "").strip()
+        max_bytes = get_inbound_media_max_bytes()
+        data: Optional[bytes] = None
         try:
-            async with aiohttp.ClientSession(headers=_headers) as sess:
-                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30), ssl=False) as resp:
-                    if resp.status != 200:
-                        logger.warning("TeamsMTK: attachment download failed status=%d url=%.60s", resp.status, url)
+            initial = urlparse(current_url)
+            if (
+                initial.scheme.lower() != "https"
+                or not initial.hostname
+                or initial.username is not None
+                or initial.password is not None
+                or not await async_is_safe_url(current_url)
+            ):
+                logger.warning(
+                    "TeamsMTK: blocked unsafe attachment url=%s",
+                    _log_ref(current_url),
+                )
+                return None
+
+            async with aiohttp.ClientSession() as sess:
+                for redirect_count in range(_ATTACHMENT_REDIRECT_LIMIT + 1):
+                    if redirect_count:
+                        parsed = urlparse(current_url)
+                        redirect_is_safe = (
+                            parsed.scheme.lower() == "https"
+                            and bool(parsed.hostname)
+                            and parsed.username is None
+                            and parsed.password is None
+                            and await async_is_safe_url(current_url)
+                        )
+                    else:
+                        redirect_is_safe = True
+                    if not redirect_is_safe:
+                        logger.warning(
+                            "TeamsMTK: blocked unsafe attachment url=%s",
+                            _log_ref(current_url),
+                        )
                         return None
-                    data = await resp.read()
+
+                    async with sess.get(
+                        current_url,
+                        headers=_headers_for(current_url),
+                        timeout=aiohttp.ClientTimeout(total=30),
+                        ssl=True,
+                        allow_redirects=False,
+                    ) as resp:
+                        if 300 <= resp.status < 400:
+                            location = resp.headers.get("Location") or resp.headers.get("location")
+                            if not location or redirect_count >= _ATTACHMENT_REDIRECT_LIMIT:
+                                logger.warning(
+                                    "TeamsMTK: attachment redirect rejected status=%d url=%s",
+                                    resp.status,
+                                    _log_ref(current_url),
+                                )
+                                return None
+                            current_url = urljoin(current_url, location)
+                            continue
+
+                        if resp.status != 200:
+                            logger.warning(
+                                "TeamsMTK: attachment download failed status=%d url=%s",
+                                resp.status,
+                                _log_ref(current_url),
+                            )
+                            return None
+
+                        content_length = resp.headers.get("Content-Length") or resp.headers.get("content-length")
+                        if content_length:
+                            try:
+                                declared_size = int(content_length)
+                            except (TypeError, ValueError):
+                                logger.debug("TeamsMTK: ignoring invalid attachment Content-Length")
+                            else:
+                                validate_inbound_media_size(
+                                    declared_size,
+                                    media_type=kind or "attachment",
+                                    max_bytes=max_bytes,
+                                )
+
+                        chunks: List[bytes] = []
+                        total = 0
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            total += len(chunk)
+                            validate_inbound_media_size(
+                                total,
+                                media_type=kind or "attachment",
+                                max_bytes=max_bytes,
+                            )
+                            chunks.append(chunk)
+                        data = b"".join(chunks)
+                        break
         except Exception as exc:
-            logger.warning("TeamsMTK: attachment download error: %s url=%.60s", exc, url)
+            logger.warning(
+                "TeamsMTK: attachment download error: %s url=%s",
+                _log_error(exc),
+                _log_ref(current_url),
+            )
+            return None
+
+        if data is None:
             return None
 
         try:
@@ -3353,24 +3884,46 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     filename = _parts[-1].split("?", 1)[0] if len(_parts) > 1 else "document.bin"
                 return cache_document_from_bytes(data, filename)
         except Exception as exc:
-            logger.warning("TeamsMTK: attachment cache error: %s", exc)
+            logger.warning("TeamsMTK: attachment cache error: %s", _log_error(exc))
             return None
 
     async def _process_new_messages(self, conv_id: str, messages: List[dict]) -> None:
-        """Dispatch messages newer than last_message_id for *conv_id* to the hermes agent."""
+        """Serialize and dispatch messages newer than the conversation cursor."""
+        if not messages or not self._message_handler:
+            return
+        lock = self._message_process_locks.setdefault(conv_id, asyncio.Lock())
+        async with lock:
+            await self._process_new_messages_locked(conv_id, messages)
+
+    async def _process_new_messages_locked(
+        self,
+        conv_id: str,
+        messages: List[dict],
+    ) -> None:
+        """Dispatch one conversation while holding its cursor lock."""
         if not messages or not self._message_handler:
             return
 
         _last_id = self._last_message_ids.get(conv_id)
-        new_messages = []
+        _last_key = _message_id_key(_last_id) if _last_id is not None else None
+        new_by_id = {}
         for msg in messages:
             msg_id = msg.get("id")
             if not msg_id:
                 continue
-            if _last_id is None or msg_id > _last_id:
-                new_messages.append(msg)
+            if _last_key is None or _message_id_key(msg_id) > _last_key:
+                new_by_id.setdefault(str(msg_id), msg)
             else:
-                logger.debug("TeamsMTK: skipping old msg id=%s (<= last=%s)", msg_id, _last_id)
+                logger.debug(
+                    "TeamsMTK: skipping old msg id=%s (<= last=%s)",
+                    _log_ref(msg_id),
+                    _log_ref(_last_id),
+                )
+
+        new_messages = sorted(
+            new_by_id.values(),
+            key=lambda msg: _message_id_key(msg["id"]),
+        )
 
         if new_messages:
             logger.info("TeamsMTK: %d new messages to process", len(new_messages))
@@ -3382,9 +3935,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             sender = msg.get("imdisplayname") or msg.get("fromDisplayNameInToken") or "Teams User"
 
             logger.info(
-                "TeamsMTK: inspecting msg id=%s type=%s conv=%s last_sent=%s text=%.40r",
-                msg_id, msg_type, conv_id[:30], self._last_sent_message_id,
-                content.strip()[:40] if content else "<empty>",
+                "TeamsMTK: inspecting msg id=%s type=%s conv=%s last_sent=%s content_present=%s",
+                _log_ref(msg_id), msg_type, _log_ref(conv_id),
+                _log_ref(self._last_sent_message_id), bool(content),
             )
 
             # ---- G14 VIP interception ----
@@ -3402,6 +3955,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         oids=self._vip_config.get("oids", []),
                         notify_targets=self._vip_config.get("notify_targets", []),
                         buffer_timeout_seconds=self._vip_config.get("buffer_timeout_seconds", 60),
+                        on_stale=lambda _cid=conv_id: self._flush_vip_buffer(_cid),
                     )
                     self._vip_buffers[conv_id] = _vip_buf
                 if _vip_buf.is_vip(_sender_oid):
@@ -3409,7 +3963,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     self._last_message_ids[conv_id] = msg_id
                     logger.info(
                         "TeamsMTK: VIP msg id=%s from oid=%s → %s (buf=%d)",
-                        msg_id, _redact_oid(_sender_oid), _action, len(_vip_buf._messages),
+                        _log_ref(msg_id), _redact_oid(_sender_oid), _action, len(_vip_buf._messages),
                     )
                     if _action == "immediate":
                         await self._flush_vip_buffer(conv_id)
@@ -3452,7 +4006,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             if self._is_sent_message(conv_id, msg_id):
                 is_own = True
             if is_own:
-                logger.info("TeamsMTK: skipping own sent message id=%s", msg_id)
+                logger.info("TeamsMTK: skipping own sent message id=%s", _log_ref(msg_id))
                 self._last_message_ids[conv_id] = msg_id
                 continue
 
@@ -3510,21 +4064,14 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             if _att_urls:
                 logger.info(
-                    "TeamsMTK: msg id=%s has %d attachment(s): %s",
-                    msg_id, len(_att_urls),
-                    [f"{k}:{n or u[:40]}" for k, n, u in zip(_att_kinds, _att_names, _att_urls)],
+                    "TeamsMTK: msg id=%s has %d attachment(s) (kinds=%s)",
+                    _log_ref(msg_id), len(_att_urls), sorted(set(_att_kinds)),
                 )
 
             # HTML stripping: use SDK strip_teams_html when available
             # (handles <at>, <blockquote>, <img> emoji, <file>, <a> truncated URLs)
             # Falls back to regex for environments where SDK is not on sys.path.
-            if _strip_teams_html is not None:
-                text, _extra_imgs = _strip_teams_html(content)
-            else:
-                content = re.sub(r"<at\s[^>]*>([^<]*)</at>", r"\1", content)
-                text = re.sub(r"<[^>]+>", "", content).strip()
-                text = re.sub(r"\s+", " ", text).strip()
-                _extra_imgs = []
+            text, _extra_imgs = _clean_message_content(content)
             # Merge any additional inline images from SDK extraction
             if _extra_imgs:
                 for _ei in _extra_imgs:
@@ -3566,18 +4113,15 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # self.require_mention (global TEAMS_MTK_REQUIRE_MENTION default).
             is_group = "@thread" in conv_id
             _group_cfg = self._group_config(conv_id) if is_group else {}
-            _cfg_require_mention = _group_cfg.get("require_mention")
-            if _cfg_require_mention is not None:
-                effective_require_mention = bool(_cfg_require_mention)
-            elif conv_id in self._no_mention_convs:
-                effective_require_mention = False
-            else:
-                effective_require_mention = self.require_mention
+            effective_require_mention = self._require_mention_for_conv(
+                conv_id,
+                _group_cfg,
+            )
             if is_group and effective_require_mention and not _is_control_cmd:
                 if self._MENTION_TAG.lower() not in text.lower():
                     logger.debug(
-                        "TeamsMTK: ignoring group message (require_mention=true, no %s): %s",
-                        self._MENTION_TAG, text[:60],
+                        "TeamsMTK: ignoring group message id=%s (require_mention=true, no %s)",
+                        _log_ref(msg_id), self._MENTION_TAG,
                     )
                     self._last_message_ids[conv_id] = msg_id
                     continue
@@ -3596,17 +4140,20 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 _hit = self._find_blocked_keyword(text, _blocked_patterns)
                 if _hit:
                     logger.warning(
-                        "TeamsMTK: blocked inbound message in conv=%s (matched keyword pattern=%r): %s",
-                        conv_id[:30], _hit, text[:60],
+                        "TeamsMTK: blocked inbound message id=%s in conv=%s (pattern ref=%s)",
+                        _log_ref(msg_id), _log_ref(conv_id), _log_ref(_hit),
                     )
                     self._last_message_ids[conv_id] = msg_id
                     try:
                         await self.send(conv_id, self._BLOCKED_KEYWORD_NOTICE)
                     except Exception as e:
-                        logger.error("TeamsMTK: failed to send blocked-keyword notice: %s", e)
+                        logger.error("TeamsMTK: failed to send blocked-keyword notice: %s", _log_error(e))
                     continue
 
-            logger.info("TeamsMTK: new message from %s: %s", sender, text[:60])
+            logger.info(
+                "TeamsMTK: new message id=%s from sender=%s (chars=%d)",
+                _log_ref(msg_id), _log_ref(sender), len(text),
+            )
 
             # ---- C-5 Short-message gating (BUG-5) ----
             # In groups where require_mention=false, ultra-short casual
@@ -3620,17 +4167,31 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     _has_mention = self._MENTION_TAG.lower() in text.lower()
                     if not _has_punct and not _has_mention:
                         logger.debug(
-                            "TeamsMTK: ignoring short message (%d chars, no ?/!/mention): %r",
-                            len(text.strip()), text,
+                            "TeamsMTK: ignoring short message id=%s (%d chars, no ?/!/mention)",
+                            _log_ref(msg_id), len(text.strip()),
                         )
                         self._last_message_ids[conv_id] = msg_id
                         continue
+
+            # Resolve the immutable sender id before any adapter-local action.
+            # Model-picker replies never reach GatewayRunner authorization, so
+            # they must remain bound to the user whose authorized /model command
+            # created the picker.
+            _from_url = msg.get("from", "")
+            user_id = sender  # fallback to display name
+            if "8:orgid:" in _from_url:
+                user_id = _from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
 
             # ---- Model picker interception (two-step) ----
             # Per-conversation picker state so multiple conversations
             # can each have an active picker independently.
             _picker = self._model_picker_states.get(conv_id)
-            if _picker is not None and len(text) <= 40:
+            _picker_user_id = (_picker or {}).get("allowed_user_id")
+            _picker_owner_matches = (
+                not _picker_user_id
+                or str(_picker_user_id).casefold() == str(user_id).casefold()
+            )
+            if _picker is not None and _picker_owner_matches and len(text) <= 40:
                 import re as _nre
                 _m = _nre.search(r"\b(\d{1,3})\b", text)
                 if _m:
@@ -3644,7 +4205,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             prov_slug, prov_name, _, _ = prov_entries[choice - 1]
                             logger.info(
                                 "TeamsMTK: model picker provider selection: %d → %s (conv=%s)",
-                                choice, prov_name, conv_id[:30],
+                                choice, prov_name, _log_ref(conv_id),
                             )
                             # Don't clear state — transition to step 2
                             # (sub-picker will update it)
@@ -3654,7 +4215,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                 )
                             except Exception as e:
                                 logger.error(
-                                    "TeamsMTK: model sub-picker send error: %s", e
+                                    "TeamsMTK: model sub-picker send error: %s", _log_error(e)
                                 )
                             self._last_message_ids[conv_id] = msg_id
                             continue
@@ -3666,7 +4227,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             prov_slug, model_id, prov_name = entries[choice - 1]
                             logger.info(
                                 "TeamsMTK: model picker model selection: %d → %s/%s (conv=%s)",
-                                choice, prov_slug, model_id, conv_id[:30],
+                                choice, prov_slug, model_id, _log_ref(conv_id),
                             )
                             cb = _picker.get("on_model_selected")
                             # Clear picker state *before* the callback to
@@ -3681,7 +4242,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                     if confirm:
                                         await self.send(conv_id, confirm)
                                 except Exception as e:
-                                    logger.error("TeamsMTK: model picker callback error: %s", e)
+                                    logger.error("TeamsMTK: model picker callback error: %s", _log_error(e))
                                     await self.send(conv_id, f"⚠ Model switch failed: {e}")
                             self._last_message_ids[conv_id] = msg_id
                             continue
@@ -3691,10 +4252,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 from gateway.config import Platform
 
                 from gateway.session import SessionSource
-                _from_url = msg.get("from", "")
-                user_id = sender  # fallback to display name
-                if "8:orgid:" in _from_url:
-                    user_id = _from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
 
                 source = SessionSource(
                     platform=Platform.TEAMS_MTK,
@@ -3741,7 +4298,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 # _process_message_background, and _send_with_retry delivery.
                 await self.handle_message(event)
             except Exception as e:
-                logger.error("TeamsMTK: handler error for message %s: %s", msg_id, e, exc_info=True)
+                logger.error(
+                    "TeamsMTK: handler error for message %s: %s",
+                    _log_ref(msg_id),
+                    _log_error(e),
+                )
             finally:
                 self._last_message_ids[conv_id] = msg_id
 

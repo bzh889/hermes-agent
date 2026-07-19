@@ -89,6 +89,47 @@ def _effective_provider_label() -> str:
 from hermes_constants import is_termux as _is_termux
 
 
+def _check_teams_mtk():
+    """Return TeamsMTK readiness without exposing conversation identifiers."""
+    config = load_config()
+    platforms = config.get("platforms", {})
+    platform_config = (
+        platforms.get("teams_mtk", {}) if isinstance(platforms, dict) else {}
+    )
+    configured_ids = (
+        platform_config.get("conversation_ids")
+        if isinstance(platform_config, dict)
+        else None
+    )
+    if isinstance(configured_ids, str):
+        conversation_ids = [
+            item.strip() for item in configured_ids.split(",") if item.strip()
+        ]
+    elif isinstance(configured_ids, (list, tuple, set)):
+        conversation_ids = [
+            str(item).strip() for item in configured_ids if str(item).strip()
+        ]
+    else:
+        conversation_ids = []
+    if not conversation_ids:
+        conversation_ids = [
+            item.strip()
+            for item in os.getenv("MTK_TEAMS_CONVERSATION_ID", "").split(",")
+            if item.strip()
+        ]
+
+    token_ready = (Path.home() / ".teams-tokens" / "token_cache.json").exists()
+    configured = bool(conversation_ids and token_ready)
+    if configured:
+        count = len(conversation_ids)
+        return True, f"{count} conversation{'s' if count != 1 else ''}"
+    if conversation_ids:
+        return False, "token cache missing"
+    if token_ready:
+        return False, "conversation IDs missing"
+    return False, "not configured"
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     deep = getattr(args, 'deep', False)
@@ -447,6 +488,10 @@ def show_status(args):
     }
 
     for name, (token_var, home_var) in platforms.items():
+        if name == "TeamsMTK":
+            has_token, status = _check_teams_mtk()
+            print(f"  {name:<12}  {check_mark(has_token)} {status}")
+            continue
         token = os.getenv(token_var, "")
         has_token = bool(token)
         
