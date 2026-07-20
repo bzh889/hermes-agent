@@ -146,8 +146,16 @@ class TestRunJobScript:
 
         assert success is True
         assert output == "retry-ok"
+        # First call: hidden-console strategy (CREATE_NEW_CONSOLE + SW_HIDE)
         assert "creationflags" in calls[0]
-        assert "creationflags" not in calls[1]
+        # Second call (fallback after PermissionError): still has
+        # creationflags (CREATE_NO_WINDOW) — we never do a bare retry.
+        assert "creationflags" in calls[1]
+        # The fallback uses CREATE_NO_WINDOW only (0x08000000), the
+        # primary used CREATE_NEW_CONSOLE (0x10) + startupinfo.  Both
+        # suppress visible windows; the numeric values aren't directly
+        # comparable because the primary also sets startupinfo.
+        assert "startupinfo" in calls[0]
 
     def test_script_relative_path(self, cron_env):
         from cron.scheduler import _run_job_script

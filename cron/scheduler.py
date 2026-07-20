@@ -1677,7 +1677,21 @@ def _run_job_script(script_path: str, *, cwd: Optional[str] = None) -> tuple[boo
     try:
         from tools.environments.local import _sanitize_subprocess_env
 
-        popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+        from hermes_cli._subprocess_compat import (
+            windows_hide_flags,
+            windows_hidden_console_popen_kwargs,
+            windows_detach_flags_without_breakaway,
+            windows_detach_flags,
+        )
+
+        # Use the hidden-console strategy (CREATE_NEW_CONSOLE + SW_HIDE)
+        # rather than plain CREATE_NO_WINDOW.  CREATE_NO_WINDOW only
+        # suppresses the *direct* child's console; grandchildren (e.g.
+        # playwright spawning chrome.exe / node.exe) each allocate their
+        # own visible conhost and steal foreground focus.  A hidden
+        # console on the shell root gives the whole process tree one
+        # shared invisible console while stdout/stderr pipes still work.
+        popen_kwargs = windows_hidden_console_popen_kwargs() if sys.platform == "win32" else {}
         run_kwargs = {
             "capture_output": True,
             "text": True,
@@ -1690,14 +1704,19 @@ def _run_job_script(script_path: str, *, cwd: Optional[str] = None) -> tuple[boo
         except PermissionError:
             if not popen_kwargs:
                 raise
-            # Some Windows job objects reject CREATE_NO_WINDOW even though
-            # a normal foreground child is permitted. Retry once so cron
-            # scripts do not become false failures under those hosts.
+            # Some Windows job objects reject the hidden-console flags
+            # (rare — happens when JOB_OBJECT_LIMIT_BREAKAWAY_OK isn't
+            # set for CREATE_NEW_CONSOLE).  Fall back to
+            # windows_hide_flags() (CREATE_NO_WINDOW only) which at
+            # least hides the direct child, rather than a bare retry.
             logger.warning(
-                "Cron script %s rejected hidden-process flags; retrying without them",
+                "Cron script %s rejected hidden-console flags; falling back to CREATE_NO_WINDOW",
                 path,
             )
-            result = subprocess.run(argv, **run_kwargs)
+            fallback_kwargs = (
+                {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+            )
+            result = subprocess.run(argv, **run_kwargs, **fallback_kwargs)
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
 
