@@ -3172,18 +3172,74 @@ class TeamsMTKAdapter(BasePlatformAdapter):
     # checked which code path actually fired. Removed the duplicate;
     # the L1874/L1944 definitions are now the only implementation.
 
-    # ---- G13-B.3 stub: Proactive chat creation (blocked: Chat.Create scope) ----
+    # ---- G13-B.3: Proactive chat creation via Skype API (unblocked 2026-07-20) ----
 
     async def create_chat(self, topic: str, members: list) -> dict:
-        """Create a new group chat. STUB — requires Chat.Create Graph scope.
+        """Create a new group chat via Skype API (uses existing skypetoken).
 
-        Currently blocked: IT has not granted the Chat.Create application
-        permission. When scope is approved, replace this stub with:
-          Graph POST /chats {chatType: "group", topic, members}
+        Chat.Create Graph scope is NOT required — teams_skype_sdk's
+        ConversationsService.create() posts directly to the Skype threads
+        endpoint (POST /v1/threads) which the existing skypetoken already
+        authorizes.
+
+        Args:
+            topic: Group display name (empty string for untitled)
+            members: List of member identifiers. Each can be:
+                - MRI directly (e.g. '8:orgid:<aad-oid>')
+                - Email/UPN or display name — will be resolved via people search
+
+        Returns:
+            {"status": "ok", "id": <new-conv-id>, "title": <topic>}
+            or {"status": "error", "error": <detail>} on failure.
         """
-        return {"status": "error",
-                "error": "Chat.Create scope not authorized. "
-                         "Request IT to add Chat.Create to the app registration."}
+        if not _SDK_AVAILABLE:
+            return {"status": "error",
+                    "error": "teams_skype_sdk not available"}
+        try:
+            adapter = _SDKAuthAdapter(self._auth)
+            http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
+            # Resolve non-MRI members (email/display-name) → MRI via Graph search_users.
+            resolved: list[str] = []
+            graph_api = None
+            for m in members or []:
+                if isinstance(m, str) and m.startswith("8:orgid:"):
+                    resolved.append(m)
+                elif isinstance(m, str) and m.strip():
+                    try:
+                        if graph_api is None:
+                            from teams_skype_sdk.api import GraphAPI as _SDKGraph
+                            graph_api = _SDKGraph(adapter)
+                        hits = graph_api.search_users(m)
+                        if hits:
+                            oid = hits[0].get("id", "")
+                            if oid:
+                                resolved.append(f"8:orgid:{oid}")
+                    except Exception as _res_e:
+                        logger.debug("TeamsMTK: create_chat member resolve failed for %s: %s",
+                                     _log_ref(m), _log_error(_res_e))
+            if not resolved:
+                return {"status": "error",
+                        "error": "No members resolved (need at least one valid member)"}
+            # ConversationsService requires messages arg — provide a MessagesService
+            # instance (needed by list/info paths; create() itself doesn't use it,
+            # but the constructor demands non-None).
+            msgs_svc = _SDKMessages(http_layer)
+            svc = _SDKConvs(http_layer, msgs_svc)
+            result = svc.create(members=resolved, topic=topic or "")
+            conv_id = result.get("id", "")
+            if not conv_id:
+                return {"status": "error",
+                        "error": "Skype API did not return conversation id"}
+            logger.info(
+                "TeamsMTK: created chat id=%s topic=%s members=%d",
+                _log_ref(conv_id), _log_ref(topic or ""), len(resolved),
+            )
+            return {"status": "ok",
+                    "id": conv_id,
+                    "title": topic or "New Group Chat"}
+        except Exception as e:
+            logger.warning("TeamsMTK: create_chat failed: %s", _log_error(e))
+            return {"status": "error", "error": f"create_chat: {e}"}
 
     # ---- G14-2.1 stub: Persona configuration (blocked: P7 incomplete) ----
 

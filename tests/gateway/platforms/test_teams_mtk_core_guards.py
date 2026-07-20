@@ -533,15 +533,16 @@ class TestEchoGuardIntegration:
         assert adapter._is_sent_message("19:dm@unq.gbl.spaces", "picker-id") is True
 
 
-# ── Blocked stubs (G13-B.3, G14-2.1) ────────────────────────────────────
+# ── G13-B.3 unblocked (Skype API) / G14-2.1 still blocked (P7) ─────────
 
 class TestBlockedStubs:
     @pytest.mark.asyncio
-    async def test_create_chat_blocked(self):
+    async def test_create_chat_empty_members_errors(self):
+        """G13-B.3 no longer stubs Chat.Create; unresolvable members yield an error."""
         adapter = _make_adapter()
-        result = await adapter.create_chat("Test Topic", ["user1"])
+        result = await adapter.create_chat("Test Topic", [])
         assert result["status"] == "error"
-        assert "Chat.Create" in result["error"]
+        assert "No members resolved" in result["error"] or "not available" in result["error"]
 
     def test_get_persona_config_stub(self):
         adapter = _make_adapter()

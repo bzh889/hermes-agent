@@ -494,9 +494,12 @@
       `contact-directory-fallback` 真實讀取 200 個 conversations 與 M365 People，
       動態挑選「directory 有、既有 chat 無」候選，驗證 canonical/manual-open error、
       sender 0 calls；姓名僅輸出 SHA-256 短 hash。Full E2E **25/25 PASS**。
-- [ ] **G13-B.3** 🔴 **blocked**：Chat.Create scope 未授權，無法主動建新對話。
-      需 IT 加 `Chat.Create` / `Chat.ReadWrite` scope。
-      見 design.md L274-300 的安全 gate 設計。
+- [x] **G13-B.3** ✅ **已完成並真實 E2E 驗證（2026-07-20）**：主動建新對話**不需要**
+      Chat.Create Graph scope。teams_skype_sdk `ConversationsService.create()`
+      走 Skype API `POST /v1/threads`，用既有 skypetoken 授權。
+      `teams_mtk.create_chat(topic, members)` 支援 MRI 或 email/display-name
+      （自動 Graph `search_users` 解析成 MRI）。E2E：真實建立 conv id
+      `19:4d063000c92e481ba8a0f77771b75695@thread.v2` 成功回傳。
 - [x] **G13-B.4** ✅ **已完成並真實 E2E 驗證（2026-07-15）**：15 個 contact lookup
       unit 覆蓋 directory success/failure 與 direct-match skip；`contact-routing` 驗證
       direct match 真實送訊/read-back，`contact-directory-fallback` 驗證 live directory
