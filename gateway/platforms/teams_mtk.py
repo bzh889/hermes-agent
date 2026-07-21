@@ -3207,8 +3207,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 elif isinstance(m, str) and m.strip():
                     try:
                         if graph_api is None:
+                            from teams_skype_sdk.graph import GraphToken as _GraphToken
                             from teams_skype_sdk.api import GraphAPI as _SDKGraph
-                            graph_api = _SDKGraph(adapter)
+                            _gtok = _GraphToken(self._auth)
+                            graph_api = _SDKGraph(_gtok, verify_ssl=True)
                         hits = graph_api.search_users(m)
                         if hits:
                             oid = hits[0].get("id", "")
@@ -3240,6 +3242,44 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("TeamsMTK: create_chat failed: %s", _log_error(e))
             return {"status": "error", "error": f"create_chat: {e}"}
+
+    async def leave_chat(self, conv_id: str) -> dict:
+        """Leave a group chat (removes self), the outbound pair to create_chat.
+
+        Skype API has no true "delete conversation" for a client skypetoken
+        (that path returns 403 "not server to server"). Teams' own "remove
+        chat" is implemented as leaving: DELETE /v1/threads/{id}/members/{mri}.
+        Once self leaves, the chat disappears from this user's list.
+
+        Returns:
+            {"status": "ok", "id": conv_id} on success (HTTP 200/204),
+            or {"status": "error", "error": <detail>}.
+        """
+        import requests
+        try:
+            self._auth._inject_truststore()
+            skype_token = self._auth.skype_token()
+            my_oid = self._auth._get_my_oid()
+            if not my_oid:
+                return {"status": "error", "error": "could not resolve own OID"}
+            my_mri = f"8:orgid:{my_oid}"
+            # regional threads host (strip trailing /v1/users/ME from msg_base)
+            host = (self._auth.msg_base or "").split("/v1/")[0]
+            if not host:
+                return {"status": "error", "error": "no msg_base host"}
+            url = f"{host}/v1/threads/{conv_id}/members/{my_mri}"
+            resp = requests.delete(
+                url, headers={"Authentication": f"skypetoken={skype_token}"},
+                verify=True, timeout=15,
+            )
+            if resp.status_code in (200, 201, 204):
+                logger.info("TeamsMTK: left chat id=%s", _log_ref(conv_id))
+                return {"status": "ok", "id": conv_id}
+            return {"status": "error",
+                    "error": f"leave_chat HTTP {resp.status_code}: {resp.text[:120]}"}
+        except Exception as e:
+            logger.warning("TeamsMTK: leave_chat failed: %s", _log_error(e))
+            return {"status": "error", "error": f"leave_chat: {e}"}
 
     # ---- G14-2.1 stub: Persona configuration (blocked: P7 incomplete) ----
 

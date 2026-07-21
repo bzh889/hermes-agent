@@ -544,6 +544,14 @@ class TestBlockedStubs:
         assert result["status"] == "error"
         assert "No members resolved" in result["error"] or "not available" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_leave_chat_no_msg_base_errors(self):
+        """leave_chat gracefully errors when host/msg_base is unavailable."""
+        adapter = _make_adapter()
+        # _make_adapter's auth has no msg_base configured → host resolution fails
+        result = await adapter.leave_chat("19:fake@thread.v2")
+        assert result["status"] == "error"
+
     def test_get_persona_config_stub(self):
         adapter = _make_adapter()
         result = adapter.get_persona_config()
