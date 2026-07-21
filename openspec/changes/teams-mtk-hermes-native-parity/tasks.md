@@ -500,6 +500,11 @@
       `teams_mtk.create_chat(topic, members)` 支援 MRI 或 email/display-name
       （自動 Graph `search_users` 解析成 MRI）。E2E：真實建立 conv id
       `19:4d063000c92e481ba8a0f77771b75695@thread.v2` 成功回傳。
+- [x] **G13-B.5** ✅ **create_chat 的配套 leave_chat（2026-07-20）**：Skype API 對
+      client skypetoken 無真正 delete conversation（回 403 not-server-to-server），
+      Teams「移除聊天」本質即離開 thread。`teams_mtk.leave_chat(conv_id)` 走
+      `DELETE /v1/threads/{id}/members/{my_mri}`，離開後該 chat 從本人清單消失。
+      E2E：兩個測試群組真實離開（HTTP 200）。create/leave 成對完整。
 - [x] **G13-B.4** ✅ **已完成並真實 E2E 驗證（2026-07-15）**：15 個 contact lookup
       unit 覆蓋 directory success/failure 與 direct-match skip；`contact-routing` 驗證
       direct match 真實送訊/read-back，`contact-directory-fallback` 驗證 live directory
