@@ -798,6 +798,19 @@
       **這是 S4-2 的 dependency**：mention 掃描發現 hot conv 後，需靠此增量
       基準做輕量補強（PKB 已有的跳過、只補增量），否則 mention→ingest 會退回全量重掃。
 
+      **後續優化 #2（2026-07-22 下半）—— digest 鏈路修通**：
+      1. **flat→YYYY 搬移**：PKB `vault.py` 的 `get_raw_sources('teams')` 只掃 YYYY 子目錄，
+         但 `teams_pkb_ingest` 寫 flat 根目錄→weave 從沒看到 2754 個新檔→digest=0。
+         搬 2754 個檔到 `raw/teams/{YYYY}/`，`get_unprocessed` 從 0→2753，weave 可見。
+      2. **`land_conversation` 寫年份子目錄**：新檔寫 `raw/teams/{year}/{date}-{slug}-{hash}.md`,
+         `_find_existing_file` / `_build_pkb_msgid_index` 改 rglob + skip `_archive`。
+      3. **`trigger_weave` 即時 digest**：ingest 收集 new/updated conv hash→背景 fire-and-forget
+         `process.py --source teams --pattern <hash>`（PKB venv、detached、hidden）。
+         `--no-weave` flag 可關。單 conv weave 必出 Stage 1 summary（source summary），
+         Stage 2 entity/concept 需 ≥3 sources（累積型，留給 pkb_dream 週期做）。
+      4. **E2E 驗證**：hash `8bf124` (MOLY01832154)→Stage 1 summary 產出 4.6KB
+         `wiki/sources/2026-04-14-moly01832154-...dat.md`，frontmatter 完整。
+      5. ⚠️ 2753 個歷史 unprocessed teams raw 待 weave（需背景低優先消化）。
 ### 7.2 S2 — 訊息搜尋（極高價值）
 
 - [x] **S2-1** ✅：新增 `search_messages(conv_id, query, sender=None, date_from=None, date_to=None, limit=20)` 方法
