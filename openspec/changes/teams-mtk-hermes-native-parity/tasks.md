@@ -751,6 +751,25 @@
       （`_last_message_ids` 仍只處理新訊息，舊訊息跳過不處理）。
 - [ ] **S1-5** 🟡：PKB 即時落地 hook 改用全量拉取寫全量
       （而非只有 poll 拿到的 20 條）——需要效能考量。
+- [x] **S1-6** ✅ **PKB 全量掃描 + 增量 skip（2026-07-22，S4-2 的 dependency）**：
+      背景 cron `teams-pkb-ingest`（every 60m, no_agent）掃 all-conv 落 PKB。
+      **根因**：舊版 `list_conversations(limit=1000)` 底層被 teams skill
+      `MAX_PAGE_SIZE=200` 硬截斷——實測用戶有 **2438 個 conversation**，
+      舊 cron 只覆蓋 200（8%），其餘 90% 永不進 PKB。
+      **修正**（`~/.hermes/scripts/teams_pkb_ingest.py`）：
+      1. `list_conversations_all()` 分頁繞過 200 cap，用 Skype API
+         `GET /conversations?pageSize=50` + `_metadata.backwardLink` 續拉
+         （加 circular-link guard + 50 頁 safety cap），實測拉滿 2438 conv (~30s)。
+      2. **增量 skip**：`_build_pkb_msgid_index()` 掃 PKB raw/teams/*.md，
+         建 `{conv_hash: max_msgid}` 索引（本地讀檔 ~1s）。每 conv 比對
+         metadata `lastMessage.id` vs PKB 檔內最大 msgid（**同體系可比大小，
+         已 E2E 驗證 3/3**），`lastMessage.id <= PKB_max` → skip（完全不 fetch）。
+      3. `fetch_messages` limit 200 避 mega-thread timeout；`--full` flag 強制重掃。
+      **E2E 驗證**：(a) 首次全量建 2283 個新 PKB 檔（16548s ≈ 4.6h，一次性回填）；
+      (b) `cron run` 走真正 scheduler 執行路徑，last_status=ok，僅 fetch+寫 8 個
+      有新訊息的活躍群、其餘 2350+ 個 incremental_skip。往後每次 cron 1-3 分鐘。
+      **這是 S4-2 的 dependency**：mention 掃描發現 hot conv 後，需靠此增量
+      基準做輕量補強（PKB 已有的跳過、只補增量），否則 mention→ingest 會退回全量重掃。
 
 ### 7.2 S2 — 訊息搜尋（極高價值）
 
@@ -782,10 +801,16 @@
 - [ ] **S4-1** 🟡：新增 `_get_activity(limit=20)` 方法
       — 委託 SDK `ActivityService.list()`，
       回傳通知+@提及列表。
-- [ ] **S4-2** 🟡：poll loop 擴充——定期掃 48:notifications / 48:mentions，
-      發現新 @提及可觸發 agent（目前 gateway 完全不感知外部 @提及）。
+- [ ] **S4-2** 🟡 **（依賴 S1-6 增量基準，設計中）**：poll loop 擴充——
+      定期掃 48:notifications / 48:mentions，發現新 @提及可觸發 agent
+      （目前 gateway 完全不感知外部 @提及）。
       **注意**：這是 agent 主動感知能力的重大提升，但需設計好避免
       poll loop 過重（建議採低頻率 60s 一次掃 activity）。
+      **Dependency（S1-6 已完成）**：mention 掃描發現 hot conv 後的
+      「補強 PKB」動作，必須建立在 S1-6 的全量+增量掃描之上——PKB 已有的
+      對話靠 msgid index 跳過，只補 mention 帶出的增量，避免每次 mention
+      觸發都退回全量重掃。設計待與用戶確認：(1) 發現 mention 後只 log 還是
+      主動觸發 agent (2) 掃描頻率固定 60s 還是綁 WS 穩定度 (3) hint 檔機制。
 - [ ] **S4-3** 🟡：`PLATFORM_HINTS` 更新 + 測試。
 
 ### 7.5 S5 — 通話記錄（中價值）
