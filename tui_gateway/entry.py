@@ -10,6 +10,26 @@ import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
 
+# Trust the OS certificate store (Windows/macOS) instead of only certifi's
+# bundled CA set. Corporate TLS-inspecting proxies (e.g. MTK's "Clir Root CA")
+# install their intercept root into the OS store but NOT into certifi's
+# cacert.pem, so any provider whose endpoint is proxy-intercepted
+# (notably #7 openai-codex → chatgpt.com/backend-api/codex) fails from the
+# TUI's spawned Python with SSL CERTIFICATE_VERIFY_FAILED, surfacing as
+# APIConnectionError. The gateway process avoids this only because its
+# teams_mtk adapter calls truststore.inject_into_ssl() on connect; the TUI
+# never loads that adapter, so it must inject here. MUST run before any HTTP
+# library (httpx/openai) is imported below — importing tui_gateway.server
+# pulls those in — so this is the first thing after the import-path guard.
+# Verified E2E: a real codex /responses POST returns 200 after injection and
+# CERTIFICATE_VERIFY_FAILED before it.
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import json
 import logging
 import signal
