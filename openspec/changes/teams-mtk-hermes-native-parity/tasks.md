@@ -767,7 +767,34 @@
       3. `fetch_messages` limit 200 避 mega-thread timeout；`--full` flag 強制重掃。
       **E2E 驗證**：(a) 首次全量建 2283 個新 PKB 檔（16548s ≈ 4.6h，一次性回填）；
       (b) `cron run` 走真正 scheduler 執行路徑，last_status=ok，僅 fetch+寫 8 個
-      有新訊息的活躍群、其餘 2350+ 個 incremental_skip。往後每次 cron 1-3 分鐘。
+      有新訊息的活躍群、其餘 2350+ 個 incremental_skip。
+      **後續優化（2026-07-22）**：
+      1. **移除所有 message limit**：`fetch_messages` 不再用 skill CLI（有內部 cap），
+         改直接分頁 Skype API `GET /conversations/{id}/messages`，用 `since_msgid`
+         早停——只抓 > PKB last-seen 的新尾巴（N 則新訊息 ≈ N/50 頁，與歷史長度無關）。
+      2. **分頁去重 + 移除頁數截斷**：`list_conversations_all` 用 `{id:conv}` dict
+         去重（backwardLink 頁邊界會重複回傳同一 conv，實測每 run 2-9 dup），
+         circular-link guard + 3 連空頁容忍，無頁數 cap → 穩定拿到 **2881 unique conv**
+         （舊版有 50 頁 cap + 無去重，數字在 2438/2880 間浮動）。
+      3. **欄位正規化 bug 修復**：直接打 API 後訊息欄位是 `messagetype`/`imdisplayname`/
+         `originalarrivaltime`，下游 land 邏輯讀 `type`/`sender`/`timestamp`——不一致導致
+         RichText/Text 過濾把真訊息全丟（「640 fetch 但 0 new」的假陰性）。fetch 回傳前
+         做 schema 正規化（`messagetype→type` 覆蓋 Skype envelope `type=Message`）。
+      4. **frontmatter `last_msgid` 快取**：新建檔頭寫 `last_msgid:`，更新時 refresh；
+         `_build_pkb_msgid_index` 優先讀 frontmatter（掃檔頭 600 字元）、舊檔 fallback
+         掃全文 inline msgid 並在下次更新時 lazy upgrade。**結構化錨點適配任何 LLM
+         agent 直接讀取**，不用 regex 重推。實測 2752 檔 100% 進 index、0 碰撞、0 遺漏。
+      5. **節流退避（非固定 pre-sleep）**：429/403/404 指數退避重試（1s/2s/4s，最多 3 次）——
+         這些多是 skypetoken 限流副作用（實測慢速單打 121 次全 200，快速連打才觸發），
+         增量量小時全速跑、不預先 sleep；重試耗盡才放棄該 conv（不 fail 整輪）。
+      6. **假陽性 fetch guard**：`lastMessage.messagetype` 非 RichText/Text（如
+         ThreadActivity/AddMember 加人事件）時直接 skip——這類事件推進 `lastMessage.id`
+         但無內容可 land，fetch 只會 0 new。實測把 fetch 次數 640→159、時間 828s→217s。
+      7. **時間預算保護（防撞下輪）**：`--max-runtime`（預設 2700s=45min），超時收尾、
+         剩餘 conv 下輪補，絕不 bleed 進下一個 cron tick。`--full` 模式不設限。
+      **最終增量效能（2026-07-22 實測）**：2881 conv → **2714 incremental_skip（免費，
+      無 API）** + 159 fetch（其中約 129 是 PKB 尚無的新 conv，該建檔）+ 4 真更新落地，
+      **總計 217s ≈ 3.6 分鐘**（60min 週期，餘裕 56min）。動態增量驗證完成。
       **這是 S4-2 的 dependency**：mention 掃描發現 hot conv 後，需靠此增量
       基準做輕量補強（PKB 已有的跳過、只補增量），否則 mention→ingest 會退回全量重掃。
 
