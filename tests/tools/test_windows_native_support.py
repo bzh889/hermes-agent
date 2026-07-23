@@ -556,22 +556,23 @@ class TestSubprocessCompatHelpers:
     def test_windows_hidden_console_kwargs_keep_descendants_off_desktop(
         self, monkeypatch
     ):
-        """A hidden console root gives CLI grandchildren a console to inherit."""
+        """A hidden console root gives CLI grandchildren a console to inherit.
+
+        Must use CREATE_NO_WINDOW (a real but window-less console), NOT
+        CREATE_NEW_CONSOLE + SW_HIDE: when the user's default terminal is
+        Windows Terminal, CREATE_NEW_CONSOLE makes WT open a fresh CASCADIA
+        frame that SW_HIDE cannot suppress, leaking an empty "Terminal" ghost
+        window per spawn.
+        """
         from hermes_cli import _subprocess_compat as sc
 
-        class FakeStartupInfo:
-            dwFlags = 0
-            wShowWindow = None
-
         monkeypatch.setattr(sc, "IS_WINDOWS", True)
-        monkeypatch.setattr(sc.subprocess, "STARTUPINFO", FakeStartupInfo)
 
         kwargs = sc.windows_hidden_console_popen_kwargs()
 
-        assert kwargs["creationflags"] == 0x00000010  # CREATE_NEW_CONSOLE
-        assert not kwargs["creationflags"] & 0x08000000  # not CREATE_NO_WINDOW
-        assert kwargs["startupinfo"].dwFlags & 0x00000001  # STARTF_USESHOWWINDOW
-        assert kwargs["startupinfo"].wShowWindow == 0  # SW_HIDE
+        assert kwargs["creationflags"] == 0x08000000  # CREATE_NO_WINDOW
+        assert not kwargs["creationflags"] & 0x00000010  # not CREATE_NEW_CONSOLE
+        assert "startupinfo" not in kwargs  # no SW_HIDE dance needed
 
     def test_windows_detach_popen_kwargs_is_posix_equivalent_on_posix(self):
         from hermes_cli._subprocess_compat import windows_detach_popen_kwargs

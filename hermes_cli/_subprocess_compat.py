@@ -344,26 +344,30 @@ def windows_hide_flags() -> int:
 def windows_hidden_console_popen_kwargs() -> dict:
     """Create a hidden console for a short-lived Windows process tree.
 
-    ``CREATE_NO_WINDOW`` hides only the direct child. A shell launched with no
-    console can spawn console-subsystem grandchildren (PowerShell, Python,
-    git) that allocate visible conhost windows and steal foreground focus. A
-    hidden console on the shell root gives the whole CLI tree a console to
-    inherit while stdout and stderr pipes continue to work.
+    A shell launched with no console can spawn console-subsystem grandchildren
+    (PowerShell, Python, git) that allocate visible conhost windows and steal
+    foreground focus. Giving the shell root its own hidden console means the
+    whole CLI tree inherits one console while stdout/stderr pipes still work.
 
-    This is intentionally narrower than :func:`windows_hide_flags`: use it for
-    a shell root whose descendants must share one hidden console, not for GUI
-    apps or detached daemons. Returns an empty dict on non-Windows platforms.
+    We use ``CREATE_NO_WINDOW`` — NOT ``CREATE_NEW_CONSOLE`` + ``SW_HIDE``.
+    ``CREATE_NO_WINDOW`` allocates a real but window-less console the tree can
+    inherit, and it is honored by the classic conhost host. ``CREATE_NEW_CONSOLE``
+    asks the OS to spawn a *new console window*; when the user's default terminal
+    is Windows Terminal (not legacy conhost), WT intercepts that request and opens
+    a fresh CASCADIA frame that ``STARTF_USESHOWWINDOW`` / ``SW_HIDE`` cannot
+    suppress (WT ignores the child's ``wShowWindow``). Every spawn then leaked an
+    empty "Terminal" ghost window that shares the WT process (so it can't be
+    killed without taking the user's TUI with it). ``CREATE_NO_WINDOW`` gives the
+    same inheritable hidden console with zero WT frames.
+
+    This is intentionally narrower than :func:`windows_hide_flags` semantically
+    (a shell root whose descendants must share one console), but both now return
+    the same ``CREATE_NO_WINDOW`` flag. Returns an empty dict on non-Windows.
     """
     if not IS_WINDOWS:
         return {}
 
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= _STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = _SW_HIDE
-    return {
-        "creationflags": _CREATE_NEW_CONSOLE,
-        "startupinfo": startupinfo,
-    }
+    return {"creationflags": _CREATE_NO_WINDOW}
 
 
 def windows_detach_popen_kwargs() -> dict:
