@@ -1391,6 +1391,85 @@ def _make_cua_backend_with_windows(windows: List[Dict[str, Any]]):
     return backend
 
 
+class TestCuaDriverReadyTimeout:
+    """Enterprise endpoint protection can make a native driver cold start exceed 15s."""
+
+    def test_config_default_matches_runtime_fallback(self):
+        from hermes_cli.config import DEFAULT_CONFIG
+        from tools.computer_use.cua_backend import _DEFAULT_SESSION_READY_TIMEOUT
+
+        configured_default = DEFAULT_CONFIG["computer_use"][
+            "cua_driver_ready_timeout"
+        ]
+        assert float(configured_default) == _DEFAULT_SESSION_READY_TIMEOUT
+
+    def test_defaults_to_fifteen_seconds(self):
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        with patch("hermes_cli.config.load_config_readonly", return_value={}):
+            assert _session_ready_timeout() == 15.0
+
+    def test_reads_config_override(self):
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        config = {"computer_use": {"cua_driver_ready_timeout": 45}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            assert _session_ready_timeout() == 45.0
+
+    @pytest.mark.parametrize(
+        "value",
+        [True, 0, 1, -1, "not-a-number", "nan", "inf", 1e300],
+    )
+    def test_invalid_override_falls_back_to_default(self, value):
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        config = {"computer_use": {"cua_driver_ready_timeout": value}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            assert _session_ready_timeout() == 15.0
+
+    def test_config_load_failure_falls_back_to_default(self):
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        with patch(
+            "hermes_cli.config.load_config_readonly",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert _session_ready_timeout() == 15.0
+
+    def test_lifecycle_wait_uses_configured_timeout(self, monkeypatch):
+        import asyncio
+        import threading
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import tools.computer_use.cua_backend as cua_backend
+
+        session = cua_backend._CuaDriverSession.__new__(cua_backend._CuaDriverSession)
+        session._bridge = SimpleNamespace(_loop=object())
+        session._lifecycle_coro = lambda: None
+        session._signal_shutdown_locked = lambda: None
+        ready_event = MagicMock()
+        ready_event.wait.return_value = False
+        call_order = []
+        monkeypatch.setattr(threading, "Event", lambda: ready_event)
+        monkeypatch.setattr(
+            asyncio,
+            "run_coroutine_threadsafe",
+            lambda coro, loop: call_order.append("schedule") or object(),
+        )
+        monkeypatch.setattr(
+            cua_backend,
+            "_session_ready_timeout",
+            lambda: call_order.append("config") or 45.0,
+        )
+
+        with pytest.raises(RuntimeError, match=r"timeout 45s"):
+            session._start_lifecycle_locked()
+
+        ready_event.wait.assert_called_once_with(timeout=45.0)
+        assert call_order == ["config", "schedule"]
+
+
 class TestCuaDriverSessionReconnect:
     """Verify reconnect-once on a closed-resource error. After the
     lifecycle-owner refactor (Sun Jun 21 2026) the session no longer goes

@@ -40,6 +40,7 @@ import base64
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -211,6 +212,40 @@ _ELEMENT_LINE_RE = re.compile(
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+_DEFAULT_SESSION_READY_TIMEOUT = 15.0
+
+
+def _session_ready_timeout() -> float:
+    """Return the configured cua-driver MCP cold-start budget in seconds."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly() or {}
+        computer_use = config.get("computer_use") or {}
+        raw = computer_use.get(
+            "cua_driver_ready_timeout",
+            _DEFAULT_SESSION_READY_TIMEOUT,
+        )
+    except Exception:
+        return _DEFAULT_SESSION_READY_TIMEOUT
+
+    # YAML booleans are ints in Python; accepting ``true`` as one second would
+    # turn a harmless config typo into an almost guaranteed startup failure.
+    if isinstance(raw, bool):
+        return _DEFAULT_SESSION_READY_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_SESSION_READY_TIMEOUT
+    if (
+        not math.isfinite(value)
+        or value < _DEFAULT_SESSION_READY_TIMEOUT
+        or value > threading.TIMEOUT_MAX
+    ):
+        return _DEFAULT_SESSION_READY_TIMEOUT
+    return value
 
 
 def cua_driver_binary_available() -> bool:
@@ -674,13 +709,17 @@ class _CuaDriverSession:
         loop = self._bridge._loop
         if loop is None:
             raise RuntimeError("cua-driver bridge not started")
+        ready_timeout = _session_ready_timeout()
         self._lifecycle_future = asyncio.run_coroutine_threadsafe(
             self._lifecycle_coro(), loop
         )
-        if not self._ready_event.wait(timeout=15.0):
+        if not self._ready_event.wait(timeout=ready_timeout):
             # Best-effort: signal shutdown if the future is still alive.
             self._signal_shutdown_locked()
-            raise RuntimeError("cua-driver session never reached ready (timeout 15s)")
+            raise RuntimeError(
+                "cua-driver session never reached ready "
+                f"(timeout {ready_timeout:g}s)"
+            )
         # If setup failed, the lifecycle coroutine set _setup_error
         # before setting _ready_event. Re-raise it on the caller's thread.
         if self._setup_error is not None:

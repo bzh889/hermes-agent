@@ -3085,6 +3085,10 @@ DEFAULT_CONFIG = {
         # every invocation (MCP backend, status, doctor, install). Set true
         # to let cua-driver use its own default (telemetry on).
         "cua_telemetry": False,
+        # Seconds to wait for the native MCP driver to finish cold-starting.
+        # Enterprise endpoint protection can make the first launch unusually
+        # slow; increase this value instead of weakening process protection.
+        "cua_driver_ready_timeout": 15,
     },
 
     # Hermes Desktop (Electron app) launch options. These only affect
