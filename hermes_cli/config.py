@@ -3088,6 +3088,7 @@ DEFAULT_CONFIG = {
         # Seconds to wait for the native MCP driver to finish cold-starting.
         # Enterprise endpoint protection can make the first launch unusually
         # slow; increase this value instead of weakening process protection.
+        # Values below 15 or outside the platform wait limit fall back to 15.
         "cua_driver_ready_timeout": 15,
     },
 

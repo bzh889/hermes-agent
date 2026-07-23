@@ -237,7 +237,7 @@ def _session_ready_timeout() -> float:
         return _DEFAULT_SESSION_READY_TIMEOUT
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return _DEFAULT_SESSION_READY_TIMEOUT
     if (
         not math.isfinite(value)
@@ -692,8 +692,13 @@ class _CuaDriverSession:
         with self._lock:
             if self._started:
                 return
-            self._bridge.start()
-            self._start_lifecycle_locked()
+            try:
+                self._bridge.start()
+                self._start_lifecycle_locked()
+            except BaseException:
+                self._stop_lifecycle_locked()
+                self._bridge.stop()
+                raise
             self._started = True
 
     def _start_lifecycle_locked(self) -> None:

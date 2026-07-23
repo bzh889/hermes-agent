@@ -1416,6 +1416,23 @@ class TestCuaDriverReadyTimeout:
         with patch("hermes_cli.config.load_config_readonly", return_value=config):
             assert _session_ready_timeout() == 45.0
 
+    def test_real_config_yaml_preserves_sibling_settings(self, tmp_path, monkeypatch):
+        from hermes_cli.config import load_config_readonly
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "computer_use:\n"
+            "  cua_telemetry: true\n"
+            "  cua_driver_ready_timeout: 45\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert _session_ready_timeout() == 45.0
+        assert load_config_readonly()["computer_use"]["cua_telemetry"] is True
+
     @pytest.mark.parametrize(
         "value",
         [True, 0, 1, -1, "not-a-number", "nan", "inf", 1e300],
@@ -1435,6 +1452,63 @@ class TestCuaDriverReadyTimeout:
             side_effect=RuntimeError("boom"),
         ):
             assert _session_ready_timeout() == 15.0
+
+    def test_huge_integer_falls_back_to_default(self):
+        from tools.computer_use.cua_backend import _session_ready_timeout
+
+        config = {"computer_use": {"cua_driver_ready_timeout": 10**1000}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            assert _session_ready_timeout() == 15.0
+
+    def test_start_failure_stops_lifecycle_and_bridge(self):
+        import threading
+        from types import SimpleNamespace
+
+        from tools.computer_use.cua_backend import _CuaDriverSession
+
+        calls = []
+        session = _CuaDriverSession.__new__(_CuaDriverSession)
+        session._lock = threading.Lock()
+        session._started = False
+        session._bridge = SimpleNamespace(
+            start=lambda: calls.append("bridge-start"),
+            stop=lambda: calls.append("bridge-stop"),
+        )
+
+        def fail_start():
+            calls.append("lifecycle-start")
+            raise RuntimeError("boom")
+
+        session._start_lifecycle_locked = fail_start
+        session._stop_lifecycle_locked = lambda: calls.append("lifecycle-stop")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            session.start()
+
+        assert session._started is False
+        assert calls == [
+            "bridge-start",
+            "lifecycle-start",
+            "lifecycle-stop",
+            "bridge-stop",
+        ]
+
+    def test_start_failure_terminates_real_bridge(self, monkeypatch):
+        from tools.computer_use.cua_backend import _AsyncBridge, _CuaDriverSession
+
+        bridge = _AsyncBridge()
+        session = _CuaDriverSession(bridge)
+
+        def fail_start():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(session, "_start_lifecycle_locked", fail_start)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            session.start()
+
+        assert bridge._thread is None
+        assert bridge._loop is None
 
     def test_lifecycle_wait_uses_configured_timeout(self, monkeypatch):
         import asyncio
