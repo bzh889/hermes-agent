@@ -4484,7 +4484,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
     ) -> dict | None:
-        """Resolve reasoning effort for a session, honoring session overrides."""
+        """Resolve session, platform, then global reasoning effort."""
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
             try:
@@ -4495,6 +4495,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
         if resolved_session_key and resolved_session_key in overrides:
             return overrides[resolved_session_key]
+
+        if source is not None:
+            from hermes_constants import parse_reasoning_effort
+
+            cfg = _load_gateway_runtime_config()
+            platform_key = _platform_config_key(source.platform)
+            effort = str(
+                cfg_get(
+                    cfg,
+                    "agent",
+                    "platforms",
+                    platform_key,
+                    "reasoning_effort",
+                    default="",
+                )
+                or ""
+            ).strip()
+            if effort:
+                result = parse_reasoning_effort(effort)
+                if result is not None:
+                    return result
+                logger.warning(
+                    "Unknown reasoning_effort '%s' for platform '%s', using global setting",
+                    effort,
+                    platform_key,
+                )
+
         return self._load_reasoning_config()
 
     def _set_session_reasoning_override(

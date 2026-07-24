@@ -1,5 +1,8 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
+import subprocess
+import threading
 import time
 from types import SimpleNamespace
 
@@ -19,6 +22,44 @@ def _fake_invoke_jwt(ttl_seconds=3600):
         ).encode()
     ).decode().rstrip("=")
     return f"{header}.{payload}.sig"
+
+
+def test_run_api_key_helper_reuses_recent_success(monkeypatch):
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="cached-token\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert rp.run_api_key_helper("helper-cache-test --token") == "cached-token"
+    assert rp.run_api_key_helper("helper-cache-test --token") == "cached-token"
+    assert len(calls) == 1
+
+
+def test_run_api_key_helper_collapses_concurrent_calls(monkeypatch):
+    calls = []
+    calls_lock = threading.Lock()
+
+    def fake_run(*args, **kwargs):
+        with calls_lock:
+            calls.append((args, kwargs))
+        time.sleep(0.05)
+        return SimpleNamespace(stdout="shared-token\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(
+            executor.map(
+                rp.run_api_key_helper,
+                ["helper-singleflight-test --token"] * 6,
+            )
+        )
+
+    assert results == ["shared-token"] * 6
+    assert len(calls) == 1
 
 
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):

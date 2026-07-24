@@ -233,6 +233,8 @@ export class GatewayClient extends EventEmitter {
 
   private startReadyTimer(python: string, cwd: string) {
     this.readyTimer = setTimeout(() => {
+      this.readyTimer = null
+
       if (this.ready) {
         return
       }
@@ -249,7 +251,44 @@ export class GatewayClient extends EventEmitter {
         type: 'gateway.start_timeout',
         payload: { cwd, python, stderr_tail: stderrTail }
       })
+      this.exitUnreadyTransport()
     }, STARTUP_TIMEOUT_MS)
+  }
+
+  private exitUnreadyTransport() {
+    const reason = 'gateway ready timeout'
+
+    this.lifecycle('[startup] gateway.ready timeout; forcing transport exit')
+
+    // Detach first so the old transport's eventual exit/close is classified as
+    // stale by the existing identity guards. Emit the synthetic exit now rather
+    // than waiting forever for a wedged child/socket to acknowledge teardown.
+    const proc = this.proc
+
+    if (proc) {
+      this.proc = null
+
+      try {
+        if (!proc.kill()) {
+          this.pushLog(`[startup] timed-out gateway child did not accept kill ${describeChild(proc)}`)
+        }
+      } catch (err) {
+        this.pushLog(`[startup] failed to kill timed-out gateway child: ${String(err)}`)
+      }
+
+      this.handleTransportExit(1, reason)
+
+      return
+    }
+
+    if (this.ws) {
+      this.closeGatewaySocket()
+      this.handleTransportExit(1, reason)
+
+      return
+    }
+
+    this.handleTransportExit(1, reason)
   }
 
   private handleTransportExit(code: null | number, reason?: string) {

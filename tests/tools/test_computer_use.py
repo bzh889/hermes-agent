@@ -1734,6 +1734,68 @@ class TestFocusAppFilterNoMatch:
         assert backend._active_window_id == 2
 
 
+class TestMultipleWindowSelection:
+    def test_focus_app_accepts_exact_window_title(self):
+        windows = [
+            {"app_name": "Windows Terminal", "pid": 100, "window_id": 1,
+             "is_on_screen": True, "title": "PowerShell", "z_index": 0},
+            {"app_name": "Windows Terminal", "pid": 100, "window_id": 2,
+             "is_on_screen": True, "title": "Hermes Agent", "z_index": 1},
+        ]
+        backend = _make_cua_backend_with_windows(windows)
+
+        res = backend.focus_app("Windows Terminal", window_title="Hermes Agent")
+
+        assert res.ok is True
+        assert backend._active_window_id == 2
+
+    def test_capture_reuses_active_window_for_same_app(self):
+        windows = [
+            {"app_name": "Windows Terminal", "pid": 100, "window_id": 1,
+             "is_on_screen": True, "title": "PowerShell", "z_index": 0},
+            {"app_name": "Windows Terminal", "pid": 100, "window_id": 2,
+             "is_on_screen": True, "title": "Hermes Agent", "z_index": 1},
+        ]
+        backend = _make_cua_backend_with_windows(windows)
+        backend._active_pid = 100
+        backend._active_window_id = 2
+
+        backend.capture(mode="ax", app="Windows Terminal")
+
+        assert backend._active_window_id == 2
+
+    def test_list_apps_includes_window_titles_and_ids(self):
+        from tools.computer_use.cua_backend import CuaDriverBackend
+
+        backend = CuaDriverBackend()
+        backend._session = MagicMock()
+        backend._session.call_tool.side_effect = [
+            {
+                "data": [{"name": "Windows Terminal", "pid": 100,
+                          "window_count": 2}],
+                "structuredContent": None,
+            },
+            {
+                "data": "",
+                "structuredContent": {"windows": [
+                    {"app_name": "Windows Terminal", "pid": 100,
+                     "window_id": 1, "is_on_screen": True,
+                     "title": "PowerShell", "z_index": 0},
+                    {"app_name": "Windows Terminal", "pid": 100,
+                     "window_id": 2, "is_on_screen": True,
+                     "title": "Hermes Agent", "z_index": 1},
+                ]},
+            },
+        ]
+
+        apps = backend.list_apps()
+
+        assert apps[0]["windows"] == [
+            {"window_id": 1, "title": "PowerShell", "z_index": 0},
+            {"window_id": 2, "title": "Hermes Agent", "z_index": 1},
+        ]
+
+
 class TestCuaEnvironmentScrubbing:
     """Verify that cua-driver subprocess environment is sanitized (issue #37878)."""
 

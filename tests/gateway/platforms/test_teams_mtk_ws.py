@@ -85,23 +85,57 @@ class _FakeWS:
 
 class TestTrouterListener:
 
-    def test_handshake_uses_requests_client(self):
-        """WS-1: the real handshake path has an available HTTP client."""
+    def test_register_uses_configured_ca_bundle(self, monkeypatch):
+        """Trouter registration must not bypass the Teams combined CA."""
         from gateway.platforms.teams_mtk import _TrouterListener
 
+        bundle = "C:/Users/test/.hermes/certs/mtk-combined-ca.pem"
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", bundle)
+        auth = _make_auth()
+        auth.client_id.return_value = "client-id"
+        listener = _TrouterListener(auth, AsyncMock(), MagicMock())
         response = MagicMock()
-        response.text = "session-123:60:60:websocket"
-        listener = _TrouterListener(_make_auth(), AsyncMock(), MagicMock())
+        response.read.return_value = b"{}"
+        response.__enter__.return_value = response
+        context = MagicMock()
 
-        with patch("requests.get", return_value=response) as get:
+        with patch("ssl.create_default_context", return_value=context) as create_context, \
+             patch("urllib.request.urlopen", return_value=response) as urlopen:
+            assert listener._register("fake-ic3") == {}
+
+        auth._inject_truststore.assert_called_once_with()
+        create_context.assert_called_once_with(cafile=bundle)
+        assert urlopen.call_args.kwargs["context"] is context
+
+    def test_handshake_uses_urllib_with_configured_ca(self, monkeypatch):
+        """The requests TLS stack EOFs against MTK Trouter; urllib is stable."""
+        from gateway.platforms.teams_mtk import _TrouterListener
+
+        bundle = "C:/Users/test/.hermes/certs/mtk-combined-ca.pem"
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", bundle)
+        auth = _make_auth()
+        auth.client_id.return_value = "client-id"
+        listener = _TrouterListener(auth, AsyncMock(), MagicMock())
+        response = MagicMock()
+        response.read.return_value = b"session-123:60:60:websocket"
+        response.__enter__.return_value = response
+        context = MagicMock()
+
+        with patch("ssl.create_default_context", return_value=context) as create_context, \
+             patch("urllib.request.urlopen", return_value=response) as urlopen:
             session_id, params = listener._handshake(
                 _trouter_info(), "fake_ic3", "fake_skype",
             )
 
         assert session_id == "session-123"
         assert params["ccid"] == "cc-test"
-        get.assert_called_once()
-        response.raise_for_status.assert_called_once()
+        auth._inject_truststore.assert_called_once_with()
+        create_context.assert_called_once_with(cafile=bundle)
+        assert urlopen.call_args.kwargs["context"] is context
+        assert urlopen.call_args.kwargs["timeout"] == 20
+        request = urlopen.call_args.args[0]
+        assert request.get_header("Authorization") == "Bearer fake_ic3"
+        assert request.get_header("Authentication") == "skypetoken=fake_skype"
 
     def test_is_healthy_supports_websockets_15_client_connection(self):
         """WS-3: websockets 15 exposes ``state`` instead of ``closed``."""

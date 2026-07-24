@@ -2790,6 +2790,11 @@ DEFAULT_CONFIG = {
 
         # MTK internal Teams adapter (gateway/platforms/teams_mtk.py).
         "teams_mtk": {
+            # Optional PEM bundle containing public roots plus the corporate
+            # TLS-interception root. Applied to SDK requests, raw requests,
+            # and urllib before polling starts. Keep empty to use OS/default
+            # trust only.
+            "ca_bundle": "",
             # Per-group whitelist + policy overrides, keyed by conversation
             # id (the same id format used in MTK_TEAMS_CONVERSATION_ID,
             # e.g. "19:xxx@thread.v2"). A conv_id present here authorizes

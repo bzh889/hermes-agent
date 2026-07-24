@@ -22,6 +22,57 @@ def _jwt_with_claims(**claims) -> str:
     return f"{header}.{payload}."
 
 
+def test_inject_truststore_applies_configured_ca_bundle(tmp_path, monkeypatch):
+    """A configured bundle must reach requests and urllib despite import order."""
+    bundle = tmp_path / "combined-ca.pem"
+    bundle.write_text("test bundle", encoding="utf-8")
+    for key in ("HERMES_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(key, raising=False)
+
+    auth = _TeamsAuth()
+    inject = MagicMock()
+    with patch(
+        "hermes_cli.config.load_config_readonly",
+        return_value={"gateway": {"teams_mtk": {"ca_bundle": str(bundle)}}},
+    ), patch.dict(sys.modules, {"truststore": MagicMock(inject_into_ssl=inject)}):
+        auth._inject_truststore()
+        auth._inject_truststore()
+
+    assert os.environ["REQUESTS_CA_BUNDLE"] == str(bundle)
+    assert os.environ["SSL_CERT_FILE"] == str(bundle)
+    inject.assert_not_called()
+
+
+def test_inject_truststore_without_bundle_uses_os_store(monkeypatch):
+    """OS truststore remains the fallback when no explicit bundle exists."""
+    for key in ("HERMES_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(key, raising=False)
+
+    auth = _TeamsAuth()
+    inject = MagicMock()
+    with patch("hermes_cli.config.load_config_readonly", return_value={}),             patch.dict(sys.modules, {"truststore": MagicMock(inject_into_ssl=inject)}):
+        auth._inject_truststore()
+        auth._inject_truststore()
+
+    inject.assert_called_once_with()
+
+
+def test_inject_truststore_falls_back_to_existing_hermes_bundle(tmp_path, monkeypatch):
+    """The existing cross-Hermes CA convention remains supported."""
+    bundle = tmp_path / "hermes-ca.pem"
+    bundle.write_text("test bundle", encoding="utf-8")
+    monkeypatch.setenv("HERMES_CA_BUNDLE", str(bundle))
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    auth = _TeamsAuth()
+    with patch("hermes_cli.config.load_config_readonly", return_value={}):
+        auth._inject_truststore()
+
+    assert os.environ["REQUESTS_CA_BUNDLE"] == str(bundle)
+    assert os.environ["SSL_CERT_FILE"] == str(bundle)
+
+
 def test_oauth_token_url_uses_tenant_from_cached_access_token():
     tenant_id = str(uuid.UUID(int=1))
 

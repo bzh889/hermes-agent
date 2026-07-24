@@ -193,7 +193,8 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def stop(self) -> None: self._started = False
     def is_available(self) -> bool: return True
 
-    def capture(self, mode: str = "som", app: Optional[str] = None) -> CaptureResult:
+    def capture(self, mode: str = "som", app: Optional[str] = None,
+                window_title: Optional[str] = None) -> CaptureResult:
         self.calls.append(("capture", {"mode": mode, "app": app}))
         return CaptureResult(mode=mode, width=1024, height=768, png_b64=None,
                              elements=[], app=app or "", window_title="")
@@ -222,8 +223,10 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
         self.calls.append(("list_apps", {}))
         return []
 
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        self.calls.append(("focus_app", {"app": app, "raise": raise_window}))
+    def focus_app(self, app: str, raise_window: bool = False,
+                  window_title: Optional[str] = None) -> ActionResult:
+        self.calls.append(("focus_app", {"app": app, "raise": raise_window,
+                                         "window_title": window_title}))
         return ActionResult(ok=True, action="focus_app")
 
     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
@@ -347,7 +350,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         mode = str(args.get("mode", "som"))
         if mode not in {"som", "vision", "ax"}:
             return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
-        cap = backend.capture(mode=mode, app=args.get("app"))
+        capture_args: Dict[str, Any] = {"mode": mode, "app": args.get("app")}
+        if args.get("window_title") is not None:
+            capture_args["window_title"] = args["window_title"]
+        cap = backend.capture(**capture_args)
         return _capture_response(cap, max_elements=_coerce_max_elements(args.get("max_elements")))
 
     if action == "wait":
@@ -363,7 +369,12 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         app = args.get("app")
         if not app:
             return json.dumps({"error": "focus_app requires `app`"})
-        res = backend.focus_app(app, raise_window=bool(args.get("raise_window")))
+        focus_args: Dict[str, Any] = {
+            "raise_window": bool(args.get("raise_window")),
+        }
+        if args.get("window_title") is not None:
+            focus_args["window_title"] = args["window_title"]
+        res = backend.focus_app(app, **focus_args)
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action in {"click", "double_click", "right_click", "middle_click"}:

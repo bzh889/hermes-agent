@@ -1280,9 +1280,12 @@ Control how much "thinking" the model does before responding:
 ```yaml
 agent:
   reasoning_effort: ""   # empty = medium (default). Options: none, minimal, low, medium, high, xhigh (max)
+  platforms:
+    teams_mtk:
+      reasoning_effort: low  # optional platform override
 ```
 
-When unset (default), reasoning effort defaults to "medium" — a balanced level that works well for most tasks. Setting a value overrides it — higher reasoning effort gives better results on complex tasks at the cost of more tokens and latency.
+When unset (default), reasoning effort defaults to "medium" — a balanced level that works well for most tasks. Setting a value overrides it — higher reasoning effort gives better results on complex tasks at the cost of more tokens and latency. Gateway platforms can override the global value under `agent.platforms.<platform>.reasoning_effort`; a session-level `/reasoning` override still takes precedence over both.
 
 :::note Adaptive-thinking models (Claude 4.6+, Fable/Mythos-class) over OpenRouter
 These models use *adaptive* thinking and don't accept the usual `reasoning.effort`

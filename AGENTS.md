@@ -1213,6 +1213,22 @@ automatically scope to the active profile.
 
 ## Known Pitfalls
 
+### Guard native Windows `/FLAG` arguments under Git Bash
+
+Hermes `terminal` commands run through MSYS/Git Bash on Windows. Before launching
+a native Windows executable, MSYS may rewrite slash-prefixed switches such as
+`/PID` into paths (for example, `C:/Program Files/Git/PID`). Prefix commands that
+use Windows-style switches with `MSYS2_ARG_CONV_EXCL='*'`:
+
+```bash
+MSYS2_ARG_CONV_EXCL='*' taskkill.exe /PID "$pid" /T /F
+```
+
+Do not diagnose the resulting converted-path error as a `taskkill` or target
+process failure. Prefer the scoped environment prefix above over disabling MSYS
+argument conversion globally, because global disabling breaks legitimate POSIX
+paths passed to Windows-native tools.
+
 ### DO NOT hardcode `~/.hermes` paths
 Use `get_hermes_home()` from `hermes_constants` for code paths. Use `display_hermes_home()`
 for user-facing print/log messages. Hardcoding `~/.hermes` breaks profiles — each profile

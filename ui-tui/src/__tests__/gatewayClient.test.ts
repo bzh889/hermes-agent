@@ -112,6 +112,8 @@ describe('GatewayClient websocket attach mode', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
+
     if (originalGatewayUrl === undefined) {
       delete process.env.HERMES_TUI_GATEWAY_URL
     } else {
@@ -131,6 +133,27 @@ describe('GatewayClient websocket attach mode', () => {
     } else {
       delete (globalThis as { WebSocket?: unknown }).WebSocket
     }
+  })
+
+  it('exits an attached transport that connects but never becomes ready', async () => {
+    vi.useFakeTimers()
+    process.env.HERMES_TUI_GATEWAY_URL = 'ws://gateway.test/api/ws?token=abc'
+    const gw = new GatewayClient()
+    const onExit = vi.fn()
+
+    gw.on('exit', onExit)
+    gw.start()
+    gw.drain()
+    await Promise.resolve()
+
+    const gatewaySocket = FakeWebSocket.instances[0]!
+
+    gatewaySocket.open()
+    vi.runOnlyPendingTimers()
+
+    expect(gatewaySocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(onExit).toHaveBeenCalledOnce()
+    expect(gw.getLogTail(20)).toContain('forcing transport exit')
   })
 
   it('waits for websocket open and resolves RPC requests', async () => {

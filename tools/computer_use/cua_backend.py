@@ -1053,38 +1053,15 @@ class CuaDriverBackend(ComputerUseBackend):
         return cua_driver_binary_available()
 
     # ── Capture ────────────────────────────────────────────────────
-    def capture(self, mode: str = "som", app: Optional[str] = None) -> CaptureResult:
-        """Capture the frontmost on-screen window (optionally filtered by app name).
+    def capture(self, mode: str = "som", app: Optional[str] = None,
+                window_title: Optional[str] = None) -> CaptureResult:
+        """Capture an on-screen window filtered by app and optional title.
 
         Maps hermes `capture(mode, app)` → cua-driver `list_windows` +
         `get_window_state` (ax/som) or `screenshot` (vision).
         """
         # Step 1: enumerate on-screen windows to find target pid/window_id.
-        # Surface 3 of NousResearch/hermes-agent#47072: read the canonical
-        # `structuredContent.windows` array directly. Pre-fix the wrapper
-        # also kept a text-line regex (`_WINDOW_LINE_RE`) as a fallback for
-        # cua-driver builds that predated structuredContent; the supersede
-        # PR's effective minimum (trycua/cua#1961 + #1908) is well past
-        # that, so the fallback is gone — the wrapper now treats the
-        # structured shape as the only contract.
-        lw_out = self._session.call_tool(
-            "list_windows",
-            {"on_screen_only": True, "session": self._session_id},
-        )
-        raw_windows = (lw_out.get("structuredContent") or {}).get("windows") or []
-        windows = [
-            {
-                "app_name": w.get("app_name", ""),
-                "pid": int(w["pid"]),
-                "window_id": int(w["window_id"]),
-                "off_screen": not w.get("is_on_screen", True),
-                "title": w.get("title", ""),
-                "z_index": w.get("z_index", 0),
-            }
-            for w in raw_windows
-        ]
-        # Sort by z_index descending (lowest z_index = frontmost on macOS).
-        windows.sort(key=lambda w: w["z_index"])
+        windows = self._list_windows(on_screen_only=True)
 
         if not windows:
             return CaptureResult(mode=mode, width=0, height=0, png_b64=None,
@@ -1133,15 +1110,17 @@ class CuaDriverBackend(ComputerUseBackend):
                 ) else 1,
             )
         elif app:
-            app_lower = app.lower()
-            filtered = [w for w in windows if app_lower in w["app_name"].lower()]
+            app_lower = app.casefold()
+            filtered = [
+                w for w in windows if app_lower in w["app_name"].casefold()
+            ]
             if not filtered:
                 return CaptureResult(
                     mode=mode, width=0, height=0, png_b64=None,
                     elements=[], app="",
                     window_title=(
                         f"<no on-screen window matched app={app!r}; "
-                        f"call list_apps to see available app names "
+                        f"call list_apps to see available app names and window titles "
                         f"(macOS reports localized names, e.g. '計算機' "
                         f"instead of 'Calculator')>"
                     ),
@@ -1149,8 +1128,37 @@ class CuaDriverBackend(ComputerUseBackend):
                 )
             windows = filtered
 
-        # Pick first on-screen window (sorted by z_index / z-order above).
-        target = next((w for w in windows if not w["off_screen"]), windows[0])
+        if window_title:
+            title_lower = window_title.casefold()
+            exact_titles = [
+                w for w in windows if w["title"].casefold() == title_lower
+            ]
+            title_matches = exact_titles or [
+                w for w in windows if title_lower in w["title"].casefold()
+            ]
+            if not title_matches:
+                return CaptureResult(
+                    mode=mode, width=0, height=0, png_b64=None,
+                    elements=[], app="",
+                    window_title=(
+                        f"<no on-screen window matched window_title={window_title!r}"
+                        + (f" within app={app!r}" if app else "")
+                        + "; call list_apps to see available window titles>"
+                    ),
+                    png_bytes_len=0,
+                )
+            windows = title_matches
+
+        # Preserve the exact window selected by a prior capture/focus call. This
+        # keeps capture_after on the same window when an app owns several windows.
+        active_target = next((
+            w for w in windows
+            if w["window_id"] == self._active_window_id
+            and (self._active_pid is None or w["pid"] == self._active_pid)
+        ), None)
+        target = active_target or next(
+            (w for w in windows if not w["off_screen"]), windows[0]
+        )
         self._active_pid = target["pid"]
         self._active_window_id = target["window_id"]
         app_name = target["app_name"]
@@ -1442,54 +1450,102 @@ class CuaDriverBackend(ComputerUseBackend):
         return self._action("set_value", args)
 
     # ── Introspection ──────────────────────────────────────────────
-    def list_apps(self) -> List[Dict[str, Any]]:
-        out = self._session.call_tool("list_apps", {"session": self._session_id})
-        data = out["data"]
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return data.get("apps", [])
-        # list_apps returns plain text — parse app lines.
-        if isinstance(data, str):
-            apps = []
-            for line in data.splitlines():
-                m = re.search(r'(.+?)\s+\(pid\s+(\d+)\)', line)
-                if m:
-                    apps.append({"name": m.group(1).strip(), "pid": int(m.group(2))})
-            return apps
-        return []
-
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        """Target an app for subsequent actions without stealing system focus.
-
-        cua-driver background-automation never needs to bring a window to the
-        front: capture(app=...) already selects the right window via
-        list_windows. We implement focus_app as a pure window-selector —
-        enumerate on-screen windows, find the best match for *app*, and store
-        its pid/window_id so that subsequent click/type calls hit the right
-        process.
-
-        raise_window=True is intentionally ignored: stealing the user's focus
-        is exactly what this backend is designed to avoid.
-        """
-        lw_out = self._session.call_tool(
+    def _list_windows(self, on_screen_only: bool = True) -> List[Dict[str, Any]]:
+        """Return cua-driver's canonical windows in stable z-order."""
+        out = self._session.call_tool(
             "list_windows",
-            {"on_screen_only": True, "session": self._session_id},
+            {"on_screen_only": on_screen_only, "session": self._session_id},
         )
-        raw_windows = (lw_out.get("structuredContent") or {}).get("windows") or []
+        raw_windows = (out.get("structuredContent") or {}).get("windows") or []
         windows = [
             {
                 "app_name": w.get("app_name", ""),
                 "pid": int(w["pid"]),
                 "window_id": int(w["window_id"]),
+                "off_screen": not w.get("is_on_screen", True),
+                "title": w.get("title", ""),
                 "z_index": w.get("z_index", 0),
             }
             for w in raw_windows
         ]
         windows.sort(key=lambda w: w["z_index"])
+        return windows
 
-        app_lower = app.lower()
-        matched = [w for w in windows if app_lower in w["app_name"].lower()]
+    def list_apps(self) -> List[Dict[str, Any]]:
+        out = self._session.call_tool("list_apps", {"session": self._session_id})
+        data = out["data"]
+        if isinstance(data, list):
+            apps = data
+        elif isinstance(data, dict):
+            apps = data.get("apps", [])
+        elif isinstance(data, str):
+            # Older drivers return plain text — parse app lines.
+            apps = []
+            for line in data.splitlines():
+                m = re.search(r'(.+?)\s+\(pid\s+(\d+)\)', line)
+                if m:
+                    apps.append({"name": m.group(1).strip(), "pid": int(m.group(2))})
+        else:
+            apps = []
+
+        if not apps:
+            return apps
+
+        try:
+            windows = self._list_windows(on_screen_only=True)
+        except Exception as exc:
+            # Keep list_apps usable with older cua-driver builds that lack the
+            # structured list_windows contract.
+            logger.debug("computer_use: could not enrich apps with windows: %s", exc)
+            return apps
+
+        windows_by_pid: Dict[int, List[Dict[str, Any]]] = {}
+        for window in windows:
+            windows_by_pid.setdefault(window["pid"], []).append({
+                "window_id": window["window_id"],
+                "title": window["title"],
+                "z_index": window["z_index"],
+            })
+
+        enriched: List[Dict[str, Any]] = []
+        for app in apps:
+            item = dict(app)
+            try:
+                pid = int(item.get("pid"))
+            except (TypeError, ValueError):
+                pid = -1
+            item["windows"] = windows_by_pid.get(pid, [])
+            enriched.append(item)
+        return enriched
+
+    def focus_app(self, app: str, raise_window: bool = False,
+                  window_title: Optional[str] = None) -> ActionResult:
+        """Target an app for subsequent actions without stealing system focus.
+
+        cua-driver background-automation never needs to bring a window to the
+        front: capture(app=...) already selects the right window via
+        list_windows. We implement focus_app as a pure window-selector —
+        enumerate on-screen windows, match *app* by app name, optionally narrow
+        by *window_title*, and store its pid/window_id so subsequent click/type
+        calls hit the right process.
+
+        raise_window=True is intentionally ignored: stealing the user's focus
+        is exactly what this backend is designed to avoid.
+        """
+        windows = self._list_windows(on_screen_only=True)
+
+        app_lower = app.casefold()
+        matched = [
+            w for w in windows if app_lower in w["app_name"].casefold()
+        ]
+        if window_title:
+            title_lower = window_title.casefold()
+            exact_titles = [
+                w for w in matched if w["title"].casefold() == title_lower
+            ]
+            matched = exact_titles or [
+                w for w in matched if title_lower in w["title"].casefold()
+            ]
         # Don't silently fall back to the frontmost window when the filter
         # matches nothing — that hides the real failure (often a localized
         # macOS app name mismatch, e.g. caller passed "Calculator" but
@@ -1504,8 +1560,11 @@ class CuaDriverBackend(ComputerUseBackend):
                 message=f"Targeted {target['app_name']} (pid {self._active_pid}, "
                         f"window {self._active_window_id}) without raising window.",
             )
+        detail = f" app '{app}'"
+        if window_title:
+            detail += f" with window title '{window_title}'"
         return ActionResult(ok=False, action="focus_app",
-                            message=f"No on-screen window found for app '{app}'.")
+                            message=f"No on-screen window found for{detail}.")
 
     # ── App lifecycle ────────────────────────────────────────────────
     #

@@ -5,10 +5,18 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
 from urllib.parse import urlparse
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+_API_KEY_HELPER_CACHE_TTL_SECONDS = 30.0
+_API_KEY_HELPER_FAILURE_TTL_SECONDS = 5.0
+_api_key_helper_cache: Dict[str, tuple[float, str]] = {}
+_api_key_helper_locks: Dict[str, threading.Lock] = {}
+_api_key_helper_state_lock = threading.Lock()
 
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
@@ -92,7 +100,8 @@ def run_api_key_helper(command: str) -> str:
     """Run an api_key_helper command and return its stdout as the API key.
 
     Uses stdin=DEVNULL because some helpers (e.g. coding-cli-helper.exe)
-    hang when stdin is a pipe or non-console handle.
+    hang when stdin is a pipe or non-console handle. Recent results are cached
+    and concurrent callers for the same command share one helper process.
     Retries once on timeout since CCH can be slow under concurrent calls.
     """
     import subprocess, shlex
@@ -100,30 +109,66 @@ def run_api_key_helper(command: str) -> str:
         args = shlex.split(command, posix=False)
     else:
         args = command
-    for attempt in range(2):
-        try:
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                stdin=subprocess.DEVNULL,
+    cache_key = repr(args)
+
+    def cached_value() -> tuple[bool, str]:
+        now = time.monotonic()
+        with _api_key_helper_state_lock:
+            cached = _api_key_helper_cache.get(cache_key)
+            if cached is None:
+                return False, ""
+            cached_at, value = cached
+            ttl = (
+                _API_KEY_HELPER_CACHE_TTL_SECONDS
+                if value
+                else _API_KEY_HELPER_FAILURE_TTL_SECONDS
             )
-            key = result.stdout.strip()
-            if key:
-                logger.debug("api_key_helper produced a key (len=%d)", len(key))
-                return key
-            if result.stderr:
-                logger.warning("api_key_helper stderr: %s", result.stderr[:200])
-        except subprocess.TimeoutExpired:
-            if attempt == 0:
-                logger.debug("api_key_helper timed out, retrying...")
-                continue
-            logger.warning("api_key_helper timed out after retry")
-        except Exception as e:
-            logger.warning("api_key_helper failed: %s", e)
-            break
-    return ""
+            if now - cached_at < ttl:
+                return True, value
+            _api_key_helper_cache.pop(cache_key, None)
+            return False, ""
+
+    hit, value = cached_value()
+    if hit:
+        return value
+
+    with _api_key_helper_state_lock:
+        helper_lock = _api_key_helper_locks.setdefault(cache_key, threading.Lock())
+
+    with helper_lock:
+        # Another caller may have populated the cache while this caller waited.
+        hit, value = cached_value()
+        if hit:
+            return value
+
+        key = ""
+        for attempt in range(2):
+            try:
+                result = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    stdin=subprocess.DEVNULL,
+                )
+                key = result.stdout.strip()
+                if key:
+                    logger.debug("api_key_helper produced a key (len=%d)", len(key))
+                    break
+                if result.stderr:
+                    logger.warning("api_key_helper stderr: %s", result.stderr[:200])
+            except subprocess.TimeoutExpired:
+                if attempt == 0:
+                    logger.debug("api_key_helper timed out, retrying...")
+                    continue
+                logger.warning("api_key_helper timed out after retry")
+            except Exception as e:
+                logger.warning("api_key_helper failed: %s", e)
+                break
+
+        with _api_key_helper_state_lock:
+            _api_key_helper_cache[cache_key] = (time.monotonic(), key)
+        return key
 
 
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:

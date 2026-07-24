@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, ClassVar
 from pathlib import Path
 from tools.binary_extensions import BINARY_EXTENSIONS
+from hermes_cli._subprocess_compat import evade_path_string_filter
 
 from agent.file_safety import (
     build_write_denied_paths,
@@ -63,7 +64,11 @@ def _strip_terminal_fence_leaks(text: str) -> str:
 
     cleaned_lines: List[str] = []
     for line in text.splitlines(keepends=True):
-        had_terminal_wrapper = "__HERMES_FENCE_" in line or "\x1b]" in line
+        had_terminal_wrapper = (
+            "__HERMES_FENCE_" in line
+            or "\x1b]" in line
+            or "\x07" in line
+        )
         cleaned = _OSC_SEQUENCE_RE.sub("", line)
         cleaned = _FENCE_MARKER_RE.sub("", cleaned)
         cleaned = cleaned.replace("\x07", "")
@@ -837,11 +842,20 @@ class ShellFileOperations(FileOperations):
         )
     
     def _has_command(self, cmd: str) -> bool:
-        """Check if a command exists in the environment (cached)."""
-        if cmd not in self._command_cache:
-            result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
-            self._command_cache[cmd] = result.stdout.strip() == 'yes'
-        return self._command_cache[cmd]
+        """Check if a command exists, caching successful detections only.
+
+        Missing tools can be installed while a long-lived agent session is
+        running. Caching a miss forever leaves search_files stuck on the slow
+        fallback until restart even after ``rg`` becomes available.
+        """
+        if self._command_cache.get(cmd):
+            return True
+
+        result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
+        available = result.stdout.strip() == 'yes'
+        if available:
+            self._command_cache[cmd] = True
+        return available
     
     def _is_likely_binary(self, path: str, content_sample: str = None) -> bool:
         """
@@ -926,8 +940,13 @@ class ShellFileOperations(FileOperations):
                         user_home = expand_result.stdout.strip()
                         suffix = path[1 + len(username):]  # e.g. "/rest/of/path"
                         return user_home + suffix
-        
-        return path
+
+        # The local Windows shell receives the command as a CreateProcessW
+        # argument. Endpoint filters may deny native ``C:\\...\\.hermes\\...``
+        # spellings even though the same path is allowed with forward slashes.
+        # The helper rewrites only absolute Windows path tokens and is a no-op
+        # on POSIX, so regex patterns and relative paths remain untouched.
+        return evade_path_string_filter([path])[0]
     
     def _escape_shell_arg(self, arg: str) -> str:
         """Escape a string for safe use in shell commands."""

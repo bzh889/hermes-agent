@@ -204,6 +204,33 @@ class TestReasoningCommand:
 
         assert runner._resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
 
+    def test_resolve_session_reasoning_uses_platform_override_before_global(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "agent:\n"
+            "  reasoning_effort: xhigh\n"
+            "  platforms:\n"
+            "    teams_mtk:\n"
+            "      reasoning_effort: low\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+
+        runner = _make_runner()
+        teams_source = _make_event(platform=Platform.TEAMS_MTK).source
+        telegram_source = _make_event(platform=Platform.TELEGRAM).source
+
+        assert runner._resolve_session_reasoning_config(source=teams_source) == {
+            "enabled": True,
+            "effort": "low",
+        }
+        assert runner._resolve_session_reasoning_config(source=telegram_source) == {
+            "enabled": True,
+            "effort": "xhigh",
+        }
+
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()

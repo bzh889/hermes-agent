@@ -13,6 +13,7 @@ Implementation in teams_mtk.py makes them GREEN.
 """
 
 import asyncio
+import threading
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 import pytest
@@ -232,6 +233,45 @@ async def test_send_sdk_rewrites_hardcoded_amer_to_regional_endpoint():
     assert session.request.call_args.kwargs["headers"]["Authentication"] == (
         "skypetoken=regional-skype-token"
     )
+
+
+def test_sdk_fetch_reuses_one_http_transport_across_conversations():
+    """Polling must reuse keep-alive instead of repeating flaky TLS handshakes."""
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    layer = MagicMock()
+    layer._session = MagicMock()
+    service = MagicMock()
+    service.get_page.return_value = []
+
+    with patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=layer) as make_layer, \
+         patch("gateway.platforms.teams_mtk._SDKMessages", return_value=service):
+        adapter._fetch_via_sdk("conv-a", 1, 0.0)
+        adapter._fetch_via_sdk("conv-b", 1, 0.0)
+
+    make_layer.assert_called_once()
+    assert service.get_page.call_count == 2
+    assert adapter._sdk_http_layer is layer
+
+
+def test_sdk_fetch_discards_failed_transport_before_raw_fallback():
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    layer = MagicMock()
+    layer._session = MagicMock()
+    service = MagicMock()
+    service.get_page.side_effect = ConnectionError("dead TLS pool")
+
+    with patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=layer), \
+         patch("gateway.platforms.teams_mtk._SDKMessages", return_value=service), \
+         patch.object(adapter, "_fetch_via_raw", return_value=[]) as raw:
+        assert adapter._fetch_via_sdk("conv-a", 1, 0.0) == []
+
+    layer._session.close.assert_called_once_with()
+    assert adapter._sdk_http_layer is None
+    raw.assert_called_once()
 
 
 # ── §3 config: reply_throttle_seconds ────────────────────────────────────
@@ -512,6 +552,39 @@ async def test_poll_loop_fetches_conversations_in_parallel():
 
 class TestSendTyping:
     """Verify send_typing() sends Control/Typing via skypetoken."""
+
+    async def test_send_typing_does_not_block_event_loop(self):
+        """A slow typing POST must not delay inbound message dispatch."""
+        adapter = _make_adapter()
+        entered = threading.Event()
+        release = threading.Event()
+        mock_resp = MagicMock(status_code=201)
+        mock_session = MagicMock()
+
+        def _blocking_post(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=1.0)
+            return mock_resp
+
+        mock_session.post.side_effect = _blocking_post
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        with patch("requests.Session", return_value=mock_session), \
+             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+             patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
+             patch.object(adapter._auth, "_inject_truststore"):
+            started = asyncio.get_running_loop().time()
+            task = asyncio.create_task(adapter.send_typing("19:test@thread.v2"))
+            try:
+                await asyncio.sleep(0.05)
+                elapsed = asyncio.get_running_loop().time() - started
+            finally:
+                release.set()
+                await task
+
+        assert entered.is_set()
+        assert elapsed < 0.25, f"typing POST blocked the event loop for {elapsed:.3f}s"
 
     async def test_send_typing_posts_control_typing(self):
         """send_typing POSTs {"messagetype":"Control/Typing","content":""}."""

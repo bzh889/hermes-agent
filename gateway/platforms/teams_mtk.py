@@ -292,6 +292,7 @@ class _TeamsAuth:
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._truststore_lock = threading.Lock()
         self._truststore_injected = False
         self._msg_base: Optional[str] = None  # set from Skype authz region
         self._msg_base_discovery_attempted = False
@@ -302,15 +303,71 @@ class _TeamsAuth:
         self._skype_token: Optional[str] = None
 
     def _inject_truststore(self):
-        """Inject OS cert store via truststore (MTK SSL proxy compatibility)."""
+        """Configure TLS trust before any Teams HTTP session is used.
+
+        ``requests>=2.32`` caches a certifi-backed ``SSLContext`` when it is
+        imported. Injecting ``truststore`` later does not replace that cached
+        context, which made both the SDK and raw polling fallbacks fail behind
+        MTK's TLS-inspecting proxy. An explicit CA bundle path is honoured by
+        requests per request and by the stdlib/urllib stack, independent of
+        import order.
+        """
         if self._truststore_injected:
             return
-        try:
-            import truststore
-            truststore.inject_into_ssl()
-        except ImportError:
-            pass
-        self._truststore_injected = True
+        with self._truststore_lock:
+            if self._truststore_injected:
+                return
+
+            ca_bundle = ""
+            try:
+                from hermes_cli.config import load_config_readonly
+
+                configured = (
+                    load_config_readonly()
+                    .get("gateway", {})
+                    .get("teams_mtk", {})
+                    .get("ca_bundle", "")
+                )
+                if configured:
+                    candidate = Path(str(configured)).expanduser()
+                    if candidate.is_file():
+                        ca_bundle = str(candidate)
+                    else:
+                        logger.warning(
+                            "TeamsMTK: configured CA bundle does not exist: %s",
+                            candidate,
+                        )
+            except Exception:
+                pass
+
+            if not ca_bundle:
+                for env_var in (
+                    "HERMES_CA_BUNDLE",
+                    "REQUESTS_CA_BUNDLE",
+                    "SSL_CERT_FILE",
+                ):
+                    candidate = os.getenv(env_var, "")
+                    if candidate and Path(candidate).is_file():
+                        ca_bundle = candidate
+                        break
+
+            if ca_bundle:
+                # Override gateway startup's certifi-only SSL_CERT_FILE. The
+                # configured bundle should contain public roots plus the MTK
+                # interception root so it remains safe for mixed endpoints.
+                os.environ["REQUESTS_CA_BUNDLE"] = ca_bundle
+                os.environ["SSL_CERT_FILE"] = ca_bundle
+            else:
+                # Do not combine an explicit requests CA path with a late
+                # truststore monkeypatch: urllib3 can then build a mixed
+                # context that intermittently EOFs on Teams MSG endpoints.
+                try:
+                    import truststore
+
+                    truststore.inject_into_ssl()
+                except ImportError:
+                    pass
+            self._truststore_injected = True
 
     def _load(self) -> dict:
         if not self.TOKEN_CACHE.exists():
@@ -878,7 +935,9 @@ class _TrouterListener:
     async def _run(self) -> None:
         """Main loop: connect, listen, reconnect on failure."""
         import websockets
-        ssl_ctx = ssl.create_default_context()
+        self._auth._inject_truststore()
+        ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+        ssl_ctx = ssl.create_default_context(cafile=ca_bundle or None)
 
         while self._running:
             try:
@@ -1004,26 +1063,30 @@ class _TrouterListener:
 
     def _register(self, ic3_token: str) -> dict:
         """POST to Trouter registration endpoint."""
-        import urllib.request, certifi
+        import urllib.request
+        self._auth._inject_truststore()
         epid = uuid.uuid4().hex[:32]
         client_id = self._auth.client_id()
         url = f"{_TROUTER_URL}?con_num={client_id}_1&epid={epid}"
-        ctx = ssl.create_default_context(cafile=certifi.where())
+        ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+        ctx = ssl.create_default_context(cafile=ca_bundle or None)
         req = urllib.request.Request(url, method="POST")
         req.add_header("Authorization", f"Bearer {ic3_token}")
         with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _handshake(self, trouter_info: dict, ic3_token: str, skype_token: str):
-        """Socket.IO handshake to get session_id."""
-        import requests
+        """Socket.IO handshake using the MTK-compatible urllib TLS stack."""
+        import urllib.parse
+        import urllib.request
 
+        self._auth._inject_truststore()
         base_url = trouter_info.get("socketio", "")
         if not base_url.endswith("/"):
             base_url += "/"
         connect_params = {
-            k: v for k, v in trouter_info.get("connectparams", {}).items()
-            if v != "" and k != "scae"
+            key: value for key, value in trouter_info.get("connectparams", {}).items()
+            if value != "" and key != "scae"
         }
         params = {
             "v": "v4",
@@ -1034,18 +1097,16 @@ class _TrouterListener:
         ccid = trouter_info.get("ccid")
         if ccid:
             params["ccid"] = ccid
-        r = requests.get(
-            f"{base_url}socket.io/1/",
-            params=params,
-            headers={
-                "Authorization": f"Bearer {ic3_token}",
-                "Authentication": f"skypetoken={skype_token}",
-            },
-            verify=True,
-            timeout=15,
-        )
-        r.raise_for_status()
-        session_id = r.text.split(":")[0]
+
+        url = f"{base_url}socket.io/1/?{urllib.parse.urlencode(params)}"
+        request = urllib.request.Request(url)
+        request.add_header("Authorization", f"Bearer {ic3_token}")
+        request.add_header("Authentication", f"skypetoken={skype_token}")
+        ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+        context = ssl.create_default_context(cafile=ca_bundle or None)
+        with urllib.request.urlopen(request, context=context, timeout=20) as response:
+            body = response.read().decode("utf-8")
+        session_id = body.split(":")[0]
         return session_id, params
 
     @staticmethod
@@ -1247,6 +1308,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._conv_ids = _configured_conversation_ids(_cfg)
         self._conv_id: Optional[str] = self._conv_ids[0] if self._conv_ids else None  # back-compat
         self._auth = _TeamsAuth()
+        # Reuse one SDK HTTP transport across poll ticks. MTK's TLS proxy is
+        # reliable once a keep-alive connection is established but can EOF
+        # repeated handshakes, so recreating Session every 2 seconds causes a
+        # self-sustaining ConnectionError loop. Serialize access because
+        # requests.Session is not guaranteed thread-safe.
+        self._sdk_fetch_lock = threading.Lock()
+        self._sdk_http_layer = None
         self._poll_task: Optional[asyncio.Task] = None
         self._ws_listener: Optional[_TrouterListener] = None  # WS-1: Trouter listener
         self._connected = False
@@ -1565,6 +1633,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
+        self._close_sdk_http_layer()
         self._mark_disconnected()
         logger.info("TeamsMTK: disconnected")
 
@@ -2007,6 +2076,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         Returns True if the POST returned 201, False otherwise.
         """
+        return await asyncio.to_thread(self._send_typing_sync, chat_id)
+
+    def _send_typing_sync(self, chat_id: str) -> bool:
+        """Run the blocking typing request outside the asyncio event loop."""
         try:
             self._auth._inject_truststore()
             import requests
@@ -3619,60 +3692,81 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time() - _t0)
 
     def _fetch_via_sdk(self, conv_id: str, limit: Optional[int], _t0: float) -> List[dict]:
-        """Fetch messages using SDK MessagesService (normalised, with attachments).
+        """Fetch messages through one shared, serialized SDK transport."""
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
 
-        S1-1: When limit is None, uses MessagesService.get() which follows
-        backwardLink pagination to retrieve the full history.  When limit is
-        an integer, uses get_page() for a single-page bounded fetch (poll loop).
-        """
-        adapter = _SDKAuthAdapter(self._auth)
-        http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
-        svc = _SDKMessages(http_layer)
-        try:
-            if limit is None:
-                # Full-history fetch via backwardLink pagination (S1-1)
-                # get() returns newest-first; no reversal needed here because
-                # we reverse the final list at the end regardless.
-                norm_msgs = svc.get(conv_id)
-                logger.debug(
-                    "TeamsMTK: SDK full-history fetch: %d messages for conv=%s",
-                    len(norm_msgs), _log_ref(conv_id),
-                )
-            else:
-                # Bounded single-page fetch (poll loop, S1-2 unchanged path)
-                norm_msgs = svc.get_page(conv_id, page_size=limit,
-                                         msg_base=self._auth.msg_base)
+        fetch_error = None
+        with lock:
+            http_layer = getattr(self, "_sdk_http_layer", None)
+            if http_layer is None:
+                adapter = _SDKAuthAdapter(self._auth)
+                http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
+                self._sdk_http_layer = http_layer
+            svc = _SDKMessages(http_layer)
+            try:
+                if limit is None:
+                    # Full-history fetch via backwardLink pagination (S1-1).
+                    norm_msgs = svc.get(conv_id)
+                    logger.debug(
+                        "TeamsMTK: SDK full-history fetch: %d messages for conv=%s",
+                        len(norm_msgs), _log_ref(conv_id),
+                    )
+                else:
+                    # Bounded single-page fetch (poll loop, S1-2).
+                    norm_msgs = svc.get_page(
+                        conv_id, page_size=limit, msg_base=self._auth.msg_base,
+                    )
 
-            # Back-fill raw-compatible fields so _process_new_messages works
-            # unchanged across both SDK-normalised and raw-fetch messages.
-            for m in norm_msgs:
-                m.setdefault("imdisplayname", m.get("sender", ""))
-                m.setdefault("messagetype", m.get("type", "RichText/Html"))
-                m.setdefault("properties", m.get("_raw_properties") or {})
-                # Convert SDK attachments to raw-API-compatible format so
-                # _process_new_messages layer-4 (top-level array) picks them up.
-                sdk_atts = m.get("attachments")
-                if isinstance(sdk_atts, list) and sdk_atts:
-                    raw_atts = []
-                    for a in sdk_atts:
-                        if isinstance(a, dict):
-                            raw_atts.append({
-                                "contentUrl": a.get("url", ""),
-                                "name": a.get("name", ""),
-                                "contentType": (
-                                    "image/" + a.get("kind", "image")
-                                    if a.get("kind") == "image"
-                                    else "application/octet-stream"
-                                ),
-                            })
-                    if raw_atts:
-                        m["attachments"] = raw_atts
-            # SDK returns newest-first; gateway expects oldest-first
-            norm_msgs.reverse()
-            return norm_msgs
-        except Exception as e:
-            logger.warning("TeamsMTK: SDK fetch failed (%s), falling back to raw", _log_error(e))
-            return self._fetch_via_raw(conv_id, limit if limit is not None else 30, _t0)
+                # Back-fill raw-compatible fields so the gateway processing
+                # path stays identical for SDK and raw responses.
+                for message in norm_msgs:
+                    message.setdefault("imdisplayname", message.get("sender", ""))
+                    message.setdefault("messagetype", message.get("type", "RichText/Html"))
+                    message.setdefault("properties", message.get("_raw_properties") or {})
+                    sdk_atts = message.get("attachments")
+                    if isinstance(sdk_atts, list) and sdk_atts:
+                        raw_atts = []
+                        for attachment in sdk_atts:
+                            if isinstance(attachment, dict):
+                                raw_atts.append({
+                                    "contentUrl": attachment.get("url", ""),
+                                    "name": attachment.get("name", ""),
+                                    "contentType": (
+                                        "image/" + attachment.get("kind", "image")
+                                        if attachment.get("kind") == "image"
+                                        else "application/octet-stream"
+                                    ),
+                                })
+                        if raw_atts:
+                            message["attachments"] = raw_atts
+                norm_msgs.reverse()
+                return norm_msgs
+            except Exception as exc:
+                fetch_error = exc
+                # A failed pool may retain a dead TLS connection. Force the
+                # next tick to establish a fresh shared transport.
+                self._close_sdk_http_layer()
+
+        logger.warning(
+            "TeamsMTK: SDK fetch failed (%s), falling back to raw",
+            _log_error(fetch_error),
+        )
+        return self._fetch_via_raw(
+            conv_id, limit if limit is not None else 30, _t0,
+        )
+
+    def _close_sdk_http_layer(self) -> None:
+        """Close and discard the shared SDK transport, if one exists."""
+        http_layer = getattr(self, "_sdk_http_layer", None)
+        self._sdk_http_layer = None
+        session = getattr(http_layer, "_session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
     def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
         """Fetch messages using raw requests (legacy, SDK unavailable)."""

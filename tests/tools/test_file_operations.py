@@ -448,6 +448,26 @@ def file_ops(mock_env):
 
 
 class TestShellFileOpsHelpers:
+    def test_has_command_rechecks_after_initial_miss(self, mock_env):
+        """A tool installed mid-session must become visible without restart."""
+        mock_env.execute.side_effect = [
+            {"output": "", "returncode": 0},
+            {"output": "yes\n", "returncode": 0},
+        ]
+        ops = ShellFileOperations(mock_env)
+
+        assert ops._has_command("rg") is False
+        assert ops._has_command("rg") is True
+        assert mock_env.execute.call_count == 2
+
+    def test_expand_path_rewrites_absolute_windows_path_for_shell(self, file_ops, monkeypatch):
+        """Native paths must not expose ``\\.hermes\\`` to CreateProcess filters."""
+        monkeypatch.setattr("hermes_cli._subprocess_compat.IS_WINDOWS", True)
+
+        result = file_ops._expand_path(r"C:\Users\x\.hermes\skills")
+
+        assert result == "C:/Users/x/.hermes/skills"
+
     def test_normalize_read_pagination_clamps_invalid_values(self):
         assert normalize_read_pagination(offset=0, limit=0) == (1, 1)
         assert normalize_read_pagination(offset=-10, limit=-5) == (1, 1)
@@ -528,10 +548,10 @@ class TestShellFileOpsHelpers:
 
     def test_read_file_strips_leaked_terminal_fence_markers(self, mock_env):
         leaked = (
-            "'\x07__HERMES_FENCE_a9f7b3__\x1b]0;cat "
+            "'\x07\x1b]0;cat "
             "'/tmp/test/a.py' 2> /dev/null\x07\n"
             "print('ok')\n"
-            "__HERMES_FENCE_a9f7b3__\x07'\n"
+            "\x07'\n"
         )
 
         def side_effect(command, **kwargs):
@@ -557,9 +577,9 @@ class TestShellFileOpsHelpers:
 
     def test_read_file_raw_strips_leaked_terminal_fence_markers(self, mock_env):
         leaked = (
-            "__HERMES_FENCE_a9f7b3__\x07'\n"
+            "\x07'\n"
             "alpha\n"
-            "\x1b]0;cat '/tmp/test/a.txt'\x07__HERMES_FENCE_a9f7b3__\n"
+            "\x1b]0;cat '/tmp/test/a.txt'\x07\n"
         )
 
         def side_effect(command, **kwargs):

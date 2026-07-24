@@ -99,7 +99,8 @@ class ComputerUseBackend(ABC):
 
     # ── Capture ─────────────────────────────────────────────────────
     @abstractmethod
-    def capture(self, mode: str = "som", app: Optional[str] = None) -> CaptureResult: ...
+    def capture(self, mode: str = "som", app: Optional[str] = None,
+                window_title: Optional[str] = None) -> CaptureResult: ...
 
     # ── Pointer actions ─────────────────────────────────────────────
     @abstractmethod
@@ -152,8 +153,9 @@ class ComputerUseBackend(ABC):
         """Return running apps with bundle IDs, PIDs, window counts."""
 
     @abstractmethod
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        """Route input to `app` (by name or bundle ID). Default: focus without raise."""
+    def focus_app(self, app: str, raise_window: bool = False,
+                  window_title: Optional[str] = None) -> ActionResult:
+        """Route input to an app/window. Default: focus without raising it."""
 
     # ── Native-value mutation ────────────────────────────────────────
     @abstractmethod
