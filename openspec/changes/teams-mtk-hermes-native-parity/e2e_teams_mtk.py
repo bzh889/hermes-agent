@@ -32,6 +32,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import requests
 
 # --- SSL / Proxy setup ---
@@ -204,7 +205,15 @@ def send_via_sdk(chat_id: str, content: str) -> str:
     return str(result.get("id", "") or result.get("OriginalArrivalTime", ""))
 
 
-def test_streaming_no_echo_duplication(log_path: str, baseline: int) -> tuple[bool, str]:
+def test_streaming_no_echo_duplication(
+    log_path: str,
+    baseline: int,
+    *,
+    ack_timeout: float = 60,
+    reply_timeout: float = 240,
+    poll_interval: float = 5,
+    settle_seconds: float = 10,
+) -> tuple[bool, str]:
     """CONTENT TIER: send a query that triggers multi-step streaming edits,
     then read back the raw conversation via the MSG API and assert the bot
     did NOT emit duplicate near-identical progress messages (the 07-13
@@ -216,42 +225,101 @@ def test_streaming_no_echo_duplication(log_path: str, baseline: int) -> tuple[bo
     We must read back the actual conversation and count near-duplicate
     bot messages sent within a short window.
     """
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
+    def _message_id(message: dict) -> str:
+        return str(
+            message.get("id")
+            or message.get("OriginalArrivalTime")
+            or message.get("originalarrivaltime")
+            or ""
+        )
 
-    content = "E2E_AUTO echo-dup check — /new then trivial query"
+    def _is_bot_message(message: dict) -> bool:
+        raw = message.get("content") or ""
+        return "🤖" in raw or "border-left" in raw
+
+    def _new_bot_messages(messages: list[dict], known_ids: set[str]) -> list[dict]:
+        return [
+            message
+            for message in messages
+            if _message_id(message)
+            and _message_id(message) not in known_ids
+            and _is_bot_message(message)
+        ]
+
+    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+    baseline_ids = {_message_id(m) for m in baseline_msgs if _message_id(m)}
+
+    # Establish a second baseline only after /new has produced its command
+    # acknowledgment. Otherwise that acknowledgment can be mistaken for the
+    # model reply and make an empty query turn pass.
     send_chat_message(DM_CHAT_ID, "/new")
-    time.sleep(3)
-    send_chat_message(DM_CHAT_ID, content)
+    ack_deadline = time.monotonic() + ack_timeout
+    current_msgs: list[dict] = []
+    while True:
+        current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+        if _new_bot_messages(current_msgs, baseline_ids):
+            break
+        if time.monotonic() >= ack_deadline:
+            return False, "No /new acknowledgment found via Teams MSG API"
+        time.sleep(poll_interval)
 
-    # Give the agent time to run one full turn (tool calls + reply).
-    time.sleep(45)
+    query_baseline_ids = baseline_ids | {
+        _message_id(m) for m in current_msgs if _message_id(m)
+    }
+    marker = f"E2E{uuid.uuid4().hex[:12].upper()}"
+    send_chat_message(
+        DM_CHAT_ID,
+        f"Reply with exactly {marker}. Do not add other text and do not use tools.",
+    )
 
-    msgs = get_messages_raw(DM_CHAT_ID, page_size=20)
-    new_bot_msgs = [
-        m for m in msgs
-        if m.get("id") not in baseline_ids
-        and ("🤖" in (m.get("content") or "") or "border-left" in (m.get("content") or ""))
+    reply_deadline = time.monotonic() + reply_timeout
+    query_bot_msgs: list[dict] = []
+    marker_msgs: list[dict] = []
+    while True:
+        current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+        query_bot_msgs = _new_bot_messages(current_msgs, query_baseline_ids)
+        marker_msgs = [
+            message
+            for message in query_bot_msgs
+            if marker in (message.get("content") or "")
+        ]
+        if marker_msgs:
+            break
+        if time.monotonic() >= reply_deadline:
+            return (
+                False,
+                "No marker-matched model reply found via Teams MSG API "
+                f"within {reply_timeout:g}s (new bot messages={len(query_bot_msgs)})",
+            )
+        time.sleep(poll_interval)
+
+    # Let any late streaming edit/echo settle, then read the actual Teams
+    # conversation again. The exact-marker query should produce one logical
+    # bot message ID; two IDs prove an edit was echoed as a new message.
+    time.sleep(settle_seconds)
+    current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+    query_bot_msgs = _new_bot_messages(current_msgs, query_baseline_ids)
+    marker_msgs = [
+        message
+        for message in query_bot_msgs
+        if marker in (message.get("content") or "")
     ]
-    # Group near-identical bodies (first 80 chars, tags stripped) — more
-    # than 1 message with the same normalized prefix within this turn
-    # means echo/streaming-duplication regressed.
-    def _norm(raw: str) -> str:
-        return re.sub(r"<[^>]+>", "", raw or "")[:80].strip()
+    distinct_query_ids = {_message_id(m) for m in query_bot_msgs if _message_id(m)}
 
-    seen = {}
-    dups = []
-    for m in new_bot_msgs:
-        key = _norm(m.get("content", ""))
-        if not key:
-            continue
-        seen[key] = seen.get(key, 0) + 1
-        if seen[key] > 1:
-            dups.append(key)
-
-    if dups:
-        return False, f"Duplicate progress messages detected: {dups[:3]} (total bot msgs={len(new_bot_msgs)})"
-    return True, f"No duplicate bodies among {len(new_bot_msgs)} new bot messages"
+    if not marker_msgs:
+        return False, "Marker-matched reply disappeared during Teams read-back"
+    if len(distinct_query_ids) != 1:
+        return (
+            False,
+            "Duplicate/extra bot messages detected after marker query "
+            f"(distinct message IDs={len(distinct_query_ids)}, "
+            f"marker replies={len(marker_msgs)})",
+        )
+    return (
+        True,
+        "Marker-matched model reply read back from Teams with exactly one "
+        "distinct bot message ID",
+    )
 
 
 def test_no_residual_markdown_in_reply(log_path: str, baseline: int) -> tuple[bool, str]:

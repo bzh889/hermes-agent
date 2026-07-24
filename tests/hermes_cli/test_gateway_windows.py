@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import hermes_cli.gateway as gateway
+import hermes_cli._subprocess_compat as subprocess_compat
 import hermes_cli.gateway_windows as gateway_windows
 import hermes_cli.setup as setup
 
@@ -32,13 +33,18 @@ def test_schtasks_fallback_does_not_hide_unknown_errors():
 def test_schtasks_encoding_falls_back_to_utf8(monkeypatch):
     """A broken/empty locale must not leave us without a decoder (issue #38172)."""
 
-    monkeypatch.setattr(gateway_windows.locale, "getpreferredencoding", lambda *a, **k: "")
+    monkeypatch.setattr(subprocess_compat, "IS_WINDOWS", False)
+    monkeypatch.setattr(
+        subprocess_compat.locale,
+        "getpreferredencoding",
+        lambda *a, **k: "",
+    )
     assert gateway_windows._schtasks_encoding() == "utf-8"
 
     def _boom(*args, **kwargs):
         raise RuntimeError("locale exploded")
 
-    monkeypatch.setattr(gateway_windows.locale, "getpreferredencoding", _boom)
+    monkeypatch.setattr(subprocess_compat.locale, "getpreferredencoding", _boom)
     assert gateway_windows._schtasks_encoding() == "utf-8"
 
 

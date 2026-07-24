@@ -21,6 +21,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from hermes_constants import get_hermes_home
+from hermes_cli._subprocess_compat import (
+    windows_console_encoding,
+    windows_hide_flags,
+)
 from typing import Any, Optional
 from utils import atomic_json_write
 
@@ -84,13 +88,13 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
         # CREATE_NO_WINDOW: terminate_pid runs from the windowless pythonw.exe
         # gateway/desktop backend, so a bare taskkill spawn would flash a
         # conhost window on every force-kill.
-        from hermes_cli._subprocess_compat import windows_hide_flags
-
         try:
             result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
+                encoding=windows_console_encoding(),
+                errors="replace",
                 timeout=10,
                 creationflags=windows_hide_flags(),
             )
@@ -340,13 +344,17 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     command_lc = command.lower()
     profile_name = _profile_name_for_home(profile_home)
     home_lc = str(profile_home).lower()
+    home_variants = {home_lc, home_lc.replace("\\", "/")}
+
+    def _has_expected_home() -> bool:
+        return any(f"hermes_home={candidate}" in command_lc for candidate in home_variants)
 
     if profile_name is not None and profile_name != "default":
         profile_lc = profile_name.lower()
         return (
             f"--profile {profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
-            or f"hermes_home={home_lc}" in command_lc
+            or _has_expected_home()
         )
 
     # Default/root profile: the gateway runs with no profile flag. Accept unless
@@ -356,7 +364,7 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # absence is not disqualifying — only a conflicting explicit value is.
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
+    if "hermes_home=" in command_lc and not _has_expected_home():
         return False
     return True
 

@@ -28,7 +28,6 @@ Design notes
 from __future__ import annotations
 
 import ctypes
-import locale
 import os
 import re
 import shlex
@@ -63,17 +62,10 @@ _TASK_RESTART_COUNT = 999
 
 
 def _schtasks_encoding() -> str:
-    """Best-effort console encoding for decoding ``schtasks.exe`` output.
+    """Return the encoding used by native Windows console tools."""
+    from hermes_cli._subprocess_compat import windows_console_encoding
 
-    On localized Windows (e.g. Chinese), ``schtasks`` emits text in the OEM/ANSI
-    code page rather than UTF-8. Decoding with the wrong codec raised
-    ``UnicodeDecodeError`` inside ``subprocess``' reader threads. Prefer the
-    locale's preferred encoding and fall back to UTF-8.
-    """
-    try:
-        return locale.getpreferredencoding(False) or "utf-8"
-    except Exception:
-        return "utf-8"
+    return windows_console_encoding()
 
 
 # ---------------------------------------------------------------------------

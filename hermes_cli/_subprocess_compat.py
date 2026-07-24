@@ -27,6 +27,7 @@ guarantee.
 
 from __future__ import annotations
 
+import locale
 import os
 import re
 import shutil
@@ -44,10 +45,33 @@ __all__ = [
     "windows_hidden_console_popen_kwargs",
     "windows_hide_flags",
     "windows_detach_popen_kwargs",
+    "windows_console_encoding",
 ]
 
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+def windows_console_encoding() -> str:
+    """Return the codec used by native Windows console executables.
+
+    Hermes forces Python UTF-8 mode on Windows, so the Python locale can report
+    UTF-8 even while ``schtasks.exe`` and ``taskkill.exe`` emit bytes in the
+    active OEM code page.  Read that code page from Win32 instead.
+    """
+    if IS_WINDOWS:
+        try:
+            import ctypes
+
+            code_page = int(ctypes.windll.kernel32.GetOEMCP())
+            if code_page:
+                return f"cp{code_page}"
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    try:
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
 
 
 # -----------------------------------------------------------------------------

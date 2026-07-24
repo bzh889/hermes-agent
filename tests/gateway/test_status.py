@@ -621,9 +621,25 @@ class TestTerminatePid:
     def test_force_uses_taskkill_on_windows(self, monkeypatch):
         calls = []
         monkeypatch.setattr(status, "_IS_WINDOWS", True)
+        monkeypatch.setattr(
+            status,
+            "windows_console_encoding",
+            lambda: "cp950",
+            raising=False,
+        )
 
-        def fake_run(cmd, capture_output=False, text=False, timeout=None, creationflags=0):
-            calls.append((cmd, capture_output, text, timeout, creationflags))
+        def fake_run(
+            cmd,
+            capture_output=False,
+            text=False,
+            encoding=None,
+            errors=None,
+            timeout=None,
+            creationflags=0,
+        ):
+            calls.append(
+                (cmd, capture_output, text, encoding, errors, timeout, creationflags)
+            )
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(status.subprocess, "run", fake_run)
@@ -637,7 +653,15 @@ class TestTerminatePid:
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         assert calls == [
-            (["taskkill", "/PID", "123", "/T", "/F"], True, True, 10, windows_hide_flags())
+            (
+                ["taskkill", "/PID", "123", "/T", "/F"],
+                True,
+                True,
+                "cp950",
+                "replace",
+                10,
+                windows_hide_flags(),
+            )
         ]
 
     def test_force_falls_back_to_sigterm_when_taskkill_missing(self, monkeypatch):
