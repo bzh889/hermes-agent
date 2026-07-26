@@ -392,6 +392,14 @@ def test_ui_readback_selects_chat_header_and_excludes_user_prompt(monkeypatch):
 
     monkeypatch.setattr(e2e, "_run_cua_driver", run_cua)
 
+    bot_labels = e2e.get_teams_ui_bot_card_labels("test-chat")
+    assert len(bot_labels) == 2
+    assert all("Reply with exactly" not in label for label in bot_labels)
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda _chat_id: bot_labels,
+    )
     assert e2e.get_teams_ui_bot_marker_count("test-chat", marker) == 1
     assert [call[1].get("window_id") for call in calls[1:]] == [11, 22]
 
@@ -404,6 +412,15 @@ def test_streaming_e2e_falls_back_to_marker_matched_teams_ui(monkeypatch):
     deleted_graph = []
     deleted_msg = []
     counts = iter([1, 1])
+    ui_labels = iter(
+        [
+            [],
+            [
+                f"由 Test User 的 🤖 Hermes {marker} "
+                "— Hermes · 2026-07-25 12:00"
+            ],
+        ]
+    )
     reply = {
         "id": "reply",
         "content": f"**🤖 Hermes**\n\n{marker}\n\n— Hermes · 2026-07-25 12:00",
@@ -432,6 +449,11 @@ def test_streaming_e2e_falls_back_to_marker_matched_teams_ui(monkeypatch):
     )
     monkeypatch.setattr(
         e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda *_args, **_kwargs: next(ui_labels),
+    )
+    monkeypatch.setattr(
+        e2e,
         "delete_graph_message",
         lambda _chat, message_id: deleted_graph.append(message_id),
     )
@@ -454,10 +476,65 @@ def test_streaming_e2e_falls_back_to_marker_matched_teams_ui(monkeypatch):
     assert deleted_msg == ["reply"]
 
 
+def test_streaming_ui_fallback_rejects_extra_bot_card(monkeypatch):
+    e2e = _load_e2e_module()
+    e2e.DM_CHAT_ID = "test-chat"
+    marker = "E2EABCDEF123456"
+    snapshots = iter(
+        [
+            ["由 Test User 的 🤖 Hermes old — Hermes · 2026-07-25 11:59"],
+            [
+                "由 Test User 的 🤖 Hermes old — Hermes · 2026-07-25 11:59",
+                f"由 Test User 的 🤖 Hermes {marker} — Hermes · 2026-07-25 12:00",
+                "由 Test User 的 🤖 Hermes footer — Hermes · 2026-07-25 12:00",
+            ],
+        ]
+    )
+
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda *_args, **_kwargs: next(snapshots),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_marker_count",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda *_args, **_kwargs: "graph-query",
+    )
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+
+    ok, evidence = e2e._test_streaming_no_echo_duplication_via_ui(
+        marker,
+        [],
+        reply_timeout=0,
+        poll_interval=0,
+        settle_seconds=0,
+    )
+
+    assert ok is False
+    assert "unexpected bot" in evidence.lower()
+
+
 def test_streaming_e2e_ui_fallback_requires_bot_cleanup_ids(monkeypatch):
     e2e = _load_e2e_module()
     e2e.DM_CHAT_ID = "test-chat"
+    marker = "E2EABCDEF123456"
     counts = iter([1, 1])
+    ui_labels = iter(
+        [
+            [],
+            [
+                f"由 Test User 的 🤖 Hermes {marker} "
+                "— Hermes · 2026-07-25 12:00"
+            ],
+        ]
+    )
 
     monkeypatch.setattr(
         e2e.uuid,
@@ -480,6 +557,11 @@ def test_streaming_e2e_ui_fallback_requires_bot_cleanup_ids(monkeypatch):
         e2e,
         "get_teams_ui_bot_marker_count",
         lambda *_args, **_kwargs: next(counts),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda *_args, **_kwargs: next(ui_labels),
     )
     monkeypatch.setattr(e2e, "delete_graph_message", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
@@ -514,6 +596,16 @@ def test_streaming_e2e_falls_back_after_new_before_query(monkeypatch):
         [[old], RuntimeError("TLS unavailable after /new"), [reply, ack, old]]
     )
     counts = iter([1, 1])
+    ui_labels = iter(
+        [
+            ["由 Test User 的 🤖 Hermes new-session — Hermes · 2026-07-25 11:59"],
+            [
+                "由 Test User 的 🤖 Hermes new-session — Hermes · 2026-07-25 11:59",
+                f"由 Test User 的 🤖 Hermes {marker} "
+                "— Hermes · 2026-07-25 12:00",
+            ],
+        ]
+    )
 
     monkeypatch.setattr(
         e2e.uuid,
@@ -537,6 +629,11 @@ def test_streaming_e2e_falls_back_after_new_before_query(monkeypatch):
         e2e,
         "get_teams_ui_bot_marker_count",
         lambda *_args, **_kwargs: next(counts),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda *_args, **_kwargs: next(ui_labels),
     )
     monkeypatch.setattr(
         e2e,
@@ -592,7 +689,6 @@ def test_streaming_e2e_falls_back_after_query_without_resending(monkeypatch):
             [reply, ack, old],
         ]
     )
-    counts = iter([1, 1])
 
     monkeypatch.setattr(
         e2e.uuid,
@@ -615,7 +711,16 @@ def test_streaming_e2e_falls_back_after_query_without_resending(monkeypatch):
     monkeypatch.setattr(
         e2e,
         "get_teams_ui_bot_marker_count",
-        lambda *_args, **_kwargs: next(counts),
+        lambda *_args, **_kwargs: pytest.fail(
+            "post-query UI marker count must not substitute for a missing baseline"
+        ),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_teams_ui_bot_card_labels",
+        lambda *_args, **_kwargs: pytest.fail(
+            "post-query UI labels must not substitute for a missing baseline"
+        ),
     )
     monkeypatch.setattr(
         e2e,
@@ -633,8 +738,9 @@ def test_streaming_e2e_falls_back_after_query_without_resending(monkeypatch):
         "unused.log", 0, settle_seconds=0
     )
 
-    assert ok is True
-    assert "teams uia" in evidence.lower()
+    assert ok is False
+    assert "pre-query" in evidence.lower()
+    assert "baseline" in evidence.lower()
     assert sent_contents == [
         f"/new {reset_marker}",
         f"Reply with exactly {marker}. Do not add other text and do not use tools.",

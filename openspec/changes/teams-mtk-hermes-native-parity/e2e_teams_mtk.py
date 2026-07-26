@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 import html
 import json
 import os
@@ -337,8 +338,8 @@ def _run_cua_driver(tool: str, arguments: dict) -> dict:
         raise RuntimeError(f"cua-driver {tool} returned invalid JSON") from None
 
 
-def get_teams_ui_bot_marker_count(chat_id: str, marker: str) -> int:
-    """Count rendered Teams bot cards whose visible body is exactly the marker."""
+def get_teams_ui_bot_card_labels(chat_id: str) -> list[str]:
+    """Return rendered Hermes bot-card labels from the requested Teams chat."""
     windows_payload = _run_cua_driver("list_windows", {})
     windows = (
         windows_payload.get("windows")
@@ -360,9 +361,7 @@ def get_teams_ui_bot_marker_count(chat_id: str, marker: str) -> int:
     )
 
     expected_header = f"chat-header-{chat_id}"
-    exact_marker_pattern = re.compile(
-        rf"(?:^|\s)🤖 Hermes\s+{re.escape(marker)}\s+— Hermes ·"
-    )
+    bot_card_pattern = re.compile(r"(?:^|\s)🤖 Hermes(?:\s|$)")
     for window in candidates:
         try:
             state = _run_cua_driver(
@@ -379,15 +378,32 @@ def get_teams_ui_bot_marker_count(chat_id: str, marker: str) -> int:
         elements = state.get("elements") or []
         if not any(element.get("label") == expected_header for element in elements):
             continue
-        return sum(
-            1
+        labels = [
+            str(element.get("label") or "").replace(r"\_", "_")
             for element in elements
-            if exact_marker_pattern.search(
-                str(element.get("label") or "").replace(r"\_", "_")
-            )
-        )
+        ]
+        return [
+            label
+            for label in labels
+            if bot_card_pattern.search(label) and "— Hermes ·" in label
+        ]
     raise RuntimeError(
         "matching Teams chat window was not available for UI read-back"
+    )
+
+
+def _count_teams_ui_bot_markers(labels: list[str], marker: str) -> int:
+    exact_marker_pattern = re.compile(
+        rf"(?:^|\s)🤖 Hermes\s+{re.escape(marker)}\s+— Hermes ·"
+    )
+    return sum(1 for label in labels if exact_marker_pattern.search(label))
+
+
+def get_teams_ui_bot_marker_count(chat_id: str, marker: str) -> int:
+    """Count rendered Teams bot cards whose visible body is exactly the marker."""
+    return _count_teams_ui_bot_markers(
+        get_teams_ui_bot_card_labels(chat_id),
+        marker,
     )
 
 
@@ -401,6 +417,20 @@ def _test_streaming_no_echo_duplication_via_ui(
     settle_seconds: float,
 ) -> tuple[bool, str]:
     """Exercise the marker contract against the actual Teams UIA tree."""
+
+    if not send_query:
+        return (
+            False,
+            "Teams UIA fallback has no pre-query bot-card baseline; cannot "
+            "exclude unexpected bot replies",
+        )
+    try:
+        baseline_bot_labels = get_teams_ui_bot_card_labels(DM_CHAT_ID)
+    except RuntimeError as exc:
+        return (
+            False,
+            f"Teams UIA pre-query baseline failed ({type(exc).__name__})",
+        )
 
     def wait_for_marker(expected: str, timeout: float) -> tuple[int, str | None]:
         deadline = time.monotonic() + timeout
@@ -416,13 +446,12 @@ def _test_streaming_no_echo_duplication_via_ui(
                 return 0, last_error
             time.sleep(poll_interval)
 
-    if send_query:
-        graph_message_ids.append(
-            send_chat_message(
-                DM_CHAT_ID,
-                f"Reply with exactly {marker}. Do not add other text and do not use tools.",
-            )
+    graph_message_ids.append(
+        send_chat_message(
+            DM_CHAT_ID,
+            f"Reply with exactly {marker}. Do not add other text and do not use tools.",
         )
+    )
     reply_count, reply_error = wait_for_marker(marker, reply_timeout)
     if not reply_count:
         suffix = f" ({reply_error})" if reply_error else ""
@@ -430,14 +459,26 @@ def _test_streaming_no_echo_duplication_via_ui(
 
     time.sleep(settle_seconds)
     try:
-        settled_count = get_teams_ui_bot_marker_count(DM_CHAT_ID, marker)
+        settled_bot_labels = get_teams_ui_bot_card_labels(DM_CHAT_ID)
     except RuntimeError as exc:
         return False, f"Teams UIA final read-back failed ({type(exc).__name__})"
+    settled_count = _count_teams_ui_bot_markers(settled_bot_labels, marker)
     if settled_count != 1:
         return (
             False,
             "Duplicate marker-matched model replies detected via Teams UIA "
             f"(marker replies={settled_count})",
+        )
+    new_bot_labels = list(
+        (Counter(settled_bot_labels) - Counter(baseline_bot_labels)).elements()
+    )
+    new_marker_count = _count_teams_ui_bot_markers(new_bot_labels, marker)
+    if len(new_bot_labels) != 1 or new_marker_count != 1:
+        return (
+            False,
+            "Unexpected bot cards emitted after exact-marker query via Teams UIA "
+            f"(new bot cards={len(new_bot_labels)}, "
+            f"marker cards={new_marker_count})",
         )
     return (
         True,
