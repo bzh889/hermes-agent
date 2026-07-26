@@ -13,6 +13,7 @@ Implementation in teams_mtk.py makes them GREEN.
 """
 
 import asyncio
+import sys
 import threading
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
@@ -95,6 +96,135 @@ async def test_raw_fetch_connection_error_preserves_original_exception():
     session.close.assert_called_once()
 
 
+async def test_connect_dispatches_blocking_startup_work_off_event_loop():
+    """Auth and cold-start fetch stay responsive while worker calls are blocked."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter = _make_adapter()
+    adapter._conv_ids = ["conv-a"]
+    adapter._last_message_ids = {"conv-a": None}
+    adapter._auth = MagicMock()
+    event_loop_thread = threading.get_ident()
+    auth_entered = threading.Event()
+    auth_release = threading.Event()
+    fetch_entered = threading.Event()
+    fetch_release = threading.Event()
+    worker_threads = []
+
+    def blocking_auth():
+        worker_threads.append(("auth", threading.get_ident()))
+        auth_entered.set()
+        if threading.get_ident() != event_loop_thread:
+            assert auth_release.wait(timeout=1)
+        return "skype-token"
+
+    def blocking_fetch(*, conv_id, limit):
+        worker_threads.append(("fetch", threading.get_ident()))
+        fetch_entered.set()
+        if threading.get_ident() != event_loop_thread:
+            assert fetch_release.wait(timeout=1)
+        assert (conv_id, limit) == ("conv-a", 20)
+        return []
+
+    adapter._auth.skype_token.side_effect = blocking_auth
+    adapter._fetch_messages = MagicMock(side_effect=blocking_fetch)
+    listener = MagicMock()
+
+    async def completed_poll():
+        return None
+
+    connect_task = None
+    with patch.object(adapter, "_poll_loop", side_effect=completed_poll), patch.object(
+        teams_mtk, "_TrouterListener", return_value=listener
+    ), patch.object(adapter, "_mark_connected"):
+        try:
+            connect_task = asyncio.create_task(adapter.connect())
+            assert await asyncio.to_thread(auth_entered.wait, 0.5)
+
+            auth_heartbeat = asyncio.Event()
+            asyncio.get_running_loop().call_soon(auth_heartbeat.set)
+            await asyncio.wait_for(auth_heartbeat.wait(), timeout=0.5)
+            auth_release.set()
+
+            assert await asyncio.to_thread(fetch_entered.wait, 0.5)
+            fetch_heartbeat = asyncio.Event()
+            asyncio.get_running_loop().call_soon(fetch_heartbeat.set)
+            await asyncio.wait_for(fetch_heartbeat.wait(), timeout=0.5)
+            fetch_release.set()
+
+            assert await asyncio.wait_for(connect_task, timeout=0.5) is True
+        finally:
+            auth_release.set()
+            fetch_release.set()
+            if connect_task is not None and not connect_task.done():
+                connect_task.cancel()
+                try:
+                    await connect_task
+                except asyncio.CancelledError:
+                    pass
+
+    assert [operation for operation, _ in worker_threads] == ["auth", "fetch"]
+    assert all(thread_id != event_loop_thread for _, thread_id in worker_threads)
+    adapter._auth.skype_token.assert_called_once_with()
+    adapter._fetch_messages.assert_called_once_with(conv_id="conv-a", limit=20)
+    listener.start.assert_called_once_with()
+
+
+async def test_raw_send_acquires_skype_token_off_event_loop():
+    """A slow raw-send token refresh must not run on the asyncio thread."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+    event_loop_thread = threading.get_ident()
+    token_threads = []
+
+    def acquire_token():
+        token_threads.append(threading.get_ident())
+        return "fake-skype-token"
+
+    adapter._auth.skype_token.side_effect = acquire_token
+    response = MagicMock(status_code=201)
+    response.json.return_value = {"OriginalArrivalTime": "raw-message-id"}
+    session = MagicMock()
+    session.post.return_value = response
+
+    with patch.object(teams_mtk, "_SDK_AVAILABLE", False), patch(
+        "requests.Session", return_value=session
+    ):
+        result = await adapter.send("conv-a", "hello")
+
+    assert result.message_id == "raw-message-id"
+    assert token_threads and token_threads[0] != event_loop_thread
+
+
+async def test_raw_edit_acquires_skype_token_off_event_loop():
+    """A slow raw-edit token refresh must not run on the asyncio thread."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+    event_loop_thread = threading.get_ident()
+    token_threads = []
+
+    def acquire_token():
+        token_threads.append(threading.get_ident())
+        return "fake-skype-token"
+
+    adapter._auth.skype_token.side_effect = acquire_token
+    response = MagicMock(status_code=200, content=b"")
+
+    with patch.object(teams_mtk, "_SDK_AVAILABLE", False), patch(
+        "requests.put", return_value=response
+    ):
+        result = await adapter.edit_message("conv-a", "msg-a", "updated")
+
+    assert result.success is True
+    assert token_threads and token_threads[0] != event_loop_thread
+
+
 # ── §1 edit_message 429 ──────────────────────────────────────────────────
 
 async def test_edit_message_429_backs_off_and_retries():
@@ -156,7 +286,8 @@ async def test_send_429_backs_off_and_retries():
     adapter._auth._force_refresh = MagicMock()
     adapter._auth._inject_truststore = MagicMock()
 
-    with patch("requests.Session") as MockSession, \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("requests.Session") as MockSession, \
          patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         mock_session = MagicMock()
         mock_session.post = _mock_session_post([429, 200])
@@ -180,7 +311,8 @@ async def test_send_401_refresh_integrity():
     adapter._auth._force_refresh = MagicMock()
     adapter._auth._inject_truststore = MagicMock()
 
-    with patch("requests.Session") as MockSession, \
+    with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+         patch("requests.Session") as MockSession, \
          patch("gateway.platforms.teams_mtk.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         mock_session = MagicMock()
         mock_session.post = _mock_session_post([401, 200])
@@ -235,6 +367,103 @@ async def test_send_sdk_rewrites_hardcoded_amer_to_regional_endpoint():
     )
 
 
+async def test_sdk_send_reuses_shared_transport_without_blocking_event_loop():
+    """Outbound sends must reuse polling keep-alive from a worker thread."""
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    layer = MagicMock()
+    layer._session = MagicMock()
+    service = MagicMock()
+    service.send.side_effect = [{"id": "msg-1"}, {"id": "msg-2"}]
+    thread_calls = []
+
+    async def run_in_worker(func, *args, **kwargs):
+        thread_calls.append(func)
+        return func(*args, **kwargs)
+
+    with patch(
+        "gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=layer
+    ) as make_layer, patch(
+        "gateway.platforms.teams_mtk._SDKMessages", return_value=service
+    ), patch(
+        "gateway.platforms.teams_mtk.asyncio.to_thread", side_effect=run_in_worker
+    ):
+        first = await adapter.send("conv-a", "first")
+        second = await adapter.send("conv-a", "second")
+
+    assert first.message_id == "msg-1"
+    assert second.message_id == "msg-2"
+    make_layer.assert_called_once()
+    assert service.send.call_count == 2
+    assert len(thread_calls) == 2
+    assert adapter._sdk_http_layer is layer
+
+
+async def test_sdk_send_does_not_raw_retry_when_delivery_is_uncertain():
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    adapter._auth.skype_token.return_value = "token"
+    adapter._auth._inject_truststore = MagicMock()
+    layer = MagicMock()
+    layer._session = MagicMock()
+    service = MagicMock()
+    service.send.side_effect = ConnectionError("dead TLS pool")
+    raw_response = MagicMock(status_code=201)
+    raw_response.json.return_value = {"OriginalArrivalTime": "raw-msg"}
+
+    with patch(
+        "gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=layer
+    ), patch(
+        "gateway.platforms.teams_mtk._SDKMessages", return_value=service
+    ), patch("requests.Session") as make_session:
+        make_session.return_value.post.return_value = raw_response
+        result = await adapter.send("conv-a", "fallback")
+
+    assert result.success is False
+    assert "delivery uncertain" in result.error.lower()
+    make_session.return_value.post.assert_not_called()
+    layer._session.close.assert_called_once_with()
+    assert adapter._sdk_http_layer is None
+
+
+async def test_sdk_missing_id_readback_is_correlated_and_off_event_loop():
+    """Never assign an unrelated bot ID when a successful SDK response lacks one."""
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://apac.ng.msg.teams.microsoft.com/v1/users/ME"
+    service = MagicMock()
+    service.send.return_value = {"id": ""}
+    html_content, _ = adapter._build_html("recover this message")
+    event_loop_thread = threading.get_ident()
+    fetch_threads = []
+
+    def fetch_messages(*_args, **_kwargs):
+        fetch_threads.append(threading.get_ident())
+        return [
+            {
+                "id": "wrong-id",
+                "_raw_content": "<div>unrelated bot message</div>",
+                "_raw_properties": {"hermes_sender": "bot"},
+            },
+            {
+                "id": "matching-id",
+                "_raw_content": html_content,
+                "_raw_properties": {"hermes_sender": "bot"},
+            },
+        ]
+
+    with patch(
+        "gateway.platforms.teams_mtk._SDKMessages", return_value=service
+    ), patch.object(adapter, "_fetch_messages", side_effect=fetch_messages):
+        result = await adapter.send("conv-a", "recover this message")
+
+    assert result.success is True
+    assert result.message_id == "matching-id"
+    assert fetch_threads and fetch_threads[0] != event_loop_thread
+
+
 def test_sdk_fetch_reuses_one_http_transport_across_conversations():
     """Polling must reuse keep-alive instead of repeating flaky TLS handshakes."""
     adapter = _make_adapter()
@@ -272,6 +501,51 @@ def test_sdk_fetch_discards_failed_transport_before_raw_fallback():
     layer._session.close.assert_called_once_with()
     assert adapter._sdk_http_layer is None
     raw.assert_called_once()
+
+
+async def test_disconnect_waits_for_shared_sdk_transport_without_blocking_loop():
+    """Disconnect must not close a transport while a worker still owns it."""
+    adapter = _make_adapter()
+    layer = MagicMock()
+    layer._session = MagicMock()
+    adapter._sdk_http_layer = layer
+    entered = threading.Event()
+    release = threading.Event()
+    service = MagicMock()
+
+    def blocking_send(**_kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return {"id": "msg-a"}
+
+    service.send.side_effect = blocking_send
+    with patch(
+        "gateway.platforms.teams_mtk._SDKMessages", return_value=service
+    ):
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                adapter._call_sdk_messages,
+                "send",
+                conversation_id="conv-a",
+                content="hello",
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 0.5)
+        disconnect = asyncio.create_task(adapter.disconnect())
+        try:
+            heartbeat = asyncio.Event()
+            asyncio.get_running_loop().call_soon(heartbeat.set)
+            await asyncio.wait_for(heartbeat.wait(), timeout=0.5)
+            await asyncio.sleep(0.05)
+            assert disconnect.done() is False
+            layer._session.close.assert_not_called()
+        finally:
+            release.set()
+
+        await asyncio.wait_for(worker, timeout=1)
+        await asyncio.wait_for(disconnect, timeout=1)
+
+    layer._session.close.assert_called_once_with()
 
 
 # ── §3 config: reply_throttle_seconds ────────────────────────────────────
@@ -374,7 +648,7 @@ async def test_at_mention_only_message_not_empty():
     assert text
 
 
-# ── §6 token cache: atomic write + auto-purge on corruption ───────────
+# ── §6 token cache: atomic write + preserve corruption evidence ───────
 
 def test_token_cache_atomic_write(tmp_path, monkeypatch):
     """_save writes to temp file then renames (atomic), not direct overwrite."""
@@ -391,18 +665,69 @@ def test_token_cache_atomic_write(tmp_path, monkeypatch):
     assert not cache_path.with_suffix(".json.tmp").exists()
 
 
-def test_token_cache_auto_purge_on_corruption(tmp_path, monkeypatch):
-    """If cache JSON is totally corrupted, _load deletes the file and raises RuntimeError."""
+@pytest.mark.parametrize(
+    ("original", "issue"),
+    [
+        (b"NOT JSON AT ALL {{{", "corrupted"),
+        (b"\xff\xfe\x80", "not valid UTF-8"),
+    ],
+    ids=["invalid-json", "non-utf8"],
+)
+def test_token_cache_preserved_when_legacy_and_wam_both_fail(
+    tmp_path, monkeypatch, original, issue
+):
+    """Unrecoverable legacy and WAM failures are clear and preserve evidence."""
     from gateway.platforms.teams_mtk import _TeamsAuth
     cache_path = tmp_path / "token_cache.json"
     monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
-    # Write garbage
-    cache_path.write_text("NOT JSON AT ALL {{{")
+    cache_path.write_bytes(original)
     auth = _TeamsAuth()
-    with pytest.raises(RuntimeError, match="corrupted and has been deleted"):
+    wam_load = MagicMock(side_effect=RuntimeError("broker unavailable"))
+    monkeypatch.setattr(auth, "_load_wam_tokens", wam_load)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"{issue}.*preserved.*broker authentication is unavailable",
+    ):
         auth._load()
-    # Cache file should be auto-purged
-    assert not cache_path.exists()
+
+    assert cache_path.read_bytes() == original
+    wam_load.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "original",
+    [b"NOT JSON AT ALL {{{", b"\xff\xfe\x80"],
+    ids=["invalid-json", "non-utf8"],
+)
+def test_unusable_legacy_cache_uses_wam_in_memory_without_rewriting(
+    tmp_path, monkeypatch, original
+):
+    """Invalid JSON and non-UTF-8 caches fall back without touching the file."""
+    from gateway.platforms.teams_mtk import _TeamsAuth
+
+    cache_path = tmp_path / "token_cache.json"
+    cache_path.write_bytes(original)
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache_path)
+    fake_wam = MagicMock()
+    fake_wam.ensure_valid_tokens.return_value = {
+        "access_token": "wam-access",
+        "skype_token": "wam-skype",
+        "saved_at": 100,
+        "expires_in": 3600,
+    }
+
+    auth = _TeamsAuth()
+    auth._wam_auth = fake_wam
+    monkeypatch.setattr(auth, "_inject_truststore", MagicMock())
+
+    loaded = auth._load()
+
+    assert loaded["access_token"] == "wam-access"
+    assert loaded["_auth_method"] == "wam"
+    assert auth._wam_tokens is loaded
+    assert cache_path.read_bytes() == original
+    fake_wam.ensure_valid_tokens.assert_called_once_with()
 
 
 def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
@@ -415,6 +740,234 @@ def test_token_cache_partial_json_recovery(tmp_path, monkeypatch):
     auth = _TeamsAuth()
     data = auth._load()
     assert data["access_token"] == "abc"
+
+
+async def test_requirements_accept_silent_wam_cache_without_legacy_json(tmp_path, monkeypatch):
+    """Windows broker cache keeps the adapter available after legacy cache loss."""
+    from pathlib import Path
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    wam_cache = tmp_path / ".teams-automation" / "token_cache.bin"
+    wam_cache.parent.mkdir()
+    wam_cache.write_text("opaque-msal-cache", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        teams_mtk, "_silent_wam_dependencies_available", lambda: True, raising=False
+    )
+
+    assert teams_mtk.check_teams_mtk_requirements() is True
+
+
+@pytest.mark.asyncio(False)
+def test_teams_extra_declares_bounded_windows_broker_runtime():
+    """Installing the Teams extra on Windows must provide the WAM broker."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    with pyproject.open("rb") as stream:
+        teams_dependencies = tomllib.load(stream)["project"][
+            "optional-dependencies"
+        ]["teams"]
+
+    assert (
+        "pymsalruntime>=0.20.6,<0.22; sys_platform == 'win32'"
+        in teams_dependencies
+    )
+
+
+async def test_silent_wam_auth_uses_only_noninteractive_broker_flow(tmp_path, monkeypatch):
+    """Background gateway auth must never invoke device flow or an account picker."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    cache_path = tmp_path / "token_cache.bin"
+    cache_path.write_text("{}", encoding="utf-8")
+    observed = {}
+
+    class FakeCache:
+        has_state_changed = True
+
+        def deserialize(self, serialized):
+            observed["serialized"] = serialized
+
+        def serialize(self):
+            observed["serialize_called"] = True
+            return '{"new":"state"}'
+
+    class FakeApp:
+        def get_accounts(self):
+            return [{"home_account_id": "account"}]
+
+        def acquire_token_silent(self, scopes, *, account):
+            observed["silent"] = (scopes, account)
+            return {"access_token": "scope-token", "expires_in": 3600}
+
+    class FakeMsal:
+        SerializableTokenCache = FakeCache
+
+        @staticmethod
+        def PublicClientApplication(**kwargs):
+            observed["app"] = kwargs
+            return FakeApp()
+
+    monkeypatch.setattr(
+        teams_mtk, "_silent_wam_dependencies_available", lambda: True
+    )
+    monkeypatch.setitem(sys.modules, "msal", FakeMsal)
+
+    auth = teams_mtk._SilentWamAuth(cache_path)
+    result = auth.exchange_for_scope("scope-a offline_access")
+
+    assert result == {"access_token": "scope-token", "expires_in": 3600}
+    assert observed["serialized"] == "{}"
+    assert observed["app"]["enable_broker_on_windows"] is True
+    assert observed["app"]["authority"].endswith("/organizations")
+    assert observed["silent"] == (
+        ["scope-a"],
+        {"home_account_id": "account"},
+    )
+    assert "serialize_called" not in observed
+    assert cache_path.read_text(encoding="utf-8") == "{}"
+
+
+async def test_silent_wam_pins_skype_account_and_fails_closed_for_later_scopes(
+    tmp_path, monkeypatch
+):
+    """Later scopes must not switch to another cached WAM account."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    cache_path = tmp_path / "token_cache.bin"
+    cache_path.write_text("{}", encoding="utf-8")
+    account_a = {"home_account_id": "account-a"}
+    account_b = {"home_account_id": "account-b"}
+    calls = []
+
+    class FakeCache:
+        has_state_changed = False
+
+        def deserialize(self, _serialized):
+            pass
+
+    class FakeApp:
+        def get_accounts(self):
+            return [account_a, account_b]
+
+        def acquire_token_silent(self, scopes, *, account):
+            calls.append((scopes, account))
+            if scopes == teams_mtk._SilentWamAuth._SKYPE_SCOPE.split():
+                return {"access_token": "skype-a"} if account is account_a else None
+            # Account B could satisfy Graph, but must never be tried after A is pinned.
+            return {"access_token": "graph-b"} if account is account_b else None
+
+    class FakeMsal:
+        SerializableTokenCache = FakeCache
+
+        @staticmethod
+        def PublicClientApplication(**_kwargs):
+            return FakeApp()
+
+    monkeypatch.setattr(
+        teams_mtk, "_silent_wam_dependencies_available", lambda: True
+    )
+    monkeypatch.setitem(sys.modules, "msal", FakeMsal)
+
+    auth = teams_mtk._SilentWamAuth(cache_path)
+    skype_result = auth._acquire(auth._SKYPE_SCOPE)
+    with pytest.raises(RuntimeError, match="silent WAM token acquisition failed"):
+        auth.exchange_for_scope("https://graph.microsoft.com/.default")
+
+    assert skype_result["access_token"] == "skype-a"
+    assert auth._pinned_account is account_a
+    assert calls == [
+        (auth._SKYPE_SCOPE.split(), account_a),
+        (["https://graph.microsoft.com/.default"], account_a),
+    ]
+
+
+async def test_missing_json_loads_and_reuses_silent_wam_tokens(tmp_path, monkeypatch):
+    """A missing legacy cache falls back to one reusable silent broker session."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    missing_cache = tmp_path / "token_cache.json"
+    fake_wam = MagicMock()
+    fake_wam.ensure_valid_tokens.return_value = {
+        "access_token": "wam-access",
+        "skype_token": "wam-skype",
+        "saved_at": 100,
+        "expires_in": 3600,
+    }
+    monkeypatch.setattr(teams_mtk._TeamsAuth, "TOKEN_CACHE", missing_cache)
+    monkeypatch.setattr(
+        teams_mtk, "_create_silent_wam_auth", lambda: fake_wam, raising=False
+    )
+
+    auth = teams_mtk._TeamsAuth()
+    first = auth._load()
+    second = auth._load()
+
+    assert first["_auth_method"] == "wam"
+    assert second is first
+    fake_wam.ensure_valid_tokens.assert_called_once_with()
+
+
+async def test_expired_wam_tokens_refresh_through_broker(tmp_path, monkeypatch):
+    """WAM expiry must not fall into the empty refresh-token device-flow path."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    missing_cache = tmp_path / "token_cache.json"
+    old = {
+        "access_token": "old",
+        "skype_token": "old-skype",
+        "saved_at": 1,
+        "expires_in": 1,
+    }
+    new = {
+        "access_token": "new",
+        "skype_token": "new-skype",
+        "saved_at": 200,
+        "expires_in": 3600,
+    }
+    fake_wam = MagicMock()
+    fake_wam.ensure_valid_tokens.side_effect = [old, new]
+    monkeypatch.setattr(teams_mtk._TeamsAuth, "TOKEN_CACHE", missing_cache)
+    monkeypatch.setattr(
+        teams_mtk, "_create_silent_wam_auth", lambda: fake_wam, raising=False
+    )
+
+    auth = teams_mtk._TeamsAuth()
+    monkeypatch.setattr(auth, "_expired", lambda _tokens: True)
+
+    assert auth.tokens()["access_token"] == "new"
+    assert fake_wam.ensure_valid_tokens.call_count == 2
+
+
+async def test_wam_arbitrary_scope_exchange_stays_on_broker(tmp_path, monkeypatch):
+    """IC3/Graph scope acquisition must not require a legacy refresh token."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    fake_wam = MagicMock()
+    fake_wam.ensure_valid_tokens.return_value = {
+        "access_token": "wam-access",
+        "skype_token": "wam-skype",
+        "saved_at": 100,
+        "expires_in": 3600,
+    }
+    fake_wam.exchange_for_scope.return_value = {
+        "access_token": "scope-token",
+        "expires_in": 3600,
+    }
+    monkeypatch.setattr(
+        teams_mtk._TeamsAuth, "TOKEN_CACHE", tmp_path / "missing.json"
+    )
+    monkeypatch.setattr(
+        teams_mtk, "_create_silent_wam_auth", lambda: fake_wam, raising=False
+    )
+
+    auth = teams_mtk._TeamsAuth()
+    result = auth.exchange_for_scope("scope-a offline_access")
+
+    assert result["access_token"] == "scope-token"
+    fake_wam.exchange_for_scope.assert_called_once_with("scope-a offline_access")
 
 
 async def test_exchange_for_scope_uses_requested_scope_and_persists_rotated_refresh(
@@ -559,19 +1112,13 @@ class TestSendTyping:
         entered = threading.Event()
         release = threading.Event()
         mock_resp = MagicMock(status_code=201)
-        mock_session = MagicMock()
 
-        def _blocking_post(*_args, **_kwargs):
+        def _blocking_request(*_args, **_kwargs):
             entered.set()
             release.wait(timeout=1.0)
             return mock_resp
 
-        mock_session.post.side_effect = _blocking_post
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-
-        with patch("requests.Session", return_value=mock_session), \
-             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+        with patch.object(adapter, "_call_sdk_http", side_effect=_blocking_request), \
              patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
              patch.object(adapter._auth, "_inject_truststore"):
             started = asyncio.get_running_loop().time()
@@ -590,53 +1137,41 @@ class TestSendTyping:
         """send_typing POSTs {"messagetype":"Control/Typing","content":""}."""
         adapter = _make_adapter()
         mock_resp = MagicMock(status_code=201, text='{"OriginalArrivalTime":1}')
-        mock_session = MagicMock()
-        mock_session.post.return_value = mock_resp
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
 
-        with patch("requests.Session", return_value=mock_session), \
-             patch.object(adapter._auth, "skype_token", return_value="fake-skype-token"), \
+        with patch.object(adapter, "_call_sdk_http", return_value=mock_resp) as request, \
              patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
              patch.object(adapter._auth, "_inject_truststore"):
             await adapter.send_typing("19:test@thread.v2")
 
-        mock_session.post.assert_called_once()
-        call_args = mock_session.post.call_args
-        url = call_args[0][0]
-        payload = call_args[1]["json"]
+        request.assert_called_once()
+        call_args = request.call_args
+        assert call_args.args[0] == "POST"
+        url = call_args.args[1]
+        payload = call_args.kwargs["json"]
         assert "Control/Typing" == payload["messagetype"]
         assert payload["content"] == ""
-        assert "skypetoken=fake-skype-token" in call_args[1]["headers"]["Authentication"]
+        assert call_args.kwargs["timeout"] == 10
         assert "19:test@thread.v2" in url
 
     async def test_send_typing_non_201_logs_warning(self):
         """send_typing logs warning on non-201 but does not raise."""
         adapter = _make_adapter()
         mock_resp = MagicMock(status_code=403, text="forbidden")
-        mock_session = MagicMock()
-        mock_session.post.return_value = mock_resp
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
 
-        with patch("requests.Session", return_value=mock_session), \
-             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+        with patch.object(adapter, "_call_sdk_http", return_value=mock_resp) as request, \
              patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
              patch.object(adapter._auth, "_inject_truststore"):
-            # Should not raise even on 403
-            await adapter.send_typing("19:test@thread.v2")
+            assert await adapter.send_typing("19:test@thread.v2") is False
+
+        request.assert_called_once()
 
     async def test_send_typing_exception_does_not_raise(self):
         """send_typing swallows exceptions (logging only) so _keep_typing stays alive."""
         adapter = _make_adapter()
-        mock_session = MagicMock()
-        mock_session.post.side_effect = ConnectionError("network down")
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
 
-        with patch("requests.Session", return_value=mock_session), \
-             patch.object(adapter._auth, "skype_token", return_value="tok"), \
+        with patch.object(adapter, "_call_sdk_http", side_effect=ConnectionError("network down")) as request, \
              patch.object(adapter._auth, "_msg_base", "https://apac.ng.msg.teams.microsoft.com/v1/users/ME", create=True), \
              patch.object(adapter._auth, "_inject_truststore"):
-            # Must not raise — _keep_typing depends on this
-            await adapter.send_typing("19:test@thread.v2")
+            assert await adapter.send_typing("19:test@thread.v2") is False
+
+        request.assert_called_once()

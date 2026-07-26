@@ -27,13 +27,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
+import unicodedata
 import uuid
+
 import requests
+from bs4 import BeautifulSoup
 
 # --- SSL / Proxy setup ---
 try:
@@ -43,13 +49,18 @@ except ImportError:
     pass
 
 # --- SDK imports ---
-from teams_skype_sdk.auth import TeamsAuth
+from teams_skype_sdk.api._http import strip_teams_html
 from teams_skype_sdk.graph import GraphToken
 
 # Gateway log now redacts message/conv IDs through _log_ref() (sha256:<12hex>)
 # for privacy. Log-pattern assertions must match on the SAME redacted form,
 # not the plaintext ID, or they never match and produce false FAILs.
-from gateway.platforms.teams_mtk import _log_ref
+from gateway.platforms.teams_mtk import (
+    _SDKAuthAdapter,
+    _SDKHTTPLayer,
+    _TeamsAuth,
+    _log_ref,
+)
 
 
 # ── Configuration ──────────────────────────────────────────────────
@@ -88,14 +99,23 @@ def _load_configured_chat_ids() -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+_gateway_auth = None
 _graph_token = None
+_readback_http_layer = None
+
+
+def _get_gateway_auth():
+    """Share the gateway's atomic token cache implementation across E2E I/O."""
+    global _gateway_auth
+    if _gateway_auth is None:
+        _gateway_auth = _TeamsAuth()
+    return _gateway_auth
 
 
 def get_graph_token() -> str:
     global _graph_token
     if _graph_token is None:
-        auth = TeamsAuth()
-        gt = GraphToken(auth)
+        gt = GraphToken(_get_gateway_auth())
         _graph_token = gt.get_token()
         if not _graph_token:
             raise RuntimeError("Failed to acquire Graph token")
@@ -164,8 +184,32 @@ def wait_and_check_log(
 
 def get_skype_token() -> str:
     """Skype token for direct Skype/MSG API calls (read-back verification)."""
-    auth = TeamsAuth()
-    return auth.get_skype_token()
+    return _get_gateway_auth().skype_token()
+
+
+def _close_sdk_http_layer(http_layer) -> None:
+    session = getattr(http_layer, "_session", None)
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def _get_readback_http_layer(auth):
+    global _readback_http_layer
+    if _readback_http_layer is None:
+        _readback_http_layer = _SDKHTTPLayer(
+            _SDKAuthAdapter(auth), verify_ssl=True
+        )
+    return _readback_http_layer
+
+
+def _discard_readback_http_layer(http_layer) -> None:
+    global _readback_http_layer
+    if _readback_http_layer is http_layer:
+        _readback_http_layer = None
+    _close_sdk_http_layer(http_layer)
 
 
 def get_messages_raw(chat_id: str, page_size: int = 15) -> list[dict]:
@@ -174,33 +218,270 @@ def get_messages_raw(chat_id: str, page_size: int = 15) -> list[dict]:
     Unlike gateway.log pattern matching, this fetches the ACTUAL rendered
     message content the user would see in Teams — required for any test
     that verifies output *quality* (formatting, residual markdown, echo
-    duplication) rather than just "did some code path execute".
+    duplication) rather than just "did some code path execute". Successful
+    requests retain one shared SDK transport just like the gateway poll loop;
+    a failed corporate-proxy TLS pool is discarded before the next retry.
     """
-    token = get_skype_token()
-    region_hosts = ["apac.ng.msg.teams.microsoft.com", "amer.ng.msg.teams.microsoft.com"]
-    last_err = None
-    for host in region_hosts:
-        url = f"https://{host}/v1/users/ME/conversations/{chat_id}/messages"
+    from teams_skype_sdk.api._messages import MessagesService
+
+    auth = _get_gateway_auth()
+    auth._inject_truststore()
+    last_error = "unknown"
+    attempts = 4
+    for attempt in range(attempts):
+        http_layer = None
         try:
-            r = requests.get(
-                url, headers={"Authentication": f"skypetoken={token}"},
-                params={"pageSize": page_size}, timeout=15, verify=False,
+            http_layer = _get_readback_http_layer(auth)
+            return MessagesService(http_layer).get_page(
+                chat_id,
+                page_size=page_size,
+                msg_base=auth.msg_base,
             )
-            if r.status_code == 200:
-                return r.json().get("messages", [])
-            last_err = f"{r.status_code} {r.text[:150]}"
-        except Exception as e:
-            last_err = str(e)
-    raise RuntimeError(f"get_messages_raw failed on all regions: {last_err}")
+        except Exception as exc:
+            # Do not leak the full exception: requests errors include the URL,
+            # whose path embeds the private conversation ID.
+            last_error = type(exc).__name__
+            _discard_readback_http_layer(http_layer)
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 4))
+    raise RuntimeError(
+        f"get_messages_raw failed after {attempts} attempts ({last_error})"
+    )
+
+
+def _visible_model_body(message: dict) -> str:
+    """Return only the rendered model body from a normalized Teams message."""
+    raw_content = str(message.get("_raw_content") or "")
+    source = raw_content or str(message.get("content") or "")
+
+    if raw_content:
+        # The MSG API preserves the gateway's branded card in _raw_content.
+        # Remove only the known header/footer nodes; arbitrary text elsewhere
+        # remains part of the body and therefore makes an exact-marker check fail.
+        soup = BeautifulSoup(raw_content, "html.parser")
+        for candidate in soup.find_all("div"):
+            style = str(candidate.get("style") or "").replace(" ", "").lower()
+            if "border-left:" not in style:
+                continue
+            header = next(
+                (
+                    node
+                    for node in candidate.find_all("b")
+                    if node.get_text(" ", strip=True) == "🤖 Hermes"
+                ),
+                None,
+            )
+            footer = next(
+                (
+                    node
+                    for node in candidate.find_all("span")
+                    if "font-size:0.85em"
+                    in str(node.get("style") or "").replace(" ", "").lower()
+                    and node.get_text(" ", strip=True).startswith("— Hermes · ")
+                ),
+                None,
+            )
+            if header is not None and footer is not None:
+                header.decompose()
+                footer.decompose()
+                source = str(candidate)
+                break
+
+    visible_text, _ = strip_teams_html(source)
+    visible_text = html.unescape(visible_text)
+    # Unicode format controls are not rendered. Ignoring them prevents a Teams
+    # zero-width formatting artifact from making an otherwise exact body fail.
+    visible_text = "".join(
+        character
+        for character in visible_text
+        if unicodedata.category(character) != "Cf"
+    )
+    return visible_text.strip()
+
+
+def _has_exact_visible_marker(message: dict, marker: str) -> bool:
+    return _visible_model_body(message) == marker
+
+
+_CUA_DRIVER_CALL_TIMEOUT_SECONDS = 120
+
+
+def _run_cua_driver(tool: str, arguments: dict) -> dict:
+    """Run one read-only cua-driver call without leaking private output."""
+    executable = shutil.which("cua-driver")
+    if not executable:
+        raise RuntimeError("cua-driver is unavailable for Teams UI read-back")
+    try:
+        completed = subprocess.run(
+            [executable, "call", tool, json.dumps(arguments)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Busy Windows desktops can take more than 30 seconds to walk the
+            # process/window table before UIA starts returning elements.
+            timeout=_CUA_DRIVER_CALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"cua-driver {tool} failed ({type(exc).__name__})"
+        ) from None
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cua-driver {tool} failed (exit={completed.returncode})"
+        )
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"cua-driver {tool} returned invalid JSON") from None
+
+
+def get_teams_ui_bot_marker_count(chat_id: str, marker: str) -> int:
+    """Count rendered Teams bot cards whose visible body is exactly the marker."""
+    windows_payload = _run_cua_driver("list_windows", {})
+    windows = (
+        windows_payload.get("windows")
+        or windows_payload.get("_legacy_windows")
+        or []
+    )
+    candidates = [
+        window
+        for window in windows
+        if str(window.get("app_name") or "").lower() == "ms-teams.exe"
+    ]
+    candidates.sort(
+        key=lambda window: (
+            bool(window.get("is_on_screen", True)),
+            int((window.get("bounds") or {}).get("width", window.get("width", 0)))
+            * int((window.get("bounds") or {}).get("height", window.get("height", 0))),
+        ),
+        reverse=True,
+    )
+
+    expected_header = f"chat-header-{chat_id}"
+    exact_marker_pattern = re.compile(
+        rf"(?:^|\s)🤖 Hermes\s+{re.escape(marker)}\s+— Hermes ·"
+    )
+    for window in candidates:
+        try:
+            state = _run_cua_driver(
+                "get_window_state",
+                {
+                    "pid": int(window["pid"]),
+                    "window_id": int(window["window_id"]),
+                    "include_screenshot": False,
+                    "max_elements": 600,
+                },
+            )
+        except RuntimeError:
+            continue
+        elements = state.get("elements") or []
+        if not any(element.get("label") == expected_header for element in elements):
+            continue
+        return sum(
+            1
+            for element in elements
+            if exact_marker_pattern.search(
+                str(element.get("label") or "").replace(r"\_", "_")
+            )
+        )
+    raise RuntimeError(
+        "matching Teams chat window was not available for UI read-back"
+    )
+
+
+def _test_streaming_no_echo_duplication_via_ui(
+    marker: str,
+    graph_message_ids: list[str],
+    *,
+    send_query: bool = True,
+    reply_timeout: float,
+    poll_interval: float,
+    settle_seconds: float,
+) -> tuple[bool, str]:
+    """Exercise the marker contract against the actual Teams UIA tree."""
+
+    def wait_for_marker(expected: str, timeout: float) -> tuple[int, str | None]:
+        deadline = time.monotonic() + timeout
+        last_error = None
+        while True:
+            try:
+                count = get_teams_ui_bot_marker_count(DM_CHAT_ID, expected)
+                if count:
+                    return count, None
+            except RuntimeError as exc:
+                last_error = str(exc)
+            if time.monotonic() >= deadline:
+                return 0, last_error
+            time.sleep(poll_interval)
+
+    if send_query:
+        graph_message_ids.append(
+            send_chat_message(
+                DM_CHAT_ID,
+                f"Reply with exactly {marker}. Do not add other text and do not use tools.",
+            )
+        )
+    reply_count, reply_error = wait_for_marker(marker, reply_timeout)
+    if not reply_count:
+        suffix = f" ({reply_error})" if reply_error else ""
+        return False, f"No marker-matched model reply found via Teams UIA{suffix}"
+
+    time.sleep(settle_seconds)
+    try:
+        settled_count = get_teams_ui_bot_marker_count(DM_CHAT_ID, marker)
+    except RuntimeError as exc:
+        return False, f"Teams UIA final read-back failed ({type(exc).__name__})"
+    if settled_count != 1:
+        return (
+            False,
+            "Duplicate marker-matched model replies detected via Teams UIA "
+            f"(marker replies={settled_count})",
+        )
+    return (
+        True,
+        "Marker-matched model reply read back from Teams UIA with exactly one "
+        "rendered bot message",
+    )
+
+
+def delete_msg_message(chat_id: str, message_id: str) -> None:
+    """Delete one controlled bot message through the Teams MSG API."""
+    from teams_skype_sdk.api._messages import MessagesService
+
+    auth = _get_gateway_auth()
+    auth._inject_truststore()
+    last_error = "unknown"
+    attempts = 3
+    for attempt in range(attempts):
+        http_layer = None
+        try:
+            http_layer = _get_readback_http_layer(auth)
+            MessagesService(http_layer).delete(chat_id, message_id)
+            return
+        except requests.HTTPError as exc:
+            if getattr(exc.response, "status_code", None) == 404:
+                return
+            last_error = type(exc).__name__
+            _discard_readback_http_layer(http_layer)
+        except Exception as exc:
+            last_error = type(exc).__name__
+            _discard_readback_http_layer(http_layer)
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 4))
+    raise RuntimeError(
+        f"delete_msg_message failed after {attempts} attempts ({last_error})"
+    )
 
 
 def send_via_sdk(chat_id: str, content: str) -> str:
     """Send via the Skype SDK (bot-token path) — mirrors what the gateway itself sends."""
     from teams_skype_sdk.api._messages import MessagesService
-    from teams_skype_sdk.api._http import HTTPLayer
 
-    auth = TeamsAuth()
-    http = HTTPLayer(auth)
+    if _SDKHTTPLayer is None:
+        raise RuntimeError("teams_skype_sdk is unavailable")
+    http = _SDKHTTPLayer(_SDKAuthAdapter(_get_gateway_auth()))
     result = MessagesService(http).send(conversation_id=chat_id, content=content)
     return str(result.get("id", "") or result.get("OriginalArrivalTime", ""))
 
@@ -209,7 +490,7 @@ def test_streaming_no_echo_duplication(
     log_path: str,
     baseline: int,
     *,
-    ack_timeout: float = 60,
+    ack_timeout: float = 300,
     reply_timeout: float = 240,
     poll_interval: float = 5,
     settle_seconds: float = 10,
@@ -234,8 +515,20 @@ def test_streaming_no_echo_duplication(
         )
 
     def _is_bot_message(message: dict) -> bool:
-        raw = message.get("content") or ""
-        return "🤖" in raw or "border-left" in raw
+        content = str(message.get("content") or "")
+        raw_content = str(message.get("_raw_content") or "")
+        properties = (
+            message.get("_raw_properties")
+            or message.get("properties")
+            or {}
+        )
+        if not isinstance(properties, dict):
+            properties = {}
+        return (
+            properties.get("hermes_sender") in {"agent", "bot"}
+            or "🤖" in content
+            or "border-left" in raw_content
+        )
 
     def _new_bot_messages(messages: list[dict], known_ids: set[str]) -> list[dict]:
         return [
@@ -246,80 +539,232 @@ def test_streaming_no_echo_duplication(
             and _is_bot_message(message)
         ]
 
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
-    baseline_ids = {_message_id(m) for m in baseline_msgs if _message_id(m)}
+    graph_message_ids: list[str] = []
+    cleanup_msg_ids: set[str] = set()
+    query_sent = False
+    reset_sent = False
+    reset_cleanup_tracked = False
+    ui_fallback_used = False
+    functional_passed = False
+    marker = ""
+    reset_marker = ""
+    try:
+        run_marker = uuid.uuid4().hex[:12].upper()
+        reset_marker = f"E2ERESET{run_marker}"
+        marker = f"E2E{run_marker}"
+        baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+        baseline_ids = {_message_id(m) for m in baseline_msgs if _message_id(m)}
 
-    # Establish a second baseline only after /new has produced its command
-    # acknowledgment. Otherwise that acknowledgment can be mistaken for the
-    # model reply and make an empty query turn pass.
-    send_chat_message(DM_CHAT_ID, "/new")
-    ack_deadline = time.monotonic() + ack_timeout
-    current_msgs: list[dict] = []
-    while True:
-        current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
-        if _new_bot_messages(current_msgs, baseline_ids):
-            break
-        if time.monotonic() >= ack_deadline:
-            return False, "No /new acknowledgment found via Teams MSG API"
-        time.sleep(poll_interval)
+        # Establish a second baseline only after /new has produced its own
+        # acknowledgment. Give the new session a unique title: the gateway's
+        # formal reset handler includes that title in its localized reply, so
+        # this gate is correlated without hard-coding an English UI string.
+        # An unrelated delayed bot message therefore cannot satisfy the gate.
+        graph_message_ids.append(
+            send_chat_message(DM_CHAT_ID, f"/new {reset_marker}")
+        )
+        reset_sent = True
+        ack_deadline = time.monotonic() + ack_timeout
+        current_msgs: list[dict] = []
+        while True:
+            current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+            ack_messages = [
+                message
+                for message in _new_bot_messages(current_msgs, baseline_ids)
+                if reset_marker in (message.get("content") or "")
+            ]
+            if ack_messages:
+                ack_ids = {
+                    _message_id(message)
+                    for message in ack_messages
+                    if _message_id(message)
+                }
+                cleanup_msg_ids.update(ack_ids)
+                reset_cleanup_tracked = bool(ack_ids)
+                break
+            if time.monotonic() >= ack_deadline:
+                return (
+                    False,
+                    "No marker-correlated /new acknowledgment found via Teams "
+                    f"MSG API within {ack_timeout:g}s",
+                )
+            time.sleep(poll_interval)
 
-    query_baseline_ids = baseline_ids | {
-        _message_id(m) for m in current_msgs if _message_id(m)
-    }
-    marker = f"E2E{uuid.uuid4().hex[:12].upper()}"
-    send_chat_message(
-        DM_CHAT_ID,
-        f"Reply with exactly {marker}. Do not add other text and do not use tools.",
-    )
+        query_baseline_ids = baseline_ids | {
+            _message_id(m) for m in current_msgs if _message_id(m)
+        }
+        graph_message_ids.append(
+            send_chat_message(
+                DM_CHAT_ID,
+                f"Reply with exactly {marker}. Do not add other text and do not use tools.",
+            )
+        )
+        query_sent = True
 
-    reply_deadline = time.monotonic() + reply_timeout
-    query_bot_msgs: list[dict] = []
-    marker_msgs: list[dict] = []
-    while True:
+        reply_deadline = time.monotonic() + reply_timeout
+        query_bot_msgs: list[dict] = []
+        marker_msgs: list[dict] = []
+        while True:
+            current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
+            query_bot_msgs = _new_bot_messages(current_msgs, query_baseline_ids)
+            marker_msgs = [
+                message
+                for message in query_bot_msgs
+                if _has_exact_visible_marker(message, marker)
+            ]
+            cleanup_msg_ids.update(
+                _message_id(message)
+                for message in query_bot_msgs
+                if _message_id(message)
+                and marker
+                in (
+                    str(message.get("content") or "")
+                    + str(message.get("_raw_content") or "")
+                )
+            )
+            if marker_msgs:
+                break
+            if time.monotonic() >= reply_deadline:
+                return (
+                    False,
+                    "No marker-matched model reply found via Teams MSG API "
+                    f"within {reply_timeout:g}s (new bot messages={len(query_bot_msgs)})",
+                )
+            time.sleep(poll_interval)
+
+        # Let any late streaming edit/echo settle, then read the actual Teams
+        # conversation again. The exact-marker query should produce one logical
+        # bot message ID; two IDs prove an edit was echoed as a new message.
+        time.sleep(settle_seconds)
         current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
         query_bot_msgs = _new_bot_messages(current_msgs, query_baseline_ids)
         marker_msgs = [
             message
             for message in query_bot_msgs
-            if marker in (message.get("content") or "")
+            if _has_exact_visible_marker(message, marker)
         ]
-        if marker_msgs:
-            break
-        if time.monotonic() >= reply_deadline:
+        cleanup_msg_ids.update(
+            _message_id(message)
+            for message in query_bot_msgs
+            if _message_id(message)
+            and marker
+            in (
+                str(message.get("content") or "")
+                + str(message.get("_raw_content") or "")
+            )
+        )
+        distinct_marker_ids = {
+            _message_id(message) for message in marker_msgs if _message_id(message)
+        }
+
+        if not marker_msgs:
+            return False, "Marker-matched reply disappeared during Teams read-back"
+        if len(distinct_marker_ids) != 1:
             return (
                 False,
-                "No marker-matched model reply found via Teams MSG API "
-                f"within {reply_timeout:g}s (new bot messages={len(query_bot_msgs)})",
+                "Duplicate marker-matched model replies detected after marker query "
+                f"(distinct marker message IDs={len(distinct_marker_ids)}, "
+                f"marker replies={len(marker_msgs)}, "
+                f"other bot messages={len(query_bot_msgs) - len(marker_msgs)})",
             )
-        time.sleep(poll_interval)
-
-    # Let any late streaming edit/echo settle, then read the actual Teams
-    # conversation again. The exact-marker query should produce one logical
-    # bot message ID; two IDs prove an edit was echoed as a new message.
-    time.sleep(settle_seconds)
-    current_msgs = get_messages_raw(DM_CHAT_ID, page_size=50)
-    query_bot_msgs = _new_bot_messages(current_msgs, query_baseline_ids)
-    marker_msgs = [
-        message
-        for message in query_bot_msgs
-        if marker in (message.get("content") or "")
-    ]
-    distinct_query_ids = {_message_id(m) for m in query_bot_msgs if _message_id(m)}
-
-    if not marker_msgs:
-        return False, "Marker-matched reply disappeared during Teams read-back"
-    if len(distinct_query_ids) != 1:
+        unexpected_bot_ids = {
+            _message_id(message)
+            for message in query_bot_msgs
+            if _message_id(message) not in distinct_marker_ids
+        }
+        if unexpected_bot_ids:
+            return (
+                False,
+                "Unexpected bot message IDs emitted after exact-marker query "
+                f"(unexpected bot message IDs={len(unexpected_bot_ids)})",
+            )
+        functional_passed = True
         return (
-            False,
-            "Duplicate/extra bot messages detected after marker query "
-            f"(distinct message IDs={len(distinct_query_ids)}, "
-            f"marker replies={len(marker_msgs)})",
+            True,
+            "Marker-matched model reply read back from Teams with exactly one "
+            "distinct bot message ID",
         )
-    return (
-        True,
-        "Marker-matched model reply read back from Teams with exactly one "
-        "distinct bot message ID",
-    )
+    except RuntimeError:
+        ui_fallback_used = True
+        result = _test_streaming_no_echo_duplication_via_ui(
+            marker,
+            graph_message_ids,
+            send_query=not query_sent,
+            reply_timeout=reply_timeout,
+            poll_interval=poll_interval,
+            settle_seconds=settle_seconds,
+        )
+        functional_passed = result[0]
+        return result
+    finally:
+        graph_deleted = 0
+        msg_deleted = 0
+        cleanup_failures: list[str] = []
+        if ui_fallback_used:
+            recovered_cleanup_ids = False
+            recovery_detail = "MSG read-back unavailable"
+            for attempt in range(3):
+                try:
+                    recovered_messages = get_messages_raw(DM_CHAT_ID, page_size=50)
+                    marker_ids = {
+                        _message_id(message)
+                        for message in recovered_messages
+                        if _message_id(message)
+                        and _is_bot_message(message)
+                        and _has_exact_visible_marker(message, marker)
+                    }
+                    reset_ids = {
+                        _message_id(message)
+                        for message in recovered_messages
+                        if _message_id(message)
+                        and _is_bot_message(message)
+                        and reset_marker
+                        in (
+                            str(message.get("content") or "")
+                            + str(message.get("_raw_content") or "")
+                        )
+                    }
+                    reset_recovered = (
+                        not reset_sent or reset_cleanup_tracked or bool(reset_ids)
+                    )
+                    if marker_ids and reset_recovered:
+                        cleanup_msg_ids.update(marker_ids)
+                        cleanup_msg_ids.update(reset_ids)
+                        recovered_cleanup_ids = True
+                        break
+                    recovery_detail = (
+                        f"marker={len(marker_ids)} reset={len(reset_ids)}"
+                    )
+                except Exception as exc:
+                    recovery_detail = type(exc).__name__
+                if attempt < 2:
+                    time.sleep(min(2**attempt, 4))
+            if not recovered_cleanup_ids:
+                cleanup_failures.append(
+                    f"msg:cleanup message IDs unavailable ({recovery_detail})"
+                )
+        for message_id in graph_message_ids:
+            try:
+                delete_graph_message(DM_CHAT_ID, message_id)
+                graph_deleted += 1
+            except Exception as exc:
+                cleanup_failures.append(f"graph:{type(exc).__name__}")
+        for message_id in cleanup_msg_ids:
+            try:
+                delete_msg_message(DM_CHAT_ID, message_id)
+                msg_deleted += 1
+            except Exception as exc:
+                cleanup_failures.append(f"msg:{type(exc).__name__}")
+        print(
+            f"cleanup graph={graph_deleted}/{len(graph_message_ids)} "
+            f"msg={msg_deleted}/{len(cleanup_msg_ids)} "
+            f"failures={','.join(cleanup_failures) if cleanup_failures else 'none'}"
+        )
+        if cleanup_failures and functional_passed:
+            raise RuntimeError(
+                "streaming E2E cleanup failed after a successful result: "
+                + ",".join(cleanup_failures)
+            )
 
 
 def test_no_residual_markdown_in_reply(log_path: str, baseline: int) -> tuple[bool, str]:

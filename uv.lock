@@ -473,6 +473,19 @@ wheels = [
 ]
 
 [[package]]
+name = "beautifulsoup4"
+version = "4.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "soupsieve" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
+]
+
+[[package]]
 name = "boto3"
 version = "1.42.89"
 source = { registry = "https://pypi.org/simple" }
@@ -1671,7 +1684,12 @@ supermemory = [
 ]
 teams = [
     { name = "aiohttp" },
+    { name = "beautifulsoup4" },
+    { name = "markdown" },
+    { name = "markdownify" },
     { name = "microsoft-teams-apps" },
+    { name = "msal" },
+    { name = "pymsalruntime", marker = "sys_platform == 'win32'" },
 ]
 termux = [
     { name = "agent-client-protocol" },
@@ -1731,6 +1749,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = "==0.87.0" },
     { name = "asyncpg", marker = "extra == 'matrix'", specifier = "==0.31.0" },
     { name = "azure-identity", marker = "extra == 'azure-identity'", specifier = "==1.25.3" },
+    { name = "beautifulsoup4", marker = "extra == 'teams'", specifier = ">=4.12,<5" },
     { name = "boto3", marker = "extra == 'bedrock'", specifier = "==1.42.89" },
     { name = "brotlicffi", marker = "extra == 'messaging'", specifier = "==1.2.0.1" },
     { name = "certifi", specifier = "==2026.5.20" },
@@ -1780,6 +1799,8 @@ requires-dist = [
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "lark-oapi", marker = "extra == 'feishu'", specifier = "==1.5.3" },
     { name = "markdown", specifier = "==3.10.2" },
+    { name = "markdown", marker = "extra == 'teams'", specifier = ">=3.6,<4" },
+    { name = "markdownify", marker = "extra == 'teams'", specifier = ">=0.13,<1" },
     { name = "mautrix", extras = ["encryption"], marker = "extra == 'matrix'", specifier = "==0.21.0" },
     { name = "mcp", marker = "extra == 'computer-use'", specifier = "==1.26.0" },
     { name = "mcp", marker = "extra == 'dev'", specifier = "==1.26.0" },
@@ -1788,6 +1809,7 @@ requires-dist = [
     { name = "microsoft-teams-apps", marker = "extra == 'teams'", specifier = "==2.0.13.4" },
     { name = "mistralai", marker = "extra == 'mistral'", specifier = "==2.4.8" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.3.4" },
+    { name = "msal", marker = "extra == 'teams'", specifier = ">=1.28,<2" },
     { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = "==0.3" },
     { name = "numpy", marker = "extra == 'voice'", specifier = "==2.4.3" },
     { name = "openai", specifier = "==2.24.0" },
@@ -1800,6 +1822,7 @@ requires-dist = [
     { name = "ptyprocess", marker = "sys_platform != 'win32'", specifier = ">=0.7.0,<1" },
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pyjwt", extras = ["crypto"], specifier = "==2.13.0" },
+    { name = "pymsalruntime", marker = "sys_platform == 'win32' and extra == 'teams'", specifier = ">=0.20.6,<0.22" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = "==1.3.0" },
     { name = "python-dotenv", specifier = "==1.2.2" },
@@ -2201,6 +2224,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5b/f5/4ec618ed16cc4f8fb3b701563655a69816155e79e24a17b651541804721d/markdown_it_py-4.0.0.tar.gz", hash = "sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3", size = 73070, upload-time = "2025-08-11T12:57:52.854Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/54/e7d793b573f298e1c9013b8c4dade17d481164aa517d1d7148619c2cedbf/markdown_it_py-4.0.0-py3-none-any.whl", hash = "sha256:87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147", size = 87321, upload-time = "2025-08-11T12:57:51.923Z" },
+]
+
+[[package]]
+name = "markdownify"
+version = "0.14.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/75/483a4bcca436fe88d02dc7686c372631d833848951b368700bdc0c770bb7/markdownify-0.14.1.tar.gz", hash = "sha256:a62a7a216947ed0b8dafb95b99b2ef4a0edd1e18d5653c656f68f03db2bfb2f1", size = 14332, upload-time = "2024-11-24T22:08:30.775Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/0b/74cec93a7b05edf4fc3ea1c899fe8a37f041d7b9d303c75abf7a162924e0/markdownify-0.14.1-py3-none-any.whl", hash = "sha256:4c46a6c0c12c6005ddcd49b45a5a890398b002ef51380cd319db62df5e09bc2a", size = 11530, upload-time = "2024-11-24T22:08:29.005Z" },
 ]
 
 [[package]]
@@ -3358,6 +3394,22 @@ crypto = [
 ]
 
 [[package]]
+name = "pymsalruntime"
+version = "0.20.6"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/9c/49091deaa0a0f2f11f858dbab5ca40a8f647a4764e6ea99f846da58987be/pymsalruntime-0.20.6-cp311-cp311-win32.whl", hash = "sha256:0a8cf16bf7582bd5dfb99fa9602b9cfe5e3d3d614fb4f830813a461957d3b5d8", size = 1127042, upload-time = "2026-05-19T20:55:17.492Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/9b/8292e08c51d3484538d01c7458d965436a3725fbd5e925f13a1d5394a2fc/pymsalruntime-0.20.6-cp311-cp311-win_amd64.whl", hash = "sha256:354be5d1fae5e2432510190a9f85b2fa5c11ea589bbb2b7696c02967fb03b352", size = 1300539, upload-time = "2026-05-19T20:55:06.43Z" },
+    { url = "https://files.pythonhosted.org/packages/38/2b/1fd33ef29e5cce2e9416d9d51f3e3e65aed517dc74000e4f5b0833183264/pymsalruntime-0.20.6-cp311-cp311-win_arm64.whl", hash = "sha256:e2b8161950529dc8b392dcbf8ffee2e9ac1c2c0f2d21c1c3732f7e3a17a1cf5b", size = 1268689, upload-time = "2026-05-19T20:55:26.386Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/75/bf74d500b2131966f3d277d06fe15a7d938e3f3ff7b87fc94597a0cd1774/pymsalruntime-0.20.6-cp312-cp312-win32.whl", hash = "sha256:8680badb652d00c894f478cd6df01c750fdaaaf3d21b35897e158ee05ccf3983", size = 1124318, upload-time = "2026-05-19T20:55:20.051Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/52/83fa6834676b96552b48328fbfdeac0686cb6946acc8d7d29c192c909b38/pymsalruntime-0.20.6-cp312-cp312-win_amd64.whl", hash = "sha256:6b07eba5a99b755939157d5cab536d20d29718f28c6adf1ecf3b8753232082c1", size = 1299601, upload-time = "2026-05-19T20:55:08.805Z" },
+    { url = "https://files.pythonhosted.org/packages/34/20/f9fc2c586a55a07c0af5302c2a25c116dd3549d3274f0bcc9a60b3b8b3ec/pymsalruntime-0.20.6-cp312-cp312-win_arm64.whl", hash = "sha256:90eca0ea2563354b9d34fd9fed71f344c18fb4cdb3c6c0dcaf055d9e424cb30a", size = 1267167, upload-time = "2026-05-19T20:55:29.309Z" },
+    { url = "https://files.pythonhosted.org/packages/02/75/74498d54ffbb4679184e1c01f3f84ef82982085e303ad0481942903f2293/pymsalruntime-0.20.6-cp313-cp313-win32.whl", hash = "sha256:979c0d76ba8f5162b0e2128deb304c39b1e392120537302c56fd87aa856dc0dd", size = 1123600, upload-time = "2026-05-19T20:55:21.997Z" },
+    { url = "https://files.pythonhosted.org/packages/29/08/f4837f42d39acaf4139b3def7f56d86f9103c078daf76c06de127c8d697f/pymsalruntime-0.20.6-cp313-cp313-win_amd64.whl", hash = "sha256:2b8c6cfbb097175b0d8a2630aa3d2a86d583a6bb075917a775af0a177580dd92", size = 1299466, upload-time = "2026-05-19T20:55:10.881Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/29/ae3598c917c9a45177d303548c754053b226aa36a4f6b69c42aee465c1d9/pymsalruntime-0.20.6-cp313-cp313-win_arm64.whl", hash = "sha256:8ca988f5308f4c17a6cf85d14550015a1e17dc4e898e22698d040d3af2bee693", size = 1266156, upload-time = "2026-05-19T20:55:31.211Z" },
+]
+
+[[package]]
 name = "pynacl"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3925,6 +3977,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/88/a1/d19dd9889cd4bce2e233c4fac007cd8daaf5b9fe6e6a5d432cf17be0b807/sounddevice-0.5.5-py3-none-win32.whl", hash = "sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103", size = 317765, upload-time = "2026-01-23T18:36:39.047Z" },
     { url = "https://files.pythonhosted.org/packages/c3/0e/002ed7c4c1c2ab69031f78989d3b789fee3a7fba9e586eb2b81688bf4961/sounddevice-0.5.5-py3-none-win_amd64.whl", hash = "sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519", size = 365324, upload-time = "2026-01-23T18:36:40.496Z" },
     { url = "https://files.pythonhosted.org/packages/4e/39/a61d4b83a7746b70d23d9173be688c0c6bfc7173772344b7442c2c155497/sounddevice-0.5.5-py3-none-win_arm64.whl", hash = "sha256:3861901ddd8230d2e0e8ae62ac320cdd4c688d81df89da036dcb812f757bb3e6", size = 317115, upload-time = "2026-01-23T18:36:42.235Z" },
+]
+
+[[package]]
+name = "soupsieve"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/38/e12680bbe6b4f8f3d17adcaf38d26850aa756c85cf4a80e79fc12a018fe8/soupsieve-2.9.1.tar.gz", hash = "sha256:c33e6605bbc71dd628b00c632d58ae607c22bade247e52553928f83bbb75b4ba", size = 122261, upload-time = "2026-07-21T16:57:17.452Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/2c/437fe806897c2d6cfdc3ee43a18da8bf8e568530a4ae9bac781541ca9896/soupsieve-2.9.1-py3-none-any.whl", hash = "sha256:4f4477399246b7a0c720a88ca2454b11cd6bb9ae4c9d170140786e916776c14c", size = 37404, upload-time = "2026-07-21T16:57:16.421Z" },
 ]
 
 [[package]]

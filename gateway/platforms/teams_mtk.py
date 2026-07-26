@@ -1,7 +1,7 @@
 """Microsoft Teams gateway adapter for MTK internal environment.
 
-Uses the configured Teams authentication provider's token cache
-(~/.teams-tokens/token_cache.json)
+Uses the configured Teams authentication provider's legacy token cache
+(~/.teams-tokens/token_cache.json) or an existing silent Windows broker cache
 for authentication — no separate bot token needed. Polls a configured
 conversation for new messages.
 
@@ -180,10 +180,129 @@ def _clean_message_content(content: str) -> tuple[str, List[dict]]:
     return user_text, []
 
 
+def _wam_cache_path() -> Path:
+    return Path.home() / ".teams-automation" / "token_cache.bin"
+
+
+def _silent_wam_dependencies_available() -> bool:
+    """Return whether Windows broker auth can run without importing it."""
+    if os.name != "nt":
+        return False
+    import importlib.util
+
+    return (
+        importlib.util.find_spec("msal") is not None
+        and importlib.util.find_spec("pymsalruntime") is not None
+    )
+
+
+class _SilentWamAuth:
+    """Silent-only Windows broker auth for an existing MSAL cache.
+
+    Gateway processes must never trigger an account picker. This helper only
+    uses accounts already present in the external WAM cache and fails closed
+    when silent acquisition cannot satisfy the requested scope.
+    """
+
+    _CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
+    _AUTHORITY = "https://login.microsoftonline.com/organizations"
+    _SKYPE_SCOPE = "https://api.spaces.skype.com/.default"
+    _MSAL_RESERVED_SCOPES = frozenset({"offline_access", "openid", "profile"})
+
+    def __init__(self, cache_path: Path):
+        if not _silent_wam_dependencies_available():
+            raise RuntimeError("silent WAM dependencies are unavailable")
+        if not cache_path.is_file():
+            raise RuntimeError("silent WAM cache is unavailable")
+
+        import msal
+
+        self._cache_path = cache_path
+        self._cache = msal.SerializableTokenCache()
+        try:
+            self._cache.deserialize(cache_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError("silent WAM cache is unreadable") from exc
+        self._app = msal.PublicClientApplication(
+            client_id=self._CLIENT_ID,
+            authority=self._AUTHORITY,
+            enable_broker_on_windows=True,
+            token_cache=self._cache,
+        )
+        self._pinned_account: Optional[dict] = None
+
+    def _acquire(self, scope: str) -> dict:
+        # MSAL adds these protocol scopes itself and rejects callers that pass
+        # them explicitly. Treat the external cache as a read-only seed: its
+        # authentication helper is a separate process without a shared lock,
+        # so writing our in-memory snapshot back could overwrite newer tokens.
+        requested_scopes = [
+            value
+            for value in scope.split()
+            if value.casefold() not in self._MSAL_RESERVED_SCOPES
+        ]
+        if not requested_scopes:
+            raise RuntimeError("silent WAM token acquisition has no API scope")
+        accounts = (
+            [self._pinned_account]
+            if self._pinned_account is not None
+            else self._app.get_accounts()
+        )
+        for account in accounts:
+            result = self._app.acquire_token_silent(
+                requested_scopes, account=account
+            )
+            if result and result.get("access_token"):
+                if scope == self._SKYPE_SCOPE and self._pinned_account is None:
+                    self._pinned_account = account
+                return result
+        raise RuntimeError("silent WAM token acquisition failed")
+
+    def ensure_valid_tokens(self) -> dict:
+        import requests
+
+        result = self._acquire(self._SKYPE_SCOPE)
+        response = requests.post(
+            _SKYPE_TOKEN_URL,
+            headers={"Authorization": f"Bearer {result['access_token']}"},
+            json={},
+            verify=True,
+            timeout=30,
+        )
+        response.raise_for_status()
+        body = response.json()
+        skype_token = (
+            body.get("skypeToken")
+            or body.get("tokens", {}).get("skypeToken")
+        )
+        if not skype_token:
+            raise RuntimeError("silent WAM Skype exchange returned no token")
+        return {
+            "access_token": result["access_token"],
+            "skype_token": skype_token,
+            "saved_at": int(time.time()),
+            "expires_in": result.get("expires_in", 3600),
+            "_skype_authz": body,
+        }
+
+    def exchange_for_scope(self, scope: str) -> dict:
+        result = self._acquire(scope)
+        return {
+            "access_token": result["access_token"],
+            "expires_in": result.get("expires_in", 3600),
+        }
+
+
+def _create_silent_wam_auth() -> _SilentWamAuth:
+    return _SilentWamAuth(_wam_cache_path())
+
+
 def check_teams_mtk_requirements() -> bool:
-    """Return True when the external Teams authentication cache exists."""
+    """Return True when legacy or silent Windows authentication is available."""
     token_cache = Path.home() / ".teams-tokens" / "token_cache.json"
-    return token_cache.exists()
+    return token_cache.exists() or (
+        _wam_cache_path().exists() and _silent_wam_dependencies_available()
+    )
 
 
 def _normalize_conversation_ids(value: Any) -> List[str]:
@@ -301,6 +420,8 @@ class _TeamsAuth:
         # embedders that already supplied an in-memory Skype token must not be
         # forced through an unrelated OAuth refresh first.
         self._skype_token: Optional[str] = None
+        self._wam_auth: Any = None
+        self._wam_tokens: Optional[dict] = None
 
     def _inject_truststore(self):
         """Configure TLS trust before any Teams HTTP session is used.
@@ -369,14 +490,67 @@ class _TeamsAuth:
                     pass
             self._truststore_injected = True
 
+    def _get_wam_auth(self):
+        if self._wam_auth is None:
+            self._wam_auth = _create_silent_wam_auth()
+        return self._wam_auth
+
+    def _load_wam_tokens(self, *, force: bool = False) -> dict:
+        if self._wam_tokens is not None and not force:
+            return self._wam_tokens
+        self._inject_truststore()
+        tokens = dict(self._get_wam_auth().ensure_valid_tokens())
+        authz_body = tokens.pop("_skype_authz", None)
+        tokens["_auth_method"] = "wam"
+        if isinstance(authz_body, dict):
+            self._apply_skype_authz(tokens, authz_body)
+        self._wam_tokens = tokens
+        if not force:
+            logger.info("TeamsMTK: using silent Windows broker authentication")
+        return tokens
+
+    def _load_wam_after_unusable_cache(self, issue: str) -> dict:
+        """Try WAM without modifying an unreadable legacy token cache."""
+        logger.warning(
+            "TeamsMTK: token cache %s and unrecoverable (%s) — "
+            "preserving cache and trying silent Windows broker auth",
+            issue,
+            self.TOKEN_CACHE.name,
+        )
+        try:
+            return self._load_wam_tokens()
+        except Exception as exc:
+            logger.warning(
+                "TeamsMTK: silent Windows broker auth unavailable after "
+                "legacy cache failure: %s",
+                _log_error(exc),
+            )
+            raise RuntimeError(
+                f"Teams token cache is {issue} but has been preserved: "
+                f"{self.TOKEN_CACHE}. Silent Windows broker authentication "
+                "is unavailable; re-authenticate with the Teams "
+                "authentication helper"
+            ) from None
+
     def _load(self) -> dict:
         if not self.TOKEN_CACHE.exists():
-            raise RuntimeError(
-                "Teams token cache not found. "
-                "Authenticate first with the Teams authentication helper"
-            )
-        with open(self.TOKEN_CACHE, encoding="utf-8") as f:
-            raw = f.read()
+            try:
+                return self._load_wam_tokens()
+            except Exception as exc:
+                logger.warning(
+                    "TeamsMTK: silent Windows broker auth unavailable: %s",
+                    _log_error(exc),
+                )
+                raise RuntimeError(
+                    "Teams token cache not found and silent Windows broker "
+                    "authentication is unavailable. Authenticate first with "
+                    "the Teams authentication helper"
+                ) from None
+        try:
+            with open(self.TOKEN_CACHE, encoding="utf-8") as f:
+                raw = f.read()
+        except UnicodeDecodeError:
+            return self._load_wam_after_unusable_cache("not valid UTF-8")
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
@@ -387,21 +561,10 @@ class _TeamsAuth:
                 obj, _ = decoder.raw_decode(raw)
                 return obj
             except json.JSONDecodeError:
-                # Auto-purge corrupted cache so next poll triggers re-auth
-                # instead of permanently blocking on every tick.
-                logger.warning(
-                    "TeamsMTK: token cache corrupted and unrecoverable (%s) — "
-                    "deleting cache to force re-authentication on next poll",
-                    self.TOKEN_CACHE.name,
-                )
-                try:
-                    self.TOKEN_CACHE.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"Teams token cache was corrupted and has been deleted: "
-                    f"{self.TOKEN_CACHE}. Re-authenticate with the Teams authentication helper"
-                )
+                # Never delete or rewrite the only copy of a long-lived refresh
+                # token. WAM is an in-memory fallback, leaving the legacy cache
+                # intact for a later poll or manual recovery.
+                return self._load_wam_after_unusable_cache("corrupted")
 
     def _save(self, tokens: dict) -> None:
         """Atomic, owner-only write of the token cache.
@@ -515,11 +678,16 @@ class _TeamsAuth:
         )
         response.raise_for_status()
         if self._apply_skype_authz(tokens, response.json()):
-            self._save(tokens)
+            if tokens.get("_auth_method") == "wam":
+                self._wam_tokens = tokens
+            else:
+                self._save(tokens)
 
     def _refresh(self, tokens: dict) -> dict:
         import requests
         self._inject_truststore()
+        if tokens.get("_auth_method") == "wam":
+            return self._load_wam_tokens(force=True)
         refresh_token = tokens.get("refresh_token", "")
         if not refresh_token:
             raise RuntimeError(
@@ -627,6 +795,14 @@ class _TeamsAuth:
                 return tok["graph_token"]
 
             self._inject_truststore()
+            if tok.get("_auth_method") == "wam":
+                new_tok = self._get_wam_auth().exchange_for_scope(self._GRAPH_SCOPE)
+                tok["graph_token"] = new_tok["access_token"]
+                tok["graph_token_saved_at"] = int(time.time())
+                tok["graph_token_expires_in"] = new_tok.get("expires_in", 3600)
+                self._wam_tokens = tok
+                return tok["graph_token"]
+
             refresh_token = tok.get("refresh_token", "")
             if not refresh_token:
                 raise RuntimeError(
@@ -666,6 +842,10 @@ class _TeamsAuth:
 
         with self._lock:
             tok = self._load()
+            if tok.get("_auth_method") == "wam":
+                self._inject_truststore()
+                return self._get_wam_auth().exchange_for_scope(scope)
+
             refresh_token = tok.get("refresh_token", "")
             if not refresh_token:
                 raise RuntimeError(
@@ -1308,11 +1488,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         self._conv_ids = _configured_conversation_ids(_cfg)
         self._conv_id: Optional[str] = self._conv_ids[0] if self._conv_ids else None  # back-compat
         self._auth = _TeamsAuth()
-        # Reuse one SDK HTTP transport across poll ticks. MTK's TLS proxy is
+        # Reuse one SDK HTTP transport across all MSG operations. MTK's TLS proxy is
         # reliable once a keep-alive connection is established but can EOF
-        # repeated handshakes, so recreating Session every 2 seconds causes a
-        # self-sustaining ConnectionError loop. Serialize access because
+        # repeated handshakes, so recreating Session for poll/send/edit/typing
+        # causes a self-sustaining ConnectionError loop. Serialize access because
         # requests.Session is not guaranteed thread-safe.
+        # Historical attribute name retained for test/plugin compatibility.
         self._sdk_fetch_lock = threading.Lock()
         self._sdk_http_layer = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -1559,8 +1740,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             return False
 
         try:
-            # Validate token on startup
-            self._auth.skype_token()
+            # Validate token on startup without blocking the event loop.
+            await asyncio.to_thread(self._auth.skype_token)
         except Exception as e:
             logger.error("TeamsMTK: auth failed — %s", _log_error(e))
             return False
@@ -1569,7 +1750,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         # history while allowing one unanswered user turn to survive a restart.
         for _conv_id in self._conv_ids:
             try:
-                msgs = self._fetch_messages(conv_id=_conv_id, limit=20)
+                msgs = await asyncio.to_thread(
+                    self._fetch_messages,
+                    conv_id=_conv_id,
+                    limit=20,
+                )
                 if msgs:
                     _max_id = str(max(
                         (m for m in msgs if m.get("id")),
@@ -1633,7 +1818,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 await self._poll_task
             except asyncio.CancelledError:
                 pass
-        self._close_sdk_http_layer()
+        await asyncio.to_thread(self._close_sdk_http_layer)
         self._mark_disconnected()
         logger.info("TeamsMTK: disconnected")
 
@@ -1691,13 +1876,14 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 html_content, _ = self._build_html(runtime_footer, _skip_footer_extract=True)
 
             # SDK-3b: delegate to SDK MessagesService.send() when available.
-            # Falls back to raw HTTP on any SDK failure.
+            # Once the SDK POST starts, an exception may mean Teams accepted
+            # the message but the response was lost. Never raw-resend that
+            # indeterminate operation: doing so can duplicate the reply.
             if _SDK_AVAILABLE:
                 try:
-                    adapter = _SDKAuthAdapter(self._auth)
-                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
-                    svc = _SDKMessages(http_layer)
-                    result = svc.send(
+                    result = await asyncio.to_thread(
+                        self._call_sdk_messages,
+                        "send",
                         conversation_id=chat_id,
                         content=html_content,
                         is_html=True,
@@ -1709,14 +1895,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     msg_id = result.get("id")
                     if not msg_id:
                         try:
-                            recent = self._fetch_messages(chat_id, limit=3)
+                            recent = await asyncio.to_thread(
+                                self._fetch_messages, chat_id, 3
+                            )
+                            matching = []
                             for m in recent:
                                 _props = m.get("properties", {})
                                 _raw = m.get("_raw_properties", {})
                                 _sender = _props.get("hermes_sender") or _raw.get("hermes_sender")
-                                if _sender in ("agent", "bot"):
-                                    msg_id = m.get("id", "")
-                                    break
+                                if (
+                                    _sender in ("agent", "bot")
+                                    and m.get("_raw_content") == html_content
+                                    and m.get("id")
+                                ):
+                                    matching.append(m)
+                            if matching:
+                                msg_id = max(
+                                    matching,
+                                    key=lambda message: _message_id_key(
+                                        message.get("id")
+                                    ),
+                                ).get("id", "")
                             if msg_id:
                                 logger.info(
                                     "TeamsMTK: recovered msg id=%s from read-back",
@@ -1734,12 +1933,20 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     )
                     return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
                 except Exception as _sdk_err:
-                    logger.warning(
-                        "TeamsMTK: SDK send failed (%s) — falling back to raw HTTP",
+                    logger.error(
+                        "TeamsMTK: SDK send failed (%s) — delivery uncertain; "
+                        "raw fallback suppressed",
                         _log_error(_sdk_err),
                     )
+                    return SendResult(
+                        success=False,
+                        error=(
+                            "SDK send delivery uncertain; raw fallback suppressed "
+                            f"({type(_sdk_err).__name__})"
+                        ),
+                    )
 
-            # Raw HTTP fallback (SDK unavailable or SDK send failed)
+            # Raw HTTP path when the SDK is unavailable before any send starts.
             import requests
             from requests.adapters import HTTPAdapter
             self._auth._inject_truststore()
@@ -1747,7 +1954,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             session.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
             try:
                 for attempt in range(2):
-                    skype_token = self._auth.skype_token()
+                    skype_token = await asyncio.to_thread(
+                        self._auth.skype_token
+                    )
                     url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
                     payload = {
                         "content": html_content,
@@ -1755,7 +1964,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "contenttype": "text",
                         "properties": {"hermes_sender": "agent"},
                     }
-                    resp = session.post(
+                    resp = await asyncio.to_thread(
+                        session.post,
                         url,
                         json=payload,
                         headers={
@@ -1766,7 +1976,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         timeout=15,
                     )
                     if resp.status_code == 401 and attempt == 0:
-                        self._auth._force_refresh()
+                        await asyncio.to_thread(self._auth._force_refresh)
                         continue
                     if resp.status_code == 429 and attempt == 0:
                         logger.warning(
@@ -2022,10 +2232,9 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # SDK-3c: delegate to SDK MessagesService.edit() when available.
             if _SDK_AVAILABLE:
                 try:
-                    adapter = _SDKAuthAdapter(self._auth)
-                    http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
-                    svc = _SDKMessages(http_layer)
-                    svc.edit(
+                    await asyncio.to_thread(
+                        self._call_sdk_messages,
+                        "edit",
                         conversation_id=chat_id,
                         message_id=message_id,
                         content=html_content,
@@ -2040,18 +2249,32 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             # Raw HTTP fallback
             import requests
-            skype_token = self._auth.skype_token()
+            skype_token = await asyncio.to_thread(self._auth.skype_token)
             url = f"{self._auth.msg_base}/conversations/{chat_id}/messages/{message_id}"
             payload = {"content": html_content, "messagetype": "RichText/Html", "contenttype": "text"}
             headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
-            resp = requests.put(url, json=payload, headers=headers, verify=True, timeout=30)
+            resp = await asyncio.to_thread(
+                requests.put,
+                url,
+                json=payload,
+                headers=headers,
+                verify=True,
+                timeout=30,
+            )
             if resp.status_code == 429:
                 logger.warning(
                     "TeamsMTK: edit hit 429 rate limit for msg %s — backing off %.1fs then retrying once",
                     _log_ref(message_id), self._RATE_LIMIT_BACKOFF_S,
                 )
                 await asyncio.sleep(self._RATE_LIMIT_BACKOFF_S)
-                resp = requests.put(url, json=payload, headers=headers, verify=True, timeout=30)
+                resp = await asyncio.to_thread(
+                    requests.put,
+                    url,
+                    json=payload,
+                    headers=headers,
+                    verify=True,
+                    timeout=30,
+                )
             resp.raise_for_status()
             logger.info(
                 "TeamsMTK: edited message %s via raw HTTP (resp=%d bytes)",
@@ -2082,13 +2305,27 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """Run the blocking typing request outside the asyncio event loop."""
         try:
             self._auth._inject_truststore()
-            import requests
-            skype_token = self._auth.skype_token()
             url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
             payload = {"messagetype": "Control/Typing", "content": ""}
-            headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
-            with requests.Session() as session:
-                resp = session.post(url, json=payload, headers=headers, verify=True, timeout=10)
+            if _SDK_AVAILABLE:
+                resp = self._call_sdk_http(
+                    "POST", url, json=payload, timeout=10
+                )
+            else:
+                import requests
+                skype_token = self._auth.skype_token()
+                headers = {
+                    "Authentication": f"skypetoken={skype_token}",
+                    "Content-Type": "application/json",
+                }
+                with requests.Session() as session:
+                    resp = session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        verify=True,
+                        timeout=10,
+                    )
             if resp.status_code != 201:
                 logger.warning(
                     "TeamsMTK: send_typing got status %s for conv=%s",
@@ -3691,6 +3928,46 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         finally:
             logger.info("TeamsMTK: _fetch_messages done in %.1fs", _t.time() - _t0)
 
+    def _get_sdk_http_layer_locked(self):
+        """Return the shared SDK transport while ``_sdk_fetch_lock`` is held."""
+        if _SDKHTTPLayer is None:
+            raise RuntimeError("Teams SDK HTTP transport is unavailable")
+        http_layer = getattr(self, "_sdk_http_layer", None)
+        if http_layer is None:
+            adapter = _SDKAuthAdapter(self._auth)
+            http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
+            self._sdk_http_layer = http_layer
+        return http_layer
+
+    def _call_sdk_messages(self, operation: str, **kwargs):
+        """Run one MessagesService operation through the shared TLS pool."""
+        if _SDKMessages is None:
+            raise RuntimeError("Teams SDK MessagesService is unavailable")
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
+        with lock:
+            try:
+                svc = _SDKMessages(self._get_sdk_http_layer_locked())
+                return getattr(svc, operation)(**kwargs)
+            except Exception:
+                self._close_sdk_http_layer_locked()
+                raise
+
+    def _call_sdk_http(self, method: str, url: str, **kwargs):
+        """Run one low-level MSG request through the shared TLS pool."""
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
+        with lock:
+            try:
+                return self._get_sdk_http_layer_locked()._request(
+                    method, url, **kwargs
+                )
+            except Exception:
+                self._close_sdk_http_layer_locked()
+                raise
+
     def _fetch_via_sdk(self, conv_id: str, limit: Optional[int], _t0: float) -> List[dict]:
         """Fetch messages through one shared, serialized SDK transport."""
         lock = getattr(self, "_sdk_fetch_lock", None)
@@ -3699,11 +3976,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         fetch_error = None
         with lock:
-            http_layer = getattr(self, "_sdk_http_layer", None)
-            if http_layer is None:
-                adapter = _SDKAuthAdapter(self._auth)
-                http_layer = _SDKHTTPLayer(adapter, verify_ssl=True)
-                self._sdk_http_layer = http_layer
+            http_layer = self._get_sdk_http_layer_locked()
             svc = _SDKMessages(http_layer)
             try:
                 if limit is None:
@@ -3747,7 +4020,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 fetch_error = exc
                 # A failed pool may retain a dead TLS connection. Force the
                 # next tick to establish a fresh shared transport.
-                self._close_sdk_http_layer()
+                self._close_sdk_http_layer_locked()
 
         logger.warning(
             "TeamsMTK: SDK fetch failed (%s), falling back to raw",
@@ -3757,8 +4030,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             conv_id, limit if limit is not None else 30, _t0,
         )
 
-    def _close_sdk_http_layer(self) -> None:
-        """Close and discard the shared SDK transport, if one exists."""
+    def _close_sdk_http_layer_locked(self) -> None:
+        """Close the shared SDK transport while its lock is held."""
         http_layer = getattr(self, "_sdk_http_layer", None)
         self._sdk_http_layer = None
         session = getattr(http_layer, "_session", None)
@@ -3767,6 +4040,14 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 session.close()
             except Exception:
                 pass
+
+    def _close_sdk_http_layer(self) -> None:
+        """Serialize transport shutdown with every shared SDK operation."""
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
+        with lock:
+            self._close_sdk_http_layer_locked()
 
     def _fetch_via_raw(self, conv_id: str, limit: int, _t0: float) -> List[dict]:
         """Fetch messages using raw requests (legacy, SDK unavailable)."""
@@ -4534,9 +4815,9 @@ async def _standalone_send(
     Implements the standalone_sender_fn contract (see
     gateway/platform_registry.py::PlatformEntry.standalone_sender_fn) so
     ``deliver=teams_mtk`` cron jobs succeed even when the caller can't reach
-    the gateway's live adapter instance. Auth is self-contained (the
-    ~/.teams-tokens/token_cache.json cache _TeamsAuth reads from), so no
-    pconfig fields are required beyond what TeamsMTKAdapter.__init__ already
+    the gateway's live adapter instance. Auth is self-contained (the legacy JSON
+    cache or existing silent Windows broker cache that _TeamsAuth reads), so
+    no pconfig fields are required beyond what TeamsMTKAdapter.__init__ already
     reads from the MTK_TEAMS_CONVERSATION_ID env var.
 
     MEDIA: tags are handled by the caller (BasePlatformAdapter.extract_media

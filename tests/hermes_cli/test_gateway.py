@@ -1027,23 +1027,47 @@ def test_reap_unsupervised_orphans_returns_false_when_none_found(monkeypatch):
 def test_scan_gateway_pids_detects_windows_hermes_exe_case_variants(monkeypatch):
     monkeypatch.setattr(gateway, "is_windows", lambda: True)
     monkeypatch.setattr(gateway, "_get_ancestor_pids", lambda: set())
-    monkeypatch.setattr(gateway.shutil, "which", lambda name: "wmic.exe" if name == "wmic" else None)
+    import psutil
 
-    def fake_run(cmd, **kwargs):
-        if cmd[:4] == ["wmic.exe", "process", "get", "ProcessId,CommandLine"]:
-            return SimpleNamespace(
-                returncode=0,
-                stdout=(
-                    "CommandLine=C:\\Program Files\\Hermes\\Hermes.EXE gateway run --replace\n"
-                    "ProcessId=2468\n\n"
-                ),
-                stderr="",
-            )
-        raise AssertionError(f"Unexpected command: {cmd}")
-
-    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+    process = SimpleNamespace(
+        info={
+            "pid": 2468,
+            "cmdline": [
+                r"C:\Program Files\Hermes\Hermes.EXE",
+                "gateway",
+                "run",
+                "--replace",
+            ],
+        }
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: [process])
+    monkeypatch.setattr(
+        gateway.subprocess,
+        "run",
+        lambda *_a, **_kw: pytest.fail("Windows psutil scan must not spawn WMIC/CIM"),
+    )
 
     assert gateway._scan_gateway_pids(set(), all_profiles=True) == [2468]
+
+
+def test_scan_gateway_pids_does_not_fallback_when_psutil_scan_fails(monkeypatch):
+    monkeypatch.setattr(gateway, "is_windows", lambda: True)
+    monkeypatch.setattr(gateway, "_get_ancestor_pids", lambda: set())
+    import psutil
+
+    def fail_process_scan(_attrs):
+        raise RuntimeError("native process table unavailable")
+
+    monkeypatch.setattr(psutil, "process_iter", fail_process_scan)
+    monkeypatch.setattr(
+        gateway.subprocess,
+        "run",
+        lambda *_a, **_kw: pytest.fail(
+            "available psutil must not fall back to WMIC/CIM"
+        ),
+    )
+
+    assert gateway._scan_gateway_pids(set(), all_profiles=True) == []
 
 
 # ---------------------------------------------------------------------------

@@ -383,6 +383,49 @@ def _scan_gateway_pids(
 
     try:
         if is_windows():
+            # psutil is a core dependency and reads the native process table
+            # directly. Prefer it over WMIC/CIM: Get-CimInstance can spend
+            # minutes materializing every process command line on busy Windows
+            # hosts, blocking gateway start/restart/status before readiness.
+            try:
+                import psutil  # type: ignore
+
+                for process in psutil.process_iter(["pid", "cmdline"]):
+                    try:
+                        info = process.info
+                        raw_cmdline = info.get("cmdline") or []
+                        if isinstance(raw_cmdline, str):
+                            command = raw_cmdline
+                        else:
+                            command = " ".join(str(part) for part in raw_cmdline)
+                        if _matches_gateway_runtime(command) and (
+                            all_profiles or _matches_current_profile(command)
+                        ):
+                            _append_unique_pid(
+                                pids, int(info.get("pid") or 0), exclude_pids
+                            )
+                    except (
+                        psutil.NoSuchProcess,
+                        psutil.AccessDenied,
+                        psutil.ZombieProcess,
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+                if len(pids) > 1:
+                    pids = _filter_venv_launcher_stubs(pids)
+                return pids
+            except ImportError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "Windows psutil gateway scan failed (%s); returning partial scan",
+                    type(exc).__name__,
+                )
+                if len(pids) > 1:
+                    pids = _filter_venv_launcher_stubs(pids)
+                return pids
+
             # Prefer wmic when present (fast, stable output format).  On
             # modern Windows 11 / Win 10 late builds, wmic has been
             # removed as part of the WMIC deprecation — fall back to
