@@ -1,6 +1,7 @@
 import { type ToolTitleKey, translateNow } from '@/i18n'
 import { normalizeExternalUrl } from '@/lib/external-link'
 import { summarizeShellCommand } from '@/lib/summarize-command'
+import { capitalize, normalize } from '@/lib/text'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
 
 import {
@@ -10,15 +11,9 @@ import {
   isRecord,
   numberValue,
   parseMaybeObject,
-  prettyJson,
   unwrapToolPayload
 } from './format'
-import {
-  findFirstUrl,
-  hostnameOf,
-  looksLikePath,
-  looksLikeUrl
-} from './targets'
+import { findFirstUrl, hostnameOf, looksLikePath, looksLikeUrl } from './targets'
 import type {
   CountMetric,
   MessageRunningStateSlice,
@@ -133,6 +128,12 @@ function readFileDisplayTarget(args: Record<string, unknown>, result: Record<str
   return [fileEditBasename(path), lineLabel].filter(Boolean).join(' ')
 }
 
+function shellCommand(args: Record<string, unknown>): string {
+  return (
+    firstStringField(args, ['context', 'preview']) || firstStringField(args, ['command', 'code']) || contextValue(args)
+  )
+}
+
 const TOOL_META: Record<ToolTitleKey, ToolMetaSpec> = {
   browser_click: {
     icon: 'globe',
@@ -179,6 +180,10 @@ const TOOL_META: Record<ToolTitleKey, ToolMetaSpec> = {
     icon: 'files',
     tone: 'file'
   },
+  memory: {
+    icon: 'brain',
+    tone: 'agent'
+  },
   patch: { icon: 'edit', tone: 'file' },
   read_file: { icon: 'file', tone: 'file' },
   search_files: {
@@ -217,13 +222,7 @@ export const selectMessageRunning = (state: MessageRunningStateSlice) =>
 function titleForTool(name: string): string {
   const normalized = name.replace(/^browser_/, '').replace(/^web_/, '')
 
-  return (
-    normalized
-      .split('_')
-      .filter(Boolean)
-      .map(part => `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
-      .join(' ') || name
-  )
+  return normalized.split('_').filter(Boolean).map(capitalize).join(' ') || name
 }
 
 const PREFIX_META: { icon?: string; labelKey: string; prefix: string; tone: ToolTone }[] = [
@@ -361,7 +360,7 @@ function countFromUnknown(value: unknown): null | number {
 }
 
 function singularizeNoun(noun: string): string {
-  const normalized = noun.trim().toLowerCase()
+  const normalized = normalize(noun)
 
   if (!normalized) {
     return ''
@@ -677,10 +676,12 @@ function toolErrorText(part: ToolPart, result: Record<string, unknown>): string 
   // stage's code, etc. — all routinely produce useful output and aren't
   // failures. Only treat it as an error when the command produced no real
   // output to show; otherwise render the output normally (not red).
+  // `output_preview` counts as output: background-process polls report their
+  // text under that name, so omitting it painted healthy `process` rows red.
   const exit = numberValue(result.exit_code)
 
   if (exit !== null && exit !== 0) {
-    const hasOutput = Boolean(firstStringField(result, ['output', 'stdout', 'stderr'])?.trim())
+    const hasOutput = Boolean(firstStringField(result, ['output', 'stdout', 'stderr', 'output_preview'])?.trim())
 
     return hasOutput ? '' : `Command failed with exit code ${exit}.`
   }
@@ -693,7 +694,15 @@ function toolStatus(part: ToolPart, resultRecord: Record<string, unknown>): Tool
     return 'running'
   }
 
-  return toolErrorText(part, resultRecord) ? 'error' : 'success'
+  if (!toolErrorText(part, resultRecord)) {
+    return 'success'
+  }
+
+  // A rejected memory write is a budget negotiation, not a failure: the store
+  // refuses an over-limit batch and the agent immediately retries a smaller
+  // one. Painting the row destructive-red puts an alarm next to routine
+  // bookkeeping the user never has to act on. Amber says "noted" instead.
+  return part.toolName === 'memory' ? 'warning' : 'error'
 }
 
 function durationLabel(resultRecord: Record<string, unknown>): string | undefined {
@@ -875,7 +884,7 @@ function cronjobSubtitle(argsRecord: Record<string, unknown>, resultRecord: Reco
 
   const action = firstStringField(argsRecord, ['action']) || 'manage'
   const name = firstStringField(resultRecord, ['name']) || firstStringField(argsRecord, ['name', 'job_id'])
-  const label = `${action[0]?.toUpperCase() ?? ''}${action.slice(1)}`
+  const label = capitalize(action)
 
   return name ? `${label} ${name}` : `Cron ${action}`
 }
@@ -1014,6 +1023,13 @@ function toolSubtitle(
     return url ? hostnameOf(url) : 'Fetched webpage'
   }
 
+  if (toolName === 'memory') {
+    // The raw payload is bookkeeping the user never needs: usage counters, a
+    // note telling the model not to retry, and the full operations array. The
+    // human-readable line is the only part worth showing.
+    return firstStringField(resultRecord, ['message', 'error'])
+  }
+
   if (toolName === 'cronjob') {
     return cronjobSubtitle(argsRecord, resultRecord)
   }
@@ -1094,6 +1110,12 @@ function toolDetailText(
     if (content) {
       return content
     }
+  }
+
+  if (part.toolName === 'memory') {
+    // Same reasoning as toolSubtitle: without this the generic fallback dumps
+    // the whole args + result payload into the expanded row.
+    return firstStringField(resultRecord, ['message', 'error'])
   }
 
   if (isFileEditTool(part.toolName)) {
@@ -1326,10 +1348,7 @@ function dynamicTitle(
   }
 
   if (part.toolName === 'terminal' || part.toolName === 'execute_code') {
-    const command =
-      firstStringField(args, ['context', 'preview']) ||
-      firstStringField(args, ['command', 'code']) ||
-      contextValue(args)
+    const command = shellCommand(args)
 
     if (command) {
       const action =
@@ -1396,6 +1415,11 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const searchHits =
     part.toolName === 'web_search' && status !== 'error' ? extractSearchResults(part.result) : undefined
 
+  const searchQuery =
+    part.toolName === 'web_search'
+      ? firstStringField(argsRecord, ['search_term', 'query']) || contextValue(argsRecord)
+      : ''
+
   const resultCount = status === 'error' ? null : toolResultCount(part, argsRecord, resultRecord)
 
   // For shell/code tools we surface stdout and stderr as separate labeled
@@ -1409,6 +1433,8 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   // field — otherwise the merged `detail` already covers it and double-
   // rendering would duplicate output.
   const hasSplitStreams = rendersAnsi && (Boolean(stdout) || Boolean(stderrRaw))
+  const terminalCommand = part.toolName === 'terminal' ? shellCommand(argsRecord) : undefined
+  const terminalExitCode = part.toolName === 'terminal' ? numericField(resultRecord, 'exit_code') : undefined
 
   return {
     countLabel: resultCount ? formatCountLabel(resultCount) : undefined,
@@ -1419,11 +1445,12 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     imageUrl: toolImageUrl(argsRecord, resultRecord),
     inlineDiff,
     previewTarget: toolPreviewTarget(part.toolName, argsRecord, resultRecord),
-    rawArgs: prettyJson(part.args),
-    rawResult: prettyJson(part.result),
     rendersAnsi: rendersAnsi || undefined,
+    searchQuery: searchQuery || undefined,
     searchHits: searchHits?.length ? searchHits : undefined,
     stderr: hasSplitStreams ? stderrRaw || undefined : undefined,
+    terminalCommand,
+    terminalExitCode,
     stdout: hasSplitStreams ? stdout || undefined : undefined,
     status,
     subtitle,
