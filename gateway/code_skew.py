@@ -23,18 +23,54 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _boot_fingerprint: str | None = None
 
 
-def _fingerprint() -> str | None:
-    """Current checkout fingerprint, reusing the CLI's git-rev reader.
+def _read_packed_ref(common_dir: Path, ref: str) -> str | None:
+    """Read one packed Git reference without starting Git or the CLI."""
+    try:
+        text = (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line or line.startswith("#") or line.startswith("^"):
+            continue
+        sha, separator, name = line.partition(" ")
+        if separator and name.strip() == ref:
+            return sha.strip()
+    return None
 
-    ``hermes_cli.main`` is always already imported in a gateway process (it's
-    the entry point), so this import is free and avoids duplicating the
-    worktree-aware ref resolution.
+
+def _fingerprint() -> str | None:
+    """Return the current checkout fingerprint without importing the CLI.
+
+    The detached Windows Gateway deliberately bypasses ``hermes_cli.main``.
+    Importing it here merely to read a Git ref added roughly 24 seconds to
+    every cold Gateway start, before its PID and state files existed.
     """
     try:
-        from hermes_cli.main import _read_git_revision_fingerprint
-
-        return _read_git_revision_fingerprint(_PROJECT_ROOT)
-    except Exception:
+        git_dir = _PROJECT_ROOT / ".git"
+        if git_dir.is_file():
+            for line in git_dir.read_text(encoding="utf-8", errors="replace").splitlines():
+                key, _, value = line.partition(":")
+                if key.strip() == "gitdir" and value.strip():
+                    git_dir = (_PROJECT_ROOT / value.strip()).resolve()
+                    break
+        common_dir = git_dir
+        commondir_file = git_dir / "commondir"
+        if commondir_file.exists():
+            relative = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+            if relative:
+                common_dir = (git_dir / relative).resolve()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if not head.startswith("ref:"):
+            return f"git:HEAD:{head}"
+        ref = head.split(":", 1)[1].strip()
+        for candidate in (git_dir, common_dir):
+            ref_file = candidate / ref
+            if ref_file.exists():
+                sha = ref_file.read_text(encoding="utf-8", errors="replace").strip()
+                return f"git:{ref}:{sha}"
+        packed_sha = _read_packed_ref(common_dir, ref)
+        return f"git:{ref}:{packed_sha or 'unresolved'}"
+    except OSError:
         return None
 
 

@@ -78,8 +78,32 @@ def test_exec_schtasks_decodes_with_replace_errors(monkeypatch):
     assert captured["text"] is True
 
 
-def test_build_gateway_argv_uses_base_python_with_full_venv_entry(monkeypatch, tmp_path):
-    """Avoid the slow venv shim without skipping canonical CLI initialization."""
+def test_status_queries_scheduled_task_once(monkeypatch, capsys):
+    calls = []
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "get_task_name", lambda: "Hermes_Gateway_alice")
+    monkeypatch.setattr(gateway_windows, "is_startup_entry_installed", lambda: False)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [27128])
+    monkeypatch.setattr(
+        gateway_windows,
+        "_exec_schtasks",
+        lambda args: calls.append(tuple(args))
+        or (0, "Status: Running\nLast Run Result: 0", ""),
+    )
+
+    gateway_windows.status()
+
+    assert calls == [
+        ("/Query", "/TN", "Hermes_Gateway_alice", "/V", "/FO", "LIST")
+    ]
+    out = capsys.readouterr().out
+    assert "Scheduled Task registered" in out
+    assert "Gateway process running (PID: 27128)" in out
+
+
+def test_build_gateway_argv_uses_light_gateway_runtime_entry(monkeypatch, tmp_path):
+    """Detached Gateway startup must not traverse the full CLI parser."""
 
     project = tmp_path / "project"
     scripts = project / "venv" / "Scripts"
@@ -101,22 +125,21 @@ def test_build_gateway_argv_uses_base_python_with_full_venv_entry(monkeypatch, t
         encoding="utf-8",
     )
 
-    import hermes_cli.gateway as gateway
-
     monkeypatch.setattr(gateway_windows.sys, "platform", "win32")
-    monkeypatch.setattr(gateway, "PROJECT_ROOT", project)
-    monkeypatch.setattr(gateway, "get_python_path", lambda: str(venv_python))
-    monkeypatch.setattr(gateway, "_profile_arg", lambda hermes_home: "")
-    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(gateway_windows, "_PROJECT_ROOT", project)
+    monkeypatch.setattr(
+        gateway_windows,
+        "_get_gateway_python_path",
+        lambda: str(venv_python),
+    )
+    monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: hermes_home)
 
     argv, cwd, env_overlay = gateway_windows._build_gateway_argv()
 
     assert argv == [
         str(base_python),
         "-m",
-        "hermes_cli.venv_entry",
-        "gateway",
-        "run",
+        "hermes_cli.gateway_runtime_entry",
     ]
     assert cwd == str(hermes_home.resolve())
     assert env_overlay["VIRTUAL_ENV"] == str(project / "venv")
@@ -131,13 +154,13 @@ class TestStableWindowsGatewayWorkingDir:
     def test_stable_gateway_working_dir_uses_hermes_home(self, tmp_path, monkeypatch):
         home = tmp_path / ".hermes"
         home.mkdir()
-        monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: home)
+        monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: home)
         assert gateway_windows._stable_gateway_working_dir(tmp_path / "checkout") == str(home.resolve())
 
     def test_stable_gateway_working_dir_falls_back_to_project_root(self, tmp_path, monkeypatch):
         missing = tmp_path / "missing" / ".hermes"
         project = tmp_path / "checkout"
-        monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: missing)
+        monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: missing)
         assert gateway_windows._stable_gateway_working_dir(project) == str(project)
 
 
@@ -154,7 +177,7 @@ def test_write_task_script_anchors_cmd_cd_at_hermes_home(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway, "PROJECT_ROOT", project)
     monkeypatch.setattr(gateway, "get_python_path", lambda: str(python_exe))
     monkeypatch.setattr(gateway, "_profile_arg", lambda hermes_home: "")
-    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: script_path)
 
     written = gateway_windows._write_task_script()
@@ -222,7 +245,7 @@ def test_gateway_cmd_script_uses_console_python_without_replace_or_start_churn(m
 
     assert "python.exe" in content
     assert "pythonw.exe" not in content
-    assert "gateway run" in content
+    assert "hermes_cli.gateway_runtime_entry" in content
     assert "--replace" not in content
     assert "start \"\"" not in content
     assert "exit /b 0" in content
@@ -361,12 +384,12 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     assert "cmd.exe" not in content.lower()
     assert 'CreateObject("WScript.Shell")' in content
     assert "pythonw.exe" in content
-    assert "hermes_cli.main" in content
-    assert "gateway run" in content
+    assert "hermes_cli.gateway_runtime_entry" in content
+    assert "gateway run" not in content
     assert ", 0, False" in content  # hidden window, detached/async
     for var in ("HERMES_HOME", "PYTHONIOENCODING", "HERMES_GATEWAY_DETACHED", "VIRTUAL_ENV", "PYTHONPATH"):
         assert var in content
-    assert "--profile" in content and "work" in content
+    assert "--profile" not in content
     assert content.endswith("\r\n")
 
 
@@ -608,14 +631,44 @@ def test_start_does_not_query_login_persistence(monkeypatch):
     assert calls == ["spawn"]
 
 
-def test_wait_for_gateway_ready_uses_authoritative_pid(monkeypatch):
+def test_gateway_state_is_running_requires_the_current_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: tmp_path)
+    state_path = tmp_path / "gateway_state.json"
+
+    state_path.write_text('{"pid": 27128, "gateway_state": "starting"}', encoding="utf-8")
+    assert gateway_windows._gateway_state_is_running(27128) is False
+
+    state_path.write_text('{"pid": 27129, "gateway_state": "running"}', encoding="utf-8")
+    assert gateway_windows._gateway_state_is_running(27128) is False
+
+    state_path.write_text('{"pid": 27128, "gateway_state": "running"}', encoding="utf-8")
+    assert gateway_windows._gateway_state_is_running(27128) is True
+
+
+def test_wait_for_gateway_ready_uses_authoritative_pid_and_running_state(monkeypatch):
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: 27128)
     monkeypatch.setattr(
         "hermes_cli.gateway.find_gateway_pids",
         lambda: pytest.fail("ready check must not scan all processes"),
     )
+    monkeypatch.setattr(gateway_windows, "_gateway_state_is_running", lambda pid: pid == 27128)
 
     assert gateway_windows._wait_for_gateway_ready(timeout_s=0.1) == [27128]
+
+
+def test_restart_uses_start_readiness_result_without_waiting_twice(monkeypatch):
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "stop", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_wait_for_gateway_absent", lambda **kwargs: True)
+    monkeypatch.setattr(gateway_windows.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(gateway_windows, "start", lambda: [27128])
+    monkeypatch.setattr(
+        gateway_windows,
+        "_wait_for_gateway_ready",
+        lambda **kwargs: pytest.fail("restart must reuse start() readiness"),
+    )
+
+    assert gateway_windows.restart() == [27128]
 
 
 def test_windows_restart_dispatch_does_not_probe_scheduled_task_install():
@@ -888,7 +941,11 @@ def test_stop_escalates_to_force_kill_when_drain_times_out(monkeypatch):
     events = []
 
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
-    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: False)
+    monkeypatch.setattr(
+        gateway_windows,
+        "is_task_registered",
+        lambda: pytest.fail("known PID stop must not query Scheduled Tasks"),
+    )
     monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
 
     from gateway import status as status_mod
@@ -907,6 +964,83 @@ def test_stop_escalates_to_force_kill_when_drain_times_out(monkeypatch):
     assert events == [("terminate", pid, True)], (
         f"After drain timeout, known PID must be force terminated (events={events})"
     )
+
+
+def test_stop_treats_pid_that_exits_at_drain_deadline_as_stopped(
+    monkeypatch, capsys
+):
+    pid = 77778
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(
+        gateway_windows,
+        "is_task_registered",
+        lambda: pytest.fail("known PID stop must not query Scheduled Tasks"),
+    )
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
+    monkeypatch.setattr(gateway_windows, "_drain_gateway_pid", lambda *_args: False)
+
+    from gateway import status as status_mod
+
+    monkeypatch.setattr(status_mod, "get_running_pid", lambda: pid)
+    monkeypatch.setattr(status_mod, "_pid_exists", lambda _pid: False)
+    monkeypatch.setattr(
+        status_mod,
+        "terminate_pid",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an already-exited PID must not be force terminated"
+        ),
+    )
+
+    gateway_windows.stop()
+
+    output = capsys.readouterr().out
+    assert "Gateway stopped" in output
+    assert "No gateway was running" not in output
+
+
+def test_windows_stop_timeout_uses_short_grace_when_gateway_is_idle(
+    monkeypatch, tmp_path
+):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "agent:\n  restart_drain_timeout: 60\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: hermes_home)
+
+    from gateway import status as status_mod
+
+    monkeypatch.setattr(
+        status_mod,
+        "read_runtime_status",
+        lambda: {"gateway_state": "running", "active_agents": 0},
+    )
+
+    assert gateway_windows._windows_stop_drain_timeout() == 8.0
+
+
+def test_windows_stop_timeout_preserves_grace_when_gateway_has_active_work(
+    monkeypatch, tmp_path
+):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "agent:\n  restart_drain_timeout: 60\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_windows, "get_hermes_home", lambda: hermes_home)
+
+    from gateway import status as status_mod
+
+    monkeypatch.setattr(
+        status_mod,
+        "read_runtime_status",
+        lambda: {"gateway_state": "running", "active_agents": 1},
+    )
+
+    assert gateway_windows._windows_stop_drain_timeout() == 30.0
 
 
 def test_stop_no_running_gateway_skips_drain(monkeypatch):

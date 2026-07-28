@@ -8,7 +8,7 @@ import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.run import GatewayRunner
+from gateway.run import GatewayRunner, _start_api_server_prewarm
 
 
 class StubAdapter(BasePlatformAdapter):
@@ -75,6 +75,34 @@ def _make_runner():
 
 
 # --- Startup queueing ---
+
+
+@pytest.mark.asyncio
+async def test_api_server_module_prewarms_only_when_enabled(monkeypatch):
+    imported = []
+
+    monkeypatch.setattr(
+        "importlib.import_module",
+        lambda name: imported.append(name),
+    )
+    enabled = GatewayConfig(
+        platforms={
+            Platform.API_SERVER: PlatformConfig(enabled=True),
+        }
+    )
+    disabled = GatewayConfig(
+        platforms={
+            Platform.API_SERVER: PlatformConfig(enabled=False),
+        }
+    )
+
+    task = _start_api_server_prewarm(enabled)
+
+    assert task is not None
+    await task
+    assert imported == ["gateway.platforms.api_server"]
+    assert _start_api_server_prewarm(disabled) is None
+
 
 class TestStartupPlatformIsolation:
     """Verify one blocked platform cannot prevent later platforms from starting."""

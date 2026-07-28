@@ -404,7 +404,12 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
 
     # Gateway-dedicated entrypoints carry no subcommand to inspect.
     for token in tokens:
-        if token == "gateway/run.py" or token.endswith("/gateway/run.py"):
+        if (
+            token == "hermes_cli.gateway_runtime_entry"
+            or token.endswith("/hermes_cli/gateway_runtime_entry.py")
+            or token == "gateway/run.py"
+            or token.endswith("/gateway/run.py")
+        ):
             return "run"
         basename = token.rsplit("/", 1)[-1]
         if basename in ("hermes-gateway", "hermes-gateway.exe"):

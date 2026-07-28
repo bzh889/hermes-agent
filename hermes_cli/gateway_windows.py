@@ -43,6 +43,7 @@ from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_hide_flags,
 )
+from hermes_constants import get_hermes_home
 
 # Short timeouts: schtasks occasionally wedges and we don't want to hang forever.
 _SCHTASKS_TIMEOUT_S = 15
@@ -59,6 +60,8 @@ _TASK_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
 _TASK_LOGON_DELAY = "PT30S"
 _TASK_RESTART_INTERVAL = "PT1M"
 _TASK_RESTART_COUNT = 999
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_IDLE_GATEWAY_STOP_TIMEOUT_S = 8.0
 
 
 def _schtasks_encoding() -> str:
@@ -77,6 +80,27 @@ def _assert_windows() -> None:
         raise RuntimeError("gateway_windows is Windows-only")
 
 
+def _get_gateway_python_path() -> str:
+    """Resolve the active venv interpreter without importing the full CLI."""
+    explicit = os.environ.get("HERMES_VENV_PYTHON", "").strip()
+    if explicit and Path(explicit).is_file():
+        return explicit
+
+    candidates: list[Path] = []
+    if sys.prefix != sys.base_prefix:
+        candidates.append(Path(sys.prefix))
+    virtual_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    if virtual_env:
+        candidates.append(Path(virtual_env))
+    candidates.extend((_PROJECT_ROOT / ".venv", _PROJECT_ROOT / "venv"))
+
+    for venv_dir in candidates:
+        python_exe = venv_dir / "Scripts" / "python.exe"
+        if python_exe.is_file():
+            return str(python_exe)
+    return sys.executable
+
+
 def _preserve_hermes_home_path(path: str | Path) -> str:
     """Render Hermes-owned paths under the configured HERMES_HOME spelling.
 
@@ -87,8 +111,6 @@ def _preserve_hermes_home_path(path: str | Path) -> str:
     """
     candidate = Path(path)
     try:
-        from hermes_cli.config import get_hermes_home
-
         home = Path(get_hermes_home())
         resolved_home = home.resolve()
         resolved_candidate = candidate.resolve()
@@ -308,7 +330,6 @@ def get_task_script_path() -> Path:
     Hermes installs stay self-contained).
     """
     _assert_windows()
-    from hermes_cli.config import get_hermes_home
 
     script_dir = Path(get_hermes_home()) / "gateway-service"
     script_dir.mkdir(parents=True, exist_ok=True)
@@ -358,8 +379,6 @@ def _stable_gateway_working_dir(project_root: Path) -> str:
     configured spelling instead of resolving symlinks so AppData installs backed
     by a junction/symlink still identify themselves as AppData.
     """
-    from hermes_cli.config import get_hermes_home
-
     try:
         home = get_hermes_home()
         if home:
@@ -413,10 +432,9 @@ def _build_gateway_cmd_script(
     ]
     lines.append(f'set "PYTHONPATH={";".join([*pythonpath_entries, "%PYTHONPATH%"])}"')
 
-    prog_args = [python_exe_path, "-m", "hermes_cli.main"]
-    if profile_arg:
-        prog_args.extend(profile_arg.split())
-    prog_args.extend(["gateway", "run"])
+    # HERMES_HOME already selects the profile. Bypass the full CLI parser so a
+    # detached Gateway can publish its PID before plugin discovery begins.
+    prog_args = [python_exe_path, "-m", "hermes_cli.gateway_runtime_entry"]
     # Do NOT use `start` here; that creates an extra wrapper process and made
     # gateway lifecycle/status harder to reason about.
     # Do NOT use `--replace` for service-managed starts; repeated /Run calls
@@ -467,10 +485,9 @@ def _build_gateway_vbs_script(
     """
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
 
-    prog_args = [python_exe_path, "-m", "hermes_cli.main"]
-    if profile_arg:
-        prog_args.extend(profile_arg.split())
-    prog_args.extend(["gateway", "run"])
+    # HERMES_HOME already selects the profile. Bypass the full CLI parser so a
+    # detached Gateway can publish its PID before plugin discovery begins.
+    prog_args = [python_exe_path, "-m", "hermes_cli.gateway_runtime_entry"]
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
     command_line = subprocess.list2cmdline(prog_args)
 
@@ -534,12 +551,7 @@ def _write_task_script() -> Path:
     """Generate and write the gateway.cmd wrapper. Return its absolute path."""
     _assert_windows()
     # Local imports to avoid circular-init at module load time.
-    from hermes_cli.config import get_hermes_home
-    from hermes_cli.gateway import (
-        PROJECT_ROOT,
-        _profile_arg,
-        get_python_path,
-    )
+    from hermes_cli.gateway import PROJECT_ROOT, _profile_arg, get_python_path
 
     python_path = _preserve_hermes_home_path(get_python_path())
     working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
@@ -781,24 +793,15 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
     layer in between.
     """
     _assert_windows()
-    from hermes_cli.config import get_hermes_home
-    from hermes_cli.gateway import (
-        PROJECT_ROOT,
-        _profile_arg,
-        get_python_path,
-    )
-
-    venv_python = _preserve_hermes_home_path(get_python_path())
+    venv_python = _preserve_hermes_home_path(_get_gateway_python_path())
     python_exe, venv_dir, extra_pythonpath = _resolve_gateway_python(venv_python)
-    project_root = _preserve_hermes_home_path(PROJECT_ROOT)
-    working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
+    project_root = _preserve_hermes_home_path(_PROJECT_ROOT)
+    working_dir = _stable_gateway_working_dir(_PROJECT_ROOT)
     hermes_home = str(Path(get_hermes_home()))
-    profile_arg = _profile_arg(hermes_home)
-
-    argv = [python_exe, "-m", "hermes_cli.venv_entry"]
-    if profile_arg:
-        argv.extend(profile_arg.split())
-    argv.extend(["gateway", "run"])
+    # HERMES_HOME in env_overlay already selects the active profile. Running
+    # through hermes_cli.main delays PID registration with pre-dispatch plugin
+    # discovery and makes the Windows lifecycle controller report a false exit.
+    argv = [python_exe, "-m", "hermes_cli.gateway_runtime_entry"]
 
     env_overlay = {
         "HERMES_HOME": hermes_home,
@@ -845,7 +848,6 @@ def windowless_gateway_restart_spec(
     if sys.platform != "win32":
         return run_argv, "", {}
 
-    from hermes_cli.config import get_hermes_home
     from hermes_cli.gateway import PROJECT_ROOT
 
     python_exe = run_argv[0]
@@ -927,8 +929,6 @@ def _spawn_detached(script_path: Path | None = None) -> int:
     # logging module writes to gateway.log through a FileHandler, so the
     # real gateway logs still land there — this just captures anything
     # that goes to print() or native stderr.
-    from hermes_cli.config import get_hermes_home
-
     log_dir = Path(get_hermes_home()) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     stray_log = log_dir / "gateway-stdio.log"
@@ -1157,38 +1157,58 @@ def install(
     raise RuntimeError(f"Windows gateway install failed: {detail}")
 
 
-def _wait_for_gateway_ready(timeout_s: float = 6.0, interval_s: float = 0.4) -> list[int]:
-    """Poll for a live gateway process for up to ``timeout_s`` seconds.
+def _gateway_state_is_running(pid: int) -> bool:
+    """Return whether the launched Gateway has completed adapter startup."""
+    import json
 
-    Returns the list of PIDs found. Empty list means nothing came up in
-    time — the caller should surface that to the user as a failed start.
+    try:
+        state_path = Path(get_hermes_home()) / "gateway_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return state.get("pid") == pid and state.get("gateway_state") == "running"
+
+
+_GATEWAY_READY_TIMEOUT_S = 120.0
+
+
+def _wait_for_gateway_ready(
+    timeout_s: float = _GATEWAY_READY_TIMEOUT_S,
+    interval_s: float = 0.4,
+) -> list[int]:
+    """Poll until a live Gateway has completed its platform connections.
+
+    A PID file is written before adapters connect. Reporting success at that
+    point caused ``gateway restart`` to claim success while Teams could not
+    answer yet, so readiness also requires this process's ``running`` state.
     """
     from gateway.status import get_running_pid
 
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         pid = get_running_pid()
-        if pid is not None:
+        if pid is not None and _gateway_state_is_running(pid):
             return [pid]
         time.sleep(interval_s)
     return []
 
 
-def _report_gateway_start(via: str) -> None:
+def _report_gateway_start(via: str) -> list[int]:
     pids = _wait_for_gateway_ready()
     if pids:
         print(f"✓ Gateway started via {via} (PID: {', '.join(map(str, pids))})")
     else:
-        print(f"⚠ Launched gateway via {via}, but no process detected after 6s.")
+        print(
+            f"⚠ Gateway launched via {via}, but did not become ready after "
+            f"{_GATEWAY_READY_TIMEOUT_S:.0f}s."
+        )
         print("  Check the log for startup errors:")
-        from hermes_cli.config import get_hermes_home
         print(f"    type {Path(get_hermes_home())}\\logs\\gateway.log")
         print(f"    type {Path(get_hermes_home())}\\logs\\gateway-stdio.log")
+    return pids
 
 
 def _print_next_steps() -> None:
-    from hermes_cli.config import get_hermes_home
-
     hermes_home = Path(get_hermes_home())
     print()
     print("Next steps:")
@@ -1262,11 +1282,11 @@ def is_installed() -> bool:
     return is_task_registered() or is_startup_entry_installed()
 
 
-def query_task_status() -> dict[str, str]:
-    """Parse ``schtasks /Query /V /FO LIST`` and pull the interesting keys."""
+def _query_task_status() -> tuple[bool, dict[str, str]]:
+    """Query the task once and return registration plus parsed status."""
     code, out, err = _exec_schtasks(["/Query", "/TN", get_task_name(), "/V", "/FO", "LIST"])
     if code != 0:
-        return {}
+        return (False, {})
     info: dict[str, str] = {}
     for raw in out.splitlines():
         line = raw.strip()
@@ -1281,6 +1301,12 @@ def query_task_status() -> dict[str, str]:
                 info.setdefault("last run result", value)
             else:
                 info[key] = value
+    return (True, info)
+
+
+def query_task_status() -> dict[str, str]:
+    """Parse ``schtasks /Query /V /FO LIST`` and pull the interesting keys."""
+    _registered, info = _query_task_status()
     return info
 
 
@@ -1309,8 +1335,6 @@ def _print_deep_probes() -> None:
     """
     import json
     from datetime import datetime, timezone
-
-    from hermes_cli.config import get_hermes_home
 
     home = Path(get_hermes_home())
     pid_path = home / "gateway.pid"
@@ -1428,13 +1452,12 @@ def status(deep: bool = False) -> None:
     """Print a status report for the Windows gateway service."""
     _assert_windows()
     task_name = get_task_name()
-    task_installed = is_task_registered()
+    task_installed, info = _query_task_status()
     startup_installed = is_startup_entry_installed()
     pids = _gateway_pids()
 
     if task_installed:
         print(f"✓ Scheduled Task registered: {task_name}")
-        info = query_task_status()
         if info:
             for key in ("status", "last run time", "last run result"):
                 if key in info:
@@ -1467,7 +1490,7 @@ def status(deep: bool = False) -> None:
         print("  hermes gateway install")
 
 
-def start() -> None:
+def start() -> list[int]:
     """Start the gateway using the canonical detached Windows launch path."""
     _assert_windows()
     from gateway.status import get_running_pid
@@ -1478,11 +1501,10 @@ def start() -> None:
         # Scheduled Task / Startup entries only provide login persistence.
         # Manual lifecycle commands use the direct detached path.
         pid = _spawn_detached()
-        _report_gateway_start(f"direct spawn (PID {pid})")
-        return
+        return _report_gateway_start(f"direct spawn (PID {pid})")
     if running_pids:
         print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
-        return
+        return running_pids
 
 
 
@@ -1524,14 +1546,37 @@ def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:
 
 def _windows_stop_drain_timeout() -> float:
     """Return a bounded Windows gateway stop grace period."""
-    try:
-        from hermes_cli.gateway import _get_restart_drain_timeout
+    raw = os.environ.get("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
+    if not raw:
+        try:
+            import yaml
 
-        configured = float(_get_restart_drain_timeout() or 30.0)
-    except Exception:
+            config_path = get_hermes_home() / "config.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            agent_config = config.get("agent", {}) if isinstance(config, dict) else {}
+            raw = str(agent_config.get("restart_drain_timeout", ""))
+        except Exception:
+            raw = ""
+    try:
+        configured = max(0.0, float(raw)) if raw else 30.0
+    except (TypeError, ValueError):
         configured = 30.0
+
+    active_work = None
+    try:
+        from gateway.status import read_runtime_status
+
+        runtime_status = read_runtime_status()
+        if isinstance(runtime_status, dict):
+            active_work = max(0, int(runtime_status.get("active_agents", 0)))
+    except Exception:
+        pass
+
     # Windows CLI stop must not wedge forever. Give the gateway a real
-    # graceful-drain window, then escalate to the known PID.
+    # graceful-drain window when work is active, then escalate to the known
+    # PID. An idle gateway only needs enough time to close its adapters.
+    if active_work == 0:
+        return max(1.0, min(configured, _IDLE_GATEWAY_STOP_TIMEOUT_S))
     return max(1.0, min(configured, 30.0))
 
 
@@ -1596,12 +1641,23 @@ def stop() -> None:
     # boot will auto-resume them.
     pid = get_running_pid()
     stop_pids = _collect_gateway_stop_pids(pid)
+    had_known_pid = bool(stop_pids)
     drained = False
     if pid is not None:
         drained = _drain_gateway_pid(pid, _windows_stop_drain_timeout())
 
     stopped_any = drained
-    if not drained and is_task_registered():
+    if not drained and stop_pids:
+        try:
+            from gateway.status import _pid_exists
+
+            still_running = [candidate for candidate in stop_pids if _pid_exists(candidate)]
+            if not still_running:
+                stopped_any = True
+            stop_pids = still_running
+        except Exception:
+            pass
+    if not drained and not had_known_pid and is_task_registered():
         code, _out, err = _exec_schtasks(["/End", "/TN", get_task_name()])
         # schtasks returns nonzero when the task isn't currently running — don't treat that as an error.
         if code == 0:
@@ -1668,10 +1724,10 @@ def restart() -> None:
 
     # Give Windows a moment to release the listening port.
     time.sleep(1.0)
-    start()
-
-    if not _wait_for_gateway_ready(timeout_s=15.0):
+    pids = start()
+    if not pids:
         raise RuntimeError(
-            "Gateway restart did not produce a running gateway process. "
+            "Gateway restart did not produce a ready gateway process. "
             "Check logs/gateway.log and run `hermes gateway status`."
         )
+    return pids

@@ -45,6 +45,35 @@ class TestHomeChannelRoundtrip:
         assert restored.user_id == "user-123"
         assert restored.scope_id == "guild-456"
 
+    def test_disabled_platform_does_not_trigger_deferred_plugin_loading(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "discord:\n"
+            "  require_mention: true\n"
+            "platforms:\n"
+            "  api_server:\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+        seen_names: list[set[str]] = []
+
+        monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+        monkeypatch.setattr(
+            "gateway.platform_registry.platform_registry.relevant_entries",
+            lambda names, environ: seen_names.append(set(names)) or [],
+        )
+        home_token = set_hermes_home_override(str(hermes_home))
+        try:
+            config = load_gateway_config()
+        finally:
+            reset_hermes_home_override(home_token)
+
+        assert config.platforms[Platform.DISCORD].enabled is False
+        assert seen_names
+        assert all("discord" not in names for names in seen_names)
+        assert any("api_server" in names for names in seen_names)
+
     def test_relay_only_slack_home_hydrates_disabled_with_provenance(self):
         config = GatewayConfig(
             platforms={

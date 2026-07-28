@@ -1686,9 +1686,40 @@ def load_gateway_config() -> GatewayConfig:
             # Order: shared-key loop (above) → this dispatch → legacy hardcoded
             # blocks (below; no-op when a hook already set their env var) →
             # ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
+            _enabled_platform_names = {
+                name
+                for name in _configured_platform_names
+                if isinstance(platforms_data.get(name), dict)
+                and _coerce_bool(platforms_data[name].get("enabled"), False)
+            }
+
+            # Discord and Feishu keep settings that are useful even while the
+            # platform is disabled. Apply their small bridges without importing
+            # the multi-thousand-line adapter modules.
+            from gateway.platform_config_bridges import (
+                LIGHTWEIGHT_PLATFORM_CONFIG_BRIDGES,
+            )
+
+            for _name in _configured_platform_names - _enabled_platform_names:
+                _bridge_fn = LIGHTWEIGHT_PLATFORM_CONFIG_BRIDGES.get(_name)
+                if _bridge_fn is None:
+                    continue
+                _platform_cfg = yaml_cfg.get(_name)
+                if not isinstance(_platform_cfg, dict):
+                    _platform_cfg = platforms_data.get(_name)
+                if not isinstance(_platform_cfg, dict):
+                    _platform_cfg = {}
+                _seeded = _bridge_fn(yaml_cfg, _platform_cfg)
+                if isinstance(_seeded, dict) and _seeded:
+                    _, _extra = _ensure_platform_extra_dict(
+                        platforms_data,
+                        _name,
+                    )
+                    _extra.update(_seeded)
+
             if _pr is not None:
                 for entry in _pr.relevant_entries(
-                    _configured_platform_names,
+                    _enabled_platform_names,
                     os.environ,
                 ):
                     if entry.apply_yaml_config_fn is None:
@@ -2583,7 +2614,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
-        configured_names = {platform.value for platform in config.platforms}
+        configured_names = {
+            platform.value
+            for platform, platform_cfg in config.platforms.items()
+            if platform_cfg.enabled
+        }
         for entry in platform_registry.relevant_entries(
             configured_names,
             os.environ,

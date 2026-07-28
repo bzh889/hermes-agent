@@ -2183,6 +2183,31 @@ from gateway.restart import (
 )
 
 
+async def _prewarm_api_server_module(config: GatewayConfig) -> None:
+    """Load the large API server module while a network adapter connects."""
+    api_config = config.platforms.get(Platform.API_SERVER)
+    if api_config is None or not api_config.enabled:
+        return
+
+    import importlib
+
+    await asyncio.to_thread(
+        importlib.import_module,
+        "gateway.platforms.api_server",
+    )
+
+
+def _start_api_server_prewarm(
+    config: GatewayConfig,
+) -> Optional["asyncio.Task[None]"]:
+    api_config = config.platforms.get(Platform.API_SERVER)
+    if api_config is None or not api_config.enabled:
+        return None
+    task = asyncio.create_task(_prewarm_api_server_module(config))
+    task.add_done_callback(consume_detached_task_result)
+    return task
+
+
 from gateway.whatsapp_identity import (
     canonical_whatsapp_identifier as _canonical_whatsapp_identifier,  # noqa: F401
     expand_whatsapp_aliases as _expand_whatsapp_auth_aliases,
@@ -8093,7 +8118,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from gateway.platform_registry import platform_registry
             _configured_platforms = {
-                platform.value for platform in self.config.platforms
+                platform.value
+                for platform, platform_cfg in self.config.platforms.items()
+                if platform_cfg.enabled
             }
             _plugin_entries = platform_registry.relevant_entries(
                 _configured_platforms,
@@ -8269,6 +8296,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._startup_restore_queue = []
         self._startup_restore_tasks = []
 
+        _api_server_prewarm = _start_api_server_prewarm(self.config)
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
@@ -8299,6 +8328,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _multiplex_skipped_platforms.append(platform)
                 continue
             enabled_platform_count += 1
+
+            if platform == Platform.API_SERVER and _api_server_prewarm is not None:
+                try:
+                    await _api_server_prewarm
+                except Exception as e:
+                    logger.debug("API server startup prewarm failed: %s", e)
             
             adapter = self._create_adapter(platform, platform_config)
             if not adapter:
@@ -9714,9 +9749,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 All steps are best-effort; exceptions are swallowed so
                 one subsystem's failure doesn't block the rest.
                 """
+                def _log_slow_cleanup_step(label: str, started_at: float) -> None:
+                    elapsed = time.monotonic() - started_at
+                    if elapsed >= 0.25:
+                        logger.info(
+                            "Shutdown (%s): %s cleanup took %.2fs",
+                            phase,
+                            label,
+                            elapsed,
+                        )
+
+                _step_started = time.monotonic()
                 try:
-                    from tools.process_registry import process_registry
-                    _killed = process_registry.kill_all()
+                    _process_registry_module = sys.modules.get(
+                        "tools.process_registry"
+                    )
+                    _process_registry = getattr(
+                        _process_registry_module,
+                        "process_registry",
+                        None,
+                    )
+                    _killed = (
+                        _process_registry.kill_all()
+                        if _process_registry is not None
+                        else 0
+                    )
                     if _killed:
                         logger.info(
                             "Shutdown (%s): killed %d tool subprocess(es)",
@@ -9724,6 +9781,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                 except Exception as _e:
                     logger.debug("process_registry.kill_all (%s) error: %s", phase, _e)
+                finally:
+                    _log_slow_cleanup_step("process registry", _step_started)
+                _step_started = time.monotonic()
                 try:
                     # Any cron job still dispatched at this instant just had
                     # its tool subprocess killed above (kill_all() has no
@@ -9733,10 +9793,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # now-truncated tool output; mark the run interrupted so
                     # the scheduler can never report that as success (#60432).
                     # No-op when no cron job is in flight.
-                    from cron.scheduler import mark_running_jobs_interrupted
-                    _interrupted = mark_running_jobs_interrupted(
-                        f"Gateway shutdown ({phase}) killed the job's tool "
-                        "subprocess before the run finished."
+                    _cron_module = sys.modules.get("cron.scheduler")
+                    _mark_interrupted = getattr(
+                        _cron_module,
+                        "mark_running_jobs_interrupted",
+                        None,
+                    )
+                    _interrupted = (
+                        _mark_interrupted(
+                            f"Gateway shutdown ({phase}) killed the job's tool "
+                            "subprocess before the run finished."
+                        )
+                        if callable(_mark_interrupted)
+                        else []
                     )
                     if _interrupted:
                         logger.warning(
@@ -9745,9 +9814,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                 except Exception as _e:
                     logger.debug("mark_running_jobs_interrupted (%s) error: %s", phase, _e)
+                finally:
+                    _log_slow_cleanup_step("cron", _step_started)
+                _step_started = time.monotonic()
                 try:
-                    from tools.async_delegation import interrupt_all as _interrupt_async
-                    _async_n = _interrupt_async(reason=f"gateway shutdown ({phase})")
+                    _async_module = sys.modules.get("tools.async_delegation")
+                    _interrupt_async = getattr(
+                        _async_module,
+                        "interrupt_all",
+                        None,
+                    )
+                    _async_n = (
+                        _interrupt_async(reason=f"gateway shutdown ({phase})")
+                        if callable(_interrupt_async)
+                        else 0
+                    )
                     if _async_n:
                         logger.info(
                             "Shutdown (%s): interrupted %d background delegation(s)",
@@ -9755,16 +9836,41 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                 except Exception as _e:
                     logger.debug("async interrupt_all (%s) error: %s", phase, _e)
+                finally:
+                    _log_slow_cleanup_step("async delegation", _step_started)
+                _step_started = time.monotonic()
                 try:
-                    from tools.terminal_tool import cleanup_all_environments
-                    cleanup_all_environments()
+                    _terminal_module = sys.modules.get("tools.terminal_tool")
+                    _cleanup_terminals = getattr(
+                        _terminal_module,
+                        "cleanup_all_environments",
+                        None,
+                    )
+                    _active_environments = getattr(
+                        _terminal_module,
+                        "_active_environments",
+                        {},
+                    )
+                    if callable(_cleanup_terminals) and _active_environments:
+                        _cleanup_terminals()
                 except Exception as _e:
                     logger.debug("cleanup_all_environments (%s) error: %s", phase, _e)
+                finally:
+                    _log_slow_cleanup_step("terminal", _step_started)
+                _step_started = time.monotonic()
                 try:
-                    from tools.browser_tool import cleanup_all_browsers
-                    cleanup_all_browsers()
+                    _browser_module = sys.modules.get("tools.browser_tool")
+                    _cleanup_browsers = getattr(
+                        _browser_module,
+                        "cleanup_all_browsers",
+                        None,
+                    )
+                    if callable(_cleanup_browsers):
+                        _cleanup_browsers()
                 except Exception as _e:
                     logger.debug("cleanup_all_browsers (%s) error: %s", phase, _e)
+                finally:
+                    _log_slow_cleanup_step("browser", _step_started)
 
             # Thread-based shutdown watchdog (#66892): asyncio timeouts cannot
             # recover a frozen loop. Arm a plain OS thread at the start of
@@ -24500,13 +24606,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 f"   Or use 'hermes gateway run --replace' to auto-replace.\n"
             )
             return False
-
-    # Seed bundled skills once per checkout revision.
-    try:
-        from hermes_cli.main import _sync_bundled_skills_for_startup
-        _sync_bundled_skills_for_startup()
-    except Exception:
-        pass
 
     # Centralized logging — agent.log (INFO+), errors.log (WARNING+),
     # and gateway.log (INFO+, gateway-component records only).
