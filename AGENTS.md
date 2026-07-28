@@ -4,6 +4,12 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## MTK upstream upgrades
+
+Before updating this checkout from official Hermes upstream, read
+[`docs/mtk-upstream-upgrade-runbook.md`](docs/mtk-upstream-upgrade-runbook.md)
+and follow its preservation and live-verification gates.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a
