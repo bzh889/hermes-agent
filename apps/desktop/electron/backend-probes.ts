@@ -20,8 +20,9 @@
  * actually works.
  *
  * Both probes are deliberately fast and forgiving:
- *   - 5s timeout (a hung interpreter beats forever, but we still give
- *     slow disks / cold caches room to breathe)
+ *   - 20s timeout on Windows, 5s elsewhere (Windows process creation and
+ *     cold antivirus scans can exceed 5s; successful probes still return
+ *     immediately)
  *   - stdio ignored (we only care about exit code; stdout/stderr are
  *     not surfaced to the user, just to recentHermesLog for forensics
  *     via the caller's catch block if it chooses)
@@ -34,7 +35,7 @@
 
 import { execFileSync } from 'node:child_process'
 
-const PROBE_TIMEOUT_MS = 5000
+const PROBE_TIMEOUT_MS = process.platform === 'win32' ? 20000 : 5000
 
 /**
  * Return the Python snippet used to verify Hermes can import far enough to

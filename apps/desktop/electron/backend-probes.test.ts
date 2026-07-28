@@ -39,7 +39,7 @@ test('canImportHermesCli returns false when interpreter cannot run -c', () => {
   // both land on "not", which is exactly what we want for the
   // resolver fall-through.
   assert.equal(canImportHermesCli(NODE_BIN), false)
-})
+}, 30000)
 
 test('canImportHermesCli returns false when binary does not exist', () => {
   const ghost = path.join(os.tmpdir(), 'hermes-probes-ghost-' + Date.now() + '.exe')
@@ -97,10 +97,10 @@ test('verifyHermesCli returns true when --version exits 0', () => {
       void 0
     }
   }
-})
+}, 30000)
 
 test('verifyHermesCli swallows timeouts (does not throw)', () => {
-  // We can't easily provoke a real 5s hang in CI without slowing the
+  // We can't easily provoke a real timeout in CI without slowing the
   // suite, but we CAN confirm that an invocation that DOES throw
   // (because the binary is missing) returns false rather than
   // propagating. Same code path the timeout case takes.
