@@ -425,6 +425,26 @@ def test_slash_exec_compress_flag_on_applies_host_control_mirror(monkeypatch):
     assert server._session_info(None, session)["model"] == "host-model"
 
 
+def test_usage_reports_live_compression_and_context_overage():
+    compressor = types.SimpleNamespace(
+        compression_count=3,
+        context_length=272_000,
+        last_prompt_tokens=365_810,
+    )
+    agent = types.SimpleNamespace(
+        _compression_in_progress=True,
+        context_compressor=compressor,
+        model="gpt-5.6-sol",
+    )
+
+    usage = server._get_usage(agent)
+
+    assert usage["compression_active"] is True
+    assert usage["context_used"] == 365_810
+    assert usage["context_max"] == 272_000
+    assert usage["context_over_by"] == 93_810
+
+
 def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
     class _ImmediateThread:
         def __init__(self, target=None, daemon=None, **_kwargs):

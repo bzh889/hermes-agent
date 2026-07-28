@@ -2882,6 +2882,25 @@ def run_conversation(
                     }
                     agent.context_compressor.update_from_response(usage_dict)
 
+                    # ``max_compression_attempts`` protects one pressure
+                    # episode from retrying compaction forever. It must not
+                    # permanently exhaust the whole turn: a successful real
+                    # provider reading below the threshold proves that the
+                    # prior episode cleared, so later tool-result growth is a
+                    # new episode with a fresh budget.
+                    if (
+                        compression_attempts > 0
+                        and prompt_tokens > 0
+                        and prompt_tokens < agent.context_compressor.threshold_tokens
+                    ):
+                        logger.debug(
+                            "Compression attempt budget replenished after "
+                            "provider-confirmed fit (%d < %d)",
+                            prompt_tokens,
+                            agent.context_compressor.threshold_tokens,
+                        )
+                        compression_attempts = 0
+
                     # Stash this response's canonical usage so the post-turn
                     # on_turn_complete() observation hook can forward it (the
                     # same dict shape passed to update_from_response). A turn

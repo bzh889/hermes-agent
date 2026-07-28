@@ -1638,6 +1638,77 @@ class TestToolResultPreflightCompression:
         mock_compress.assert_called_once()
         assert result["completed"] is True
 
+    def test_effective_compaction_replenishes_budget_for_later_tool_growth(self, agent):
+        """A fitting real prompt opens a new pressure episode in a long turn."""
+        agent.compression_enabled = True
+        agent.max_compression_attempts = 1
+        agent.context_compressor.context_length = 200_000
+        agent.context_compressor.threshold_tokens = 130_000
+
+        first_tool = SimpleNamespace(
+            id="tc1",
+            type="function",
+            function=SimpleNamespace(name="web_search", arguments='{"query":"first"}'),
+        )
+        second_tool = SimpleNamespace(
+            id="tc2",
+            type="function",
+            function=SimpleNamespace(name="web_search", arguments='{"query":"second"}'),
+        )
+        low_usage = {
+            "prompt_tokens": 50_000,
+            "completion_tokens": 100,
+            "total_tokens": 50_100,
+        }
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content=None, finish_reason="tool_calls", tool_calls=[first_tool], usage=low_usage),
+            _mock_response(content=None, finish_reason="tool_calls", tool_calls=[second_tool], usage=low_usage),
+            _mock_response(content="Done", finish_reason="stop", usage=low_usage),
+        ]
+
+        def next_request_tokens(messages, **_kwargs):
+            return 150_000 if any(message.get("role") == "tool" for message in messages) else 90_000
+
+        compress_calls = []
+
+        def compact_to_fitting_prompt(_messages, _system_message, **_kwargs):
+            compress_calls.append(True)
+            return [{"role": "user", "content": "compressed"}], "compressed prompt"
+
+        with (
+            patch("run_agent.handle_function_call", return_value="x" * 100_000),
+            patch(
+                "agent.conversation_loop.estimate_request_tokens_rough",
+                side_effect=next_request_tokens,
+            ),
+            patch.object(agent, "_compress_context", side_effect=compact_to_fitting_prompt),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        assert len(compress_calls) == 2
+
+    def test_compression_in_progress_covers_forwarder_and_clears_on_error(self, agent):
+        """The UI's live compaction signal covers the shared forwarder."""
+        observed = []
+
+        def fail_while_compressing(*_args, **_kwargs):
+            observed.append(agent._compression_in_progress)
+            raise RuntimeError("summary failed")
+
+        with patch(
+            "agent.conversation_compression.compress_context",
+            side_effect=fail_while_compressing,
+        ):
+            with pytest.raises(RuntimeError, match="summary failed"):
+                agent._compress_context([], "system")
+
+        assert observed == [True]
+        assert agent._compression_in_progress is False
+
     def test_disabled_compression_skips_post_tool_preflight_estimate(self, agent):
         """Disabled compression must not run its post-tool preflight scan."""
         agent.compression_enabled = False

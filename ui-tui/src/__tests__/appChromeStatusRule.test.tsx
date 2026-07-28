@@ -104,6 +104,35 @@ const baseProps = {
   voiceLabel: ''
 }
 
+describe('StatusRule context pressure state', () => {
+  it('shows compressing instead of stale ready while compaction is active', () => {
+    const element = StatusRule({
+      ...baseProps,
+      usage: { ...baseProps.usage, compression_active: true }
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('compressing')
+    expect(rendered).not.toContain('ready')
+  })
+
+  it('shows the exact overage when context exceeds the reference limit', () => {
+    const element = StatusRule({
+      ...baseProps,
+      usage: {
+        ...baseProps.usage,
+        context_max: 272_000,
+        context_over_by: 93_810,
+        context_percent: 100,
+        context_used: 365_810
+      }
+    })
+
+    expect(textContent(element)).toContain('+93.8k over')
+  })
+})
+
 describe('StatusRule background-subagent indicator', () => {
   it('renders ⛓ N on a wide terminal when subagents are running', () => {
     const element = StatusRule({

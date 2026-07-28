@@ -185,8 +185,10 @@ export interface SessionInfo {
 export interface Usage {
   active_subagents?: number
   calls: number
+  compression_active?: boolean
   compressions?: number
   context_max?: number
+  context_over_by?: number
   context_percent?: number
   context_used?: number
   cost_status?: string

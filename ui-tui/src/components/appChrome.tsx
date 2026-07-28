@@ -457,13 +457,20 @@ export function StatusRule({
   const pct = usage.context_percent
   const barColor = ctxBarColor(pct, t)
   const segs = statusBarSegments(cols)
+  const compressionActive = usage.compression_active === true
+  const compressionStatus = '⟳ compressing'
+
+  const contextOverLabel =
+    typeof usage.context_over_by === 'number' && usage.context_over_by > 0
+      ? ` +${fmtK(usage.context_over_by)} over`
+      : ''
 
   // On narrow terminals the context read-out collapses to a bare token count
   // (`12k tok`) and the visual fill bar is dropped entirely.
   const ctxLabel = usage.context_max
     ? segs.compactCtx
-      ? `${fmtK(usage.context_used ?? 0)} tok`
-      : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
+      ? `${fmtK(usage.context_used ?? 0)} tok${contextOverLabel}`
+      : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}${contextOverLabel}`
     : usage.total > 0
       ? `${fmtK(usage.total)} tok`
       : ''
@@ -477,10 +484,10 @@ export function StatusRule({
   const batteryColorVal = showBattery ? batteryColor(battery!, t) : ''
   const batteryWidth = showBattery ? stringWidth(`${batteryText} │ `) : 0
 
-  // A credits notice replaces the status/verb slot, but only when idle —
-  // while busy the FaceTicker always wins (R1 render priority). The notice
-  // text carries its own glyph; we only tint it (R1) and let it shrink (R3-M7).
-  const showNotice = !busy && !!notice?.text
+  // A credits notice replaces the status/verb slot, but only when idle and
+  // outside compaction. Live compaction outranks both the notice and the busy
+  // FaceTicker so a stale ready/busy state cannot hide what the backend is doing.
+  const showNotice = !busy && !compressionActive && !!notice?.text
   // The notice slot is shrinkable (flexShrink={1}, truncate-end), so reserve
   // only a small bounded width for it in the essentials budget — enough that
   // a short notice never gets crushed, but a long one ellipsizes instead of
@@ -494,11 +501,13 @@ export function StatusRule({
   // yields first. The busy face width depends on the active /indicator style
   // (kaomoji is wide + verb; unicode is a bare 1-col spinner). When a notice
   // occupies the slot it reserves only `noticeReserve` (it shrinks/truncates).
-  const slotWidth = busy
-    ? busyIndicatorWidth(indicatorStyle, turnStartedAt != null)
-    : showNotice
-      ? noticeReserve
-      : stringWidth(status)
+  const slotWidth = compressionActive
+    ? stringWidth(compressionStatus)
+    : busy
+      ? busyIndicatorWidth(indicatorStyle, turnStartedAt != null)
+      : showNotice
+        ? noticeReserve
+        : stringWidth(status)
 
   const essentialWidth =
     stringWidth('─ ') +
@@ -543,11 +552,15 @@ export function StatusRule({
   const showBar = !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${pct}%` : ''}`))
   const showDuration = segs.duration && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
 
-  // Idle clock — time since the last final agent response. Hidden while busy
-  // (the FaceTicker's elapsed tail covers the live turn) and before the first
-  // turn completes. Shares the duration breakpoint and width reservation.
+  // Idle clock — time since the last final agent response. Hidden while busy,
+  // compressing, and before the first turn completes. Shares the duration
+  // breakpoint and width reservation.
   const showIdle =
-    segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
+    segs.duration &&
+    !busy &&
+    !compressionActive &&
+    lastTurnEndedAt != null &&
+    fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
 
   const showCompressions = segs.compressions && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
   const showVoice = segs.voice && !!voiceLabel && fits(SEP + stringWidth(voiceLabel))
@@ -598,7 +611,11 @@ export function StatusRule({
               <Text color={t.color.muted}>{' │ '}</Text>
             </Text>
           ) : null}
-          {busy ? (
+          {compressionActive ? (
+            <Text color={t.color.statusWarn} wrap="truncate-end">
+              {compressionStatus}
+            </Text>
+          ) : busy ? (
             <FaceTicker color={statusColor} startedAt={turnStartedAt} style={indicatorStyle} />
           ) : showNotice ? null : (
             <Text color={statusColor} wrap="truncate-end">

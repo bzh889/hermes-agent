@@ -594,6 +594,69 @@ async def test_disconnect_waits_for_shared_sdk_transport_without_blocking_loop()
     layer._session.close.assert_called_once_with()
 
 
+async def test_trailing_runtime_footer_edits_streamed_body_instead_of_sending_card():
+    """A non-empty footer line must not become a second Teams message ID."""
+    from gateway.platforms.base import SendResult
+
+    adapter = _make_adapter()
+    adapter._last_sent_message_id = "body-id"
+    adapter._last_sent_message_html = (
+        '<div style="border-left:3px solid #6264A7;padding-left:10px">'
+        '<b>🤖 Hermes</b><br><br>body<br>'
+        '<span style="color:#888;font-size:0.85em">— Hermes · old</span>'
+        '</div>'
+    )
+    adapter.edit_message = AsyncMock(
+        return_value=SendResult(success=True, message_id="body-id")
+    )
+    adapter._call_sdk_messages = MagicMock(return_value={"id": "footer-id"})
+
+    result = await adapter.send("conv-a", "gpt-5.6 · openai · 12%")
+
+    assert result.success is True
+    adapter.edit_message.assert_awaited_once()
+    assert adapter.edit_message.await_args is not None
+    assert adapter.edit_message.await_args.kwargs["finalize"] is True
+    adapter._call_sdk_messages.assert_not_called()
+
+
+async def test_trailing_runtime_footer_keeps_final_streamed_body_without_cursor():
+    """Footer merge must use the successful final edit, not the first preview."""
+    from gateway.platforms.base import SendResult
+    import gateway.platforms.teams_mtk as teams_mtk_module
+
+    adapter = _make_adapter()
+    adapter._last_sent_message_id = "body-id"
+    adapter._last_sent_message_html = (
+        '<div style="border-left:3px solid #6264A7;padding-left:10px">'
+        '<b>🤖 Hermes</b><br><br>partial answer ▉<br>'
+        '<span style="color:#888;font-size:0.85em">— Hermes · old</span>'
+        '</div>'
+    )
+    adapter._call_sdk_messages = MagicMock(return_value={"id": "body-id"})
+
+    with patch.object(teams_mtk_module, "_SDK_AVAILABLE", True):
+        final_result = await adapter.edit_message(
+            "conv-a",
+            "body-id",
+            "complete answer with the missing details",
+            finalize=True,
+        )
+        footer_result = await adapter.send(
+            "conv-a",
+            "gpt-5.6-sol · openai-codex · 12%",
+        )
+
+    assert final_result == SendResult(success=True, message_id="body-id")
+    assert footer_result.success is True
+    final_footer_edit = adapter._call_sdk_messages.call_args_list[-1]
+    assert final_footer_edit.args[0] == "edit"
+    merged_html = final_footer_edit.kwargs["content"]
+    assert "complete answer with the missing details" in merged_html
+    assert "partial answer" not in merged_html
+    assert "▉" not in merged_html
+
+
 # ── §3 config: reply_throttle_seconds ────────────────────────────────────
 
 @pytest.mark.asyncio(False)

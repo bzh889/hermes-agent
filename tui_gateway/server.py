@@ -4212,6 +4212,9 @@ def _get_usage(agent) -> dict:
         "completion": g("session_completion_tokens"),
         "total": g("session_total_tokens"),
         "calls": g("session_api_calls"),
+        "compression_active": bool(
+            getattr(agent, "_compression_in_progress", False)
+        ),
     }
     comp = getattr(agent, "context_compressor", None)
     if comp:
@@ -4240,6 +4243,7 @@ def _get_usage(agent) -> dict:
             usage["context_used"] = last_prompt
             usage["context_max"] = ctx_max
             usage["context_percent"] = max(0, min(100, round(last_prompt / ctx_max * 100)))
+            usage["context_over_by"] = max(0, last_prompt - ctx_max)
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
     # Live count of background/async subagents still running (delegate_task
     # batches + background single delegations). Mirrors the classic CLI status

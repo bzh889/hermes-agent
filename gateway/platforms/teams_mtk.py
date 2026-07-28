@@ -1900,7 +1900,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             # Trailing-footer-only message (streaming mode):
             # Merge into the last body message instead of sending a separate mini-card.
-            if not html_content or (runtime_footer and not content.strip()):
+            # _build_html() clears its local content variable after extracting
+            # the footer, so the caller's original string remains non-empty.
+            # Compare it with the extracted footer to identify this case.
+            _footer_only = bool(
+                runtime_footer and content.strip() == runtime_footer
+            )
+            if not html_content or _footer_only:
                 if self._last_sent_message_id and runtime_footer and self._last_sent_message_html:
                     _existing = self._last_sent_message_html
                     _old_footer_pat = re.compile(
@@ -2294,6 +2300,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         message_id=message_id,
                         content=html_content,
                     )
+                    if str(message_id) == str(self._last_sent_message_id):
+                        self._last_sent_message_html = html_content
                     logger.info("TeamsMTK: edited message %s via SDK", _log_ref(message_id))
                     return SendResult(success=True, message_id=message_id)
                 except Exception as _sdk_err:
@@ -2331,6 +2339,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     timeout=30,
                 )
             resp.raise_for_status()
+            if str(message_id) == str(self._last_sent_message_id):
+                self._last_sent_message_html = html_content
             logger.info(
                 "TeamsMTK: edited message %s via raw HTTP (resp=%d bytes)",
                 _log_ref(message_id),
@@ -3657,6 +3667,82 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         return {"status": "stub", "error": "P7 Persona not yet available",
                 "persona": None}
 
+    async def _send_model_picker_html(
+        self,
+        chat_id: str,
+        html_content: str,
+        step_label: str,
+    ) -> "SendResult":
+        """Send picker HTML through the adapter's trusted message transport."""
+        from gateway.platforms.base import SendResult
+
+        try:
+            if _SDK_AVAILABLE:
+                data = await asyncio.to_thread(
+                    self._call_sdk_messages,
+                    "send",
+                    conversation_id=chat_id,
+                    content=html_content,
+                    is_html=True,
+                    return_context=False,
+                )
+            else:
+                self._auth._inject_truststore()
+                import requests as _req
+                from requests.adapters import HTTPAdapter
+
+                sess = _req.Session()
+                sess.mount(
+                    "https://",
+                    HTTPAdapter(
+                        pool_connections=0,
+                        pool_maxsize=0,
+                        max_retries=0,
+                    ),
+                )
+                try:
+                    skype_token = await asyncio.to_thread(self._auth.skype_token)
+                    url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
+                    data_response = await asyncio.to_thread(
+                        sess.post,
+                        url,
+                        json={
+                            "content": html_content,
+                            "messagetype": "RichText/Html",
+                            "contenttype": "text",
+                        },
+                        headers={
+                            "Authentication": f"skypetoken={skype_token}",
+                            "Content-Type": "application/json",
+                        },
+                        verify=True,
+                        timeout=15,
+                    )
+                    data_response.raise_for_status()
+                    data = data_response.json()
+                finally:
+                    sess.close()
+
+            msg_id = data.get("id") or data.get("OriginalArrivalTime")
+            if msg_id:
+                self._remember_sent_message(chat_id, msg_id)
+            logger.info(
+                "TeamsMTK: model picker %s sent (id=%s)",
+                step_label,
+                _log_ref(msg_id),
+            )
+            return SendResult(
+                success=True,
+                message_id=str(msg_id) if msg_id else None,
+            )
+        except Exception as e:
+            logger.error(
+                "TeamsMTK: model picker %s send failed: %s",
+                step_label,
+                _log_error(e),
+            )
+            return SendResult(success=False, error=str(e))
+
     async def send_model_picker(
         self,
         chat_id: str,
@@ -3751,43 +3837,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             f'</div>'
         )
 
-        # Send provider list via Skype API
-        try:
-            self._auth._inject_truststore()
-            import requests as _req
-            from requests.adapters import HTTPAdapter
-            sess = _req.Session()
-            sess.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
-            skype_token = self._auth.skype_token()
-            url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
-            payload = {
-                "content": html_content,
-                "messagetype": "RichText/Html",
-                "contenttype": "text",
-            }
-            resp = sess.post(
-                url,
-                json=payload,
-                headers={
-                    "Authentication": f"skypetoken={skype_token}",
-                    "Content-Type": "application/json",
-                },
-                verify=True,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            sess.close()
-            data = resp.json()
-            msg_id = data.get("id") or data.get("OriginalArrivalTime")
-            if msg_id:
-                self._remember_sent_message(chat_id, msg_id)
-            logger.info(
-                "TeamsMTK: model picker step 1 (providers) sent (id=%s)",
-                _log_ref(msg_id),
-            )
-        except Exception as e:
-            logger.error("TeamsMTK: model picker step 1 send failed: %s", _log_error(e))
-            return SendResult(success=False, error=str(e))
+        result = await self._send_model_picker_html(
+            chat_id,
+            html_content,
+            "step 1 (providers)",
+        )
+        if not result.success:
+            return result
 
         # Store picker state — step 1: waiting for provider selection
         # prov_list carries the deduped provider objects for step 2
@@ -3803,7 +3859,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             ),
         }
 
-        return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+        return result
 
     async def _send_model_sub_picker(
         self,
@@ -3905,42 +3961,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             f'</div>'
         )
 
-        # Send model list via Skype API
-        try:
-            self._auth._inject_truststore()
-            import requests as _req
-            from requests.adapters import HTTPAdapter
-            sess = _req.Session()
-            sess.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
-            skype_token = self._auth.skype_token()
-            url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
-            payload = {
-                "content": html_content,
-                "messagetype": "RichText/Html",
-                "contenttype": "text",
-            }
-            resp = sess.post(
-                url,
-                json=payload,
-                headers={
-                    "Authentication": f"skypetoken={skype_token}",
-                    "Content-Type": "application/json",
-                },
-                verify=True,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            sess.close()
-            data = resp.json()
-            msg_id = data.get("id") or data.get("OriginalArrivalTime")
-            if msg_id:
-                self._remember_sent_message(chat_id, msg_id)
-            logger.info(
-                "TeamsMTK: model picker step 2 (models for %s) sent (id=%s)",
-                _log_ref(chosen_name), _log_ref(msg_id),
-            )
-        except Exception as e:
-            logger.error("TeamsMTK: model picker step 2 send failed: %s", _log_error(e))
+        result = await self._send_model_picker_html(
+            chat_id,
+            html_content,
+            f"step 2 (models for {_log_ref(chosen_name)})",
+        )
+        if not result.success:
             return
 
         # Update picker state — step 2: waiting for model selection

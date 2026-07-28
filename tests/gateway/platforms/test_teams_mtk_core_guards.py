@@ -497,6 +497,92 @@ class TestEchoGuardIntegration:
         assert result["status"] == "error"
 
     @pytest.mark.asyncio
+    async def test_model_picker_uses_sdk_send_when_available(self):
+        """The picker must use the same trusted SDK transport as normal sends."""
+        from gateway.platforms.helpers import MessageDeduplicator
+
+        adapter = TeamsMTKAdapter(config=None)
+        adapter._sent_dedup = MessageDeduplicator()
+        adapter._call_sdk_messages = MagicMock(
+            return_value={"id": "picker-id"}
+        )
+
+        with (
+            patch.object(teams_mtk_module, "_SDK_AVAILABLE", True),
+            patch(
+                "requests.Session",
+                side_effect=AssertionError("picker bypassed SDK transport"),
+            ),
+        ):
+            result = await adapter.send_model_picker(
+                chat_id="19:dm@unq.gbl.spaces",
+                providers=[{
+                    "slug": "openai-codex",
+                    "name": "OpenAI Codex",
+                    "models": ["gpt-5.6-sol"],
+                    "is_current": True,
+                }],
+                current_model="gpt-5.6-sol",
+                current_provider="openai-codex",
+                session_key="session",
+                on_model_selected=AsyncMock(),
+            )
+
+        assert result.success is True
+        assert result.message_id == "picker-id"
+        adapter._call_sdk_messages.assert_called_once()
+        operation = adapter._call_sdk_messages.call_args.args[0]
+        kwargs = adapter._call_sdk_messages.call_args.kwargs
+        assert operation == "send"
+        assert kwargs["conversation_id"] == "19:dm@unq.gbl.spaces"
+        assert kwargs["is_html"] is True
+        assert kwargs["return_context"] is False
+        assert "Select Provider" in kwargs["content"]
+        assert adapter._model_picker_states["19:dm@unq.gbl.spaces"]["step"] == "provider"
+
+    @pytest.mark.asyncio
+    async def test_model_sub_picker_uses_sdk_send_when_available(self):
+        """The second picker step must not fall back to a bare requests session."""
+        adapter = TeamsMTKAdapter(config=None)
+        adapter._call_sdk_messages = MagicMock(
+            return_value={"id": "sub-picker-id"}
+        )
+        chat_id = "19:dm@unq.gbl.spaces"
+        adapter._model_picker_states[chat_id] = {
+            "step": "provider",
+            "prov_entries": [("openai-codex", "OpenAI Codex", 1, True)],
+            "prov_objects": [{
+                "slug": "openai-codex",
+                "name": "OpenAI Codex",
+                "models": ["gpt-5.6-sol"],
+                "is_current": True,
+            }],
+            "on_model_selected": AsyncMock(),
+            "current_model": "gpt-5.6-sol",
+            "current_provider": "openai-codex",
+            "allowed_user_id": "picker-owner",
+        }
+
+        with (
+            patch.object(teams_mtk_module, "_SDK_AVAILABLE", True),
+            patch(
+                "requests.Session",
+                side_effect=AssertionError("sub-picker bypassed SDK transport"),
+            ),
+        ):
+            await adapter._send_model_sub_picker(chat_id, 1)
+
+        adapter._call_sdk_messages.assert_called_once()
+        operation = adapter._call_sdk_messages.call_args.args[0]
+        kwargs = adapter._call_sdk_messages.call_args.kwargs
+        assert operation == "send"
+        assert kwargs["conversation_id"] == chat_id
+        assert kwargs["is_html"] is True
+        assert kwargs["return_context"] is False
+        assert "Select Model" in kwargs["content"]
+        assert adapter._model_picker_states[chat_id]["step"] == "model"
+
+    @pytest.mark.asyncio
     async def test_model_picker_id_stays_guarded_after_another_chat_send(self):
         """A picker ID must be in the TTL cache, not only the global last-ID slot."""
         from gateway.platforms.helpers import MessageDeduplicator
@@ -513,7 +599,10 @@ class TestEchoGuardIntegration:
         session = MagicMock()
         session.post.return_value = response
 
-        with patch("requests.Session", return_value=session):
+        with (
+            patch.object(teams_mtk_module, "_SDK_AVAILABLE", False),
+            patch("requests.Session", return_value=session),
+        ):
             result = await adapter.send_model_picker(
                 chat_id="19:dm@unq.gbl.spaces",
                 providers=[{

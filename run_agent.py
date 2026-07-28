@@ -6523,6 +6523,8 @@ class AIAgent:
             root = self._conversation_root_id()
             if root:
                 token = set_conversation_context(root)
+        was_compressing = bool(getattr(self, "_compression_in_progress", False))
+        self._compression_in_progress = True
         try:
             return compress_context(
                 self, messages, system_message,
@@ -6532,6 +6534,7 @@ class AIAgent:
                 commit_fence=commit_fence,
             )
         finally:
+            self._compression_in_progress = was_compressing
             # Restore whatever the caller had, so a compaction never leaks its
             # tag into the surrounding scope.
             if token is not None:
