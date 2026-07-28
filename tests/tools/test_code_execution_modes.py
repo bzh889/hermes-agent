@@ -158,6 +158,53 @@ class TestResolveChildPython(unittest.TestCase):
                 _is_usable_python.cache_clear()
                 self.assertEqual(_resolve_child_python("project"), sys.executable)
 
+    def test_windows_project_prefers_pythonw_launcher(self):
+        """Avoid a venv python.exe grandchild allocating a visible console."""
+        import pathlib
+        import tempfile
+        import tools.code_execution_tool as code_execution
+
+        with tempfile.TemporaryDirectory() as td:
+            scripts = pathlib.Path(td) / "Scripts"
+            scripts.mkdir()
+            (scripts / "pythonw.exe").touch()
+            (scripts / "python.exe").touch()
+            with (
+                patch.object(code_execution, "_IS_WINDOWS", True),
+                patch.object(code_execution, "_is_usable_python", return_value=True),
+                patch.dict(
+                    os.environ,
+                    {"VIRTUAL_ENV": td, "CONDA_PREFIX": ""},
+                ),
+            ):
+                self.assertEqual(
+                    _resolve_child_python("project"),
+                    str(scripts / "pythonw.exe"),
+                )
+
+    def test_windows_project_falls_back_to_python_console_launcher(self):
+        """Keep Windows environments without pythonw.exe usable."""
+        import pathlib
+        import tempfile
+        import tools.code_execution_tool as code_execution
+
+        with tempfile.TemporaryDirectory() as td:
+            scripts = pathlib.Path(td) / "Scripts"
+            scripts.mkdir()
+            (scripts / "python.exe").touch()
+            with (
+                patch.object(code_execution, "_IS_WINDOWS", True),
+                patch.object(code_execution, "_is_usable_python", return_value=True),
+                patch.dict(
+                    os.environ,
+                    {"VIRTUAL_ENV": td, "CONDA_PREFIX": ""},
+                ),
+            ):
+                self.assertEqual(
+                    _resolve_child_python("project"),
+                    str(scripts / "python.exe"),
+                )
+
     def test_project_prefers_virtualenv_over_conda(self):
         """If both VIRTUAL_ENV and CONDA_PREFIX are set, VIRTUAL_ENV wins."""
         if sys.platform == "win32":

@@ -74,20 +74,22 @@ if [ -n "$SKIPPED_VENVS" ]; then
   done
 fi
 
-if [ -z "$VENV" ] && [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
-    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
-  # Guard with an import check: HERMES_PYTHON may point at the RELEASE
-  # venv (no pytest) when inherited from a wrapped `hermes` binary rather
-  # than the devShell hook.
-  PYTHON="$HERMES_PYTHON"
-  echo "▶ no local venv — using Nix dev venv via HERMES_PYTHON: $PYTHON"
-else
-  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv or $REPO_ROOT/venv," >&2
-  echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell or create a venv)" >&2
-  if [ -n "$SKIPPED_VENVS" ]; then
-    echo "       (skipped for missing pytest:$SKIPPED_VENVS — install dev extras there, or create $REPO_ROOT/.venv)" >&2
+if [ -z "$VENV" ]; then
+  if [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
+      && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
+    # Guard with an import check: HERMES_PYTHON may point at the RELEASE
+    # venv (no pytest) when inherited from a wrapped `hermes` binary rather
+    # than the devShell hook.
+    PYTHON="$HERMES_PYTHON"
+    echo "▶ no local venv — using Nix dev venv via HERMES_PYTHON: $PYTHON"
+  else
+    echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv or $REPO_ROOT/venv," >&2
+    echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell or create a venv)" >&2
+    if [ -n "$SKIPPED_VENVS" ]; then
+      echo "       (skipped for missing pytest:$SKIPPED_VENVS — install dev extras there, or create $REPO_ROOT/.venv)" >&2
+    fi
+    exit 1
   fi
-  exit 1
 fi
 
 

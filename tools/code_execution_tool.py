@@ -1761,7 +1761,11 @@ def _is_usable_python(python_path: str) -> bool:
         result = subprocess.run(
             [python_path, "-c",
              "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
-            timeout=5,
+            # Windows process startup can exceed five seconds under heavy
+            # desktop/antivirus load.  A false negative here makes project
+            # mode fall back from the safe venv pythonw.exe launcher to the
+            # console interpreter, reintroducing visible terminal frames.
+            timeout=30 if _IS_WINDOWS else 5,
             capture_output=True,
             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
             stdin=subprocess.DEVNULL,
@@ -1787,7 +1791,12 @@ def _resolve_child_python(mode: str) -> str:
         return sys.executable
 
     if _IS_WINDOWS:
-        exe_names = ("python.exe", "python3.exe")
+        # A Windows venv's console ``python.exe`` launcher respawns the base
+        # interpreter.  From a CREATE_NO_WINDOW parent that grandchild can
+        # allocate a new console, which Windows Terminal may leave behind as
+        # an empty frame.  ``pythonw.exe`` preserves the venv while keeping
+        # the whole launcher chain windowless; redirected pipes still work.
+        exe_names = ("pythonw.exe", "python.exe", "python3.exe")
         subdirs = ("Scripts",)
     else:
         exe_names = ("python", "python3")
