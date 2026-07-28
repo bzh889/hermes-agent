@@ -21,6 +21,8 @@ import {
   buildPathExtCandidates,
   chooseUpdaterArgs,
   getVenvSitePackagesEntries,
+  findPreferredVenvRoot,
+  findVenvBasePython,
   resolveVenvHermesCommand
 } from './windows-hermes-path'
 
@@ -211,4 +213,27 @@ test('getVenvSitePackagesEntries: returns empty for a falsy venvRoot', () => {
   assert.deepEqual(getVenvSitePackagesEntries('', { isWindows: true, directoryExists: () => true }), [])
   assert.deepEqual(getVenvSitePackagesEntries(null, { isWindows: true, directoryExists: () => true }), [])
   assert.deepEqual(getVenvSitePackagesEntries(undefined, { isWindows: true, directoryExists: () => true }), [])
+})
+
+test('findPreferredVenvRoot: prefers .venv and falls back to venv', () => {
+  const existing = new Set(['C:\\repo\\.venv\\Scripts\\python.exe', 'C:\\repo\\venv\\Scripts\\python.exe'])
+  const fileExists = p => existing.has(p)
+
+  assert.equal(findPreferredVenvRoot('C:\\repo', { isWindows: true, fileExists }), 'C:\\repo\\.venv')
+
+  existing.delete('C:\\repo\\.venv\\Scripts\\python.exe')
+  assert.equal(findPreferredVenvRoot('C:\\repo', { isWindows: true, fileExists }), 'C:\\repo\\venv')
+})
+
+test('findVenvBasePython: resolves the base interpreter from pyvenv.cfg home', () => {
+  const base = 'C:\\Python312\\python.exe'
+
+  assert.equal(
+    findVenvBasePython('C:\\repo\\.venv', {
+      isWindows: true,
+      readFile: () => 'home = C:\\Python312\nversion_info = 3.12.10\n',
+      fileExists: p => p === base
+    }),
+    base
+  )
 })

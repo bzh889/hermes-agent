@@ -324,6 +324,29 @@ class TestBuildWebUISkipsWhenFresh:
         assert "--workspace" in install_cmd
         assert install_cmd[install_cmd.index("--workspace") + 1] == "web"
 
+    def test_workspace_scoped_install_does_not_run_root_npm_ci(self, tmp_path):
+        """A scoped repair must not prune packages owned by sibling workspaces."""
+        (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+        install_ok = __import__("subprocess").CompletedProcess(
+            [], 0, stdout="", stderr=""
+        )
+
+        with patch(
+            "hermes_cli.main.subprocess.run",
+            return_value=install_ok,
+        ) as mock_run:
+            result = _run_npm_install_deterministic(
+                "/usr/bin/npm",
+                tmp_path,
+                extra_args=("--workspace", "web"),
+            )
+
+        assert result.returncode == 0
+        assert mock_run.call_count == 1
+        command = mock_run.call_args.args[0]
+        assert command[:2] == ["/usr/bin/npm", "install"]
+        assert "--no-save" in command
+
     def test_web_install_omits_workspace_when_web_has_own_lockfile(
         self, tmp_path, monkeypatch
     ):

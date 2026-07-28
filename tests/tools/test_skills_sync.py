@@ -987,6 +987,62 @@ class TestSyncSkills:
 
         assert result["optional_provenance_backfilled"] == []
 
+    def test_optional_relocation_scans_active_skills_once(self, tmp_path):
+        """Absent optional paths must share one active-skill directory index."""
+        from tools.skills_sync import _backfill_optional_provenance
+
+        optional = tmp_path / "optional-skills"
+        for name in ("alpha", "beta", "gamma", "delta"):
+            skill = optional / "new-category" / name
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(f"---\nname: {name}\n---\n# {name}\n")
+
+        skills_dir = tmp_path / "user-skills"
+        installed = skills_dir / "old-category" / "alpha"
+        installed.mkdir(parents=True)
+        (installed / "SKILL.md").write_text("---\nname: alpha\n---\n# alpha\n")
+
+        original_rglob = Path.rglob
+        active_tree_scans = 0
+
+        def counting_rglob(path, pattern):
+            nonlocal active_tree_scans
+            if path == skills_dir and pattern == "SKILL.md":
+                active_tree_scans += 1
+            return original_rglob(path, pattern)
+
+        with patch("tools.skills_sync.SKILLS_DIR", skills_dir), \
+             patch("tools.skills_sync._get_optional_dir", return_value=optional), \
+             patch.object(Path, "rglob", counting_rglob):
+            result = _backfill_optional_provenance(quiet=True)
+
+        assert result == ["alpha"]
+        assert active_tree_scans == 1
+
+    def test_optional_relocation_index_excludes_external_link_targets(self, tmp_path):
+        """An external/Junction-backed skill must not gain official provenance."""
+        from tools.skills_sync import _index_installed_skill_dirs_by_name
+
+        skills_dir = tmp_path / "user-skills"
+        linked_skill = skills_dir / "linked-skill"
+        linked_skill.mkdir(parents=True)
+        (linked_skill / "SKILL.md").write_text("# linked\n")
+        external_target = tmp_path / "external-skills" / "linked-skill"
+        external_target.mkdir(parents=True)
+
+        original_resolve = Path.resolve
+
+        def resolving_external(path, *args, **kwargs):
+            if path == linked_skill:
+                return external_target
+            return original_resolve(path, *args, **kwargs)
+
+        with patch("tools.skills_sync.SKILLS_DIR", skills_dir), \
+             patch.object(Path, "resolve", resolving_external):
+            index = _index_installed_skill_dirs_by_name()
+
+        assert "linked-skill" not in index
+
     def test_repair_official_optional_restores_reorganized_skill_with_backup(self, tmp_path):
         bundled = self._setup_bundled(tmp_path)
         optional = tmp_path / "optional-skills"

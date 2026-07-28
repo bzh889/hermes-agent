@@ -14,7 +14,7 @@ const MAX_GATEWAY_LOG_LINES = 200
 const MAX_LOG_LINE_BYTES = 4096
 const MAX_BUFFERED_EVENTS = 2000
 const MAX_LOG_PREVIEW = 240
-const STARTUP_TIMEOUT_MS = Math.max(5000, parseInt(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS ?? '15000', 10) || 15000)
+const STARTUP_TIMEOUT_MS = Math.max(5000, parseInt(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS ?? '30000', 10) || 30000)
 const REQUEST_TIMEOUT_MS = Math.max(30000, parseInt(process.env.HERMES_TUI_RPC_TIMEOUT_MS ?? '120000', 10) || 120000)
 const WS_CONNECTING = 0
 const WS_OPEN = 1
@@ -47,8 +47,11 @@ const resolveSidecarUrl = () => {
   return raw ? raw : null
 }
 
-const resolvePython = (root: string) => {
-  const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
+export const resolvePython = (root: string) => {
+  const configured =
+    process.env.HERMES_TUI_GATEWAY_PYTHON?.trim() ||
+    process.env.HERMES_PYTHON?.trim() ||
+    process.env.PYTHON?.trim()
 
   if (configured) {
     return configured

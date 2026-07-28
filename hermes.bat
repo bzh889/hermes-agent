@@ -15,7 +15,9 @@ set "MTK_CA=%USERPROFILE%\.claude\skills\references\mtk-ca.crt"
 set "SSL_CERT_FILE=%MTK_CA%"
 set "REQUESTS_CA_BUNDLE=%MTK_CA%"
 set "NODE_EXTRA_CA_CERTS=%MTK_CA%"
-set "PYEXE=%~dp0venv\Scripts\python.exe"
+set "HERMES_GIT_BASH_PATH=%ProgramFiles%\Git\usr\bin\bash.exe"
+set "PYEXE=%~dp0.venv\Scripts\python.exe"
+if not exist "%PYEXE%" set "PYEXE=%~dp0venv\Scripts\python.exe"
 
 if not exist "%PYEXE%" (
     echo [!] venv not found at "%PYEXE%" - rebuild it. See setup-hermes-mtk.sh / README.
@@ -24,6 +26,7 @@ if not exist "%PYEXE%" (
 )
 
 REM Explicit args (invoked from a terminal): run in place.
+if /I "%~1"=="--tui" if "%~2"=="" goto :tui
 if not "%~1"=="" (
     "%PYEXE%" -m hermes_cli.main %*
     exit /b
@@ -38,6 +41,25 @@ if %errorlevel%==0 (
     wt.exe -d "%~dp0." cmd /k "set HERMES_WT=1 & hermes.bat"
     exit /b
 )
+goto :chat
+
+:tui
+set "NODE_BIN=%USERPROFILE%\.cchelper\nodejs\node.exe"
+set "TUI_ENTRY=%~dp0ui-tui\dist\entry.js"
+if not exist "%NODE_BIN%" goto :tui_fallback
+if not exist "%TUI_ENTRY%" goto :tui_fallback
+set "HERMES_PYTHON=%PYEXE%"
+set "HERMES_TUI_GATEWAY_PYTHON=%PYEXE%"
+set "HERMES_PYTHON_SRC_ROOT=%~dp0"
+set "HERMES_CWD=%~dp0"
+set "VIRTUAL_ENV=%~dp0.venv"
+set "NODE_ENV=production"
+"%NODE_BIN%" --expose-gc "%TUI_ENTRY%"
+exit /b %errorlevel%
+
+:tui_fallback
+"%PYEXE%" -m hermes_cli.main --tui
+exit /b %errorlevel%
 
 :chat
 "%PYEXE%" -m hermes_cli.main chat

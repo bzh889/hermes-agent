@@ -18,6 +18,7 @@ from gateway.status import (
 
 
 ACCEPT = [
+    "python.exe -m hermes_cli.venv_entry gateway run",
     "pythonw.exe -m hermes_cli.main gateway run",
     r"C:\Users\me\hermes\venv\Scripts\pythonw.exe -m hermes_cli.main gateway run",
     "python -m hermes_cli.main --profile work gateway run",

@@ -402,7 +402,28 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     }
 
 
-def _find_installed_skill_dir_by_name(skill_dir_name: str) -> Optional[Path]:
+def _index_installed_skill_dirs_by_name() -> Dict[str, List[Path]]:
+    """Index locally managed installed skills by directory name once."""
+    index: Dict[str, List[Path]] = {}
+    if not SKILLS_DIR.exists():
+        return index
+    skills_root = SKILLS_DIR.resolve()
+    for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+        if is_excluded_skill_path(skill_md):
+            continue
+        candidate = skill_md.parent
+        try:
+            candidate.resolve().relative_to(skills_root)
+        except (OSError, ValueError):
+            continue
+        index.setdefault(candidate.name, []).append(candidate)
+    return index
+
+
+def _find_installed_skill_dir_by_name(
+    skill_dir_name: str,
+    installed_index: Optional[Dict[str, List[Path]]] = None,
+) -> Optional[Path]:
     """Locate an installed skill directory by its directory name.
 
     Used only as a fallback when the repo-derived install path doesn't exist in
@@ -412,21 +433,14 @@ def _find_installed_skill_dir_by_name(skill_dir_name: str) -> Optional[Path]:
     would write provenance onto the wrong skill. The caller still verifies a
     byte-identical content hash before recording anything.
     """
-    if not skill_dir_name or not SKILLS_DIR.exists():
+    if not skill_dir_name:
         return None
-    matches: List[Path] = []
-    for skill_md in SKILLS_DIR.rglob("SKILL.md"):
-        if is_excluded_skill_path(skill_md):
-            continue
-        candidate = skill_md.parent
-        if candidate.name != skill_dir_name:
-            continue
-        # Never reach outside the skills tree (symlinked/external dirs).
-        try:
-            candidate.resolve().relative_to(SKILLS_DIR.resolve())
-        except (OSError, ValueError):
-            continue
-        matches.append(candidate)
+    index = (
+        installed_index
+        if installed_index is not None
+        else _index_installed_skill_dirs_by_name()
+    )
+    matches = index.get(skill_dir_name, [])
     if len(matches) != 1:
         return None
     return matches[0]
@@ -459,6 +473,7 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
 
     backfilled: List[str] = []
     changed = False
+    installed_by_name: Optional[Dict[str, List[Path]]] = None
     for skill_md in sorted(optional_dir.rglob("SKILL.md")):
         if is_excluded_skill_path(skill_md):
             continue
@@ -478,7 +493,9 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
             # silently skips them forever. Fall back to a unique
             # same-directory-name match anywhere in the tree, then still
             # require a byte-identical hash below before claiming provenance.
-            dest = _find_installed_skill_dir_by_name(src.name)
+            if installed_by_name is None:
+                installed_by_name = _index_installed_skill_dirs_by_name()
+            dest = _find_installed_skill_dir_by_name(src.name, installed_by_name)
             if dest is None:
                 continue
             try:

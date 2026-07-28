@@ -97,7 +97,22 @@ const { FakeWebSocket } = vi.hoisted(() => {
 
 vi.mock('undici', () => ({ WebSocket: FakeWebSocket }))
 
-import { GatewayClient } from '../gatewayClient.js'
+import { GatewayClient, resolvePython } from '../gatewayClient.js'
+
+it('prefers the fast TUI gateway interpreter when provided', () => {
+  const previous = process.env.HERMES_TUI_GATEWAY_PYTHON
+  process.env.HERMES_TUI_GATEWAY_PYTHON = 'C:\\Python312\\python.exe'
+
+  try {
+    expect(resolvePython('C:\\repo')).toBe('C:\\Python312\\python.exe')
+  } finally {
+    if (previous === undefined) {
+      delete process.env.HERMES_TUI_GATEWAY_PYTHON
+    } else {
+      process.env.HERMES_TUI_GATEWAY_PYTHON = previous
+    }
+  }
+})
 
 describe('GatewayClient websocket attach mode', () => {
   const originalWebSocket = globalThis.WebSocket

@@ -12,7 +12,8 @@ set "MTK_CA=%USERPROFILE%\.claude\skills\references\mtk-ca.crt"
 set "SSL_CERT_FILE=%MTK_CA%"
 set "REQUESTS_CA_BUNDLE=%MTK_CA%"
 set "NODE_EXTRA_CA_CERTS=%MTK_CA%"
-set "PYEXE=%~dp0venv\Scripts\python.exe"
+set "PYEXE=%~dp0.venv\Scripts\python.exe"
+if not exist "%PYEXE%" set "PYEXE=%~dp0venv\Scripts\python.exe"
 
 if not exist "%PYEXE%" (
     echo [!] venv not found at "%PYEXE%" - rebuild it. See setup-hermes-mtk.sh / README.

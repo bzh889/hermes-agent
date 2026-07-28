@@ -752,6 +752,27 @@ def _prepend_pythonpath(env_overlay: dict[str, str], entries: list[str]) -> None
     env_overlay["PYTHONPATH"] = os.pathsep.join(clean_entries)
 
 
+def _resolve_gateway_python(venv_python: str) -> tuple[str, Path, list[str]]:
+    venv_dir = Path(venv_python).parent.parent
+    try:
+        lines = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return venv_python, venv_dir, []
+
+    base_home = ""
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "home":
+            base_home = value.strip()
+            break
+
+    base_python = Path(base_home) / "python.exe"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    if base_python.is_file() and site_packages.is_dir():
+        return str(base_python), venv_dir, [str(site_packages)]
+    return venv_python, venv_dir, []
+
+
 def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
     """Build (argv, working_dir, env_overlay) for the gateway subprocess.
 
@@ -767,15 +788,14 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
         get_python_path,
     )
 
-    python_exe, venv_dir, extra_pythonpath = _resolve_detached_python(
-        _preserve_hermes_home_path(get_python_path())
-    )
+    venv_python = _preserve_hermes_home_path(get_python_path())
+    python_exe, venv_dir, extra_pythonpath = _resolve_gateway_python(venv_python)
     project_root = _preserve_hermes_home_path(PROJECT_ROOT)
     working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
     hermes_home = str(Path(get_hermes_home()))
     profile_arg = _profile_arg(hermes_home)
 
-    argv = [python_exe, "-m", "hermes_cli.main"]
+    argv = [python_exe, "-m", "hermes_cli.venv_entry"]
     if profile_arg:
         argv.extend(profile_arg.split())
     argv.extend(["gateway", "run"])
@@ -785,6 +805,8 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
         "PYTHONIOENCODING": "utf-8",
         "HERMES_GATEWAY_DETACHED": "1",
         "VIRTUAL_ENV": _preserve_hermes_home_path(venv_dir),
+        "HERMES_VENV_PYTHON": venv_python,
+        "HERMES_VENV_PREFIX": _preserve_hermes_home_path(venv_dir),
     }
     _prepend_pythonpath(
         env_overlay,
@@ -1141,13 +1163,13 @@ def _wait_for_gateway_ready(timeout_s: float = 6.0, interval_s: float = 0.4) -> 
     Returns the list of PIDs found. Empty list means nothing came up in
     time — the caller should surface that to the user as a failed start.
     """
-    from hermes_cli.gateway import find_gateway_pids
+    from gateway.status import get_running_pid
 
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        pids = list(find_gateway_pids())
-        if pids:
-            return pids
+        pid = get_running_pid()
+        if pid is not None:
+            return [pid]
         time.sleep(interval_s)
     return []
 
@@ -1448,34 +1470,20 @@ def status(deep: bool = False) -> None:
 def start() -> None:
     """Start the gateway using the canonical detached Windows launch path."""
     _assert_windows()
-    running_pids = _gateway_pids()
+    from gateway.status import get_running_pid
+
+    running_pid = get_running_pid()
+    running_pids = [running_pid] if running_pid is not None else []
+    if not running_pids:
+        # Scheduled Task / Startup entries only provide login persistence.
+        # Manual lifecycle commands use the direct detached path.
+        pid = _spawn_detached()
+        _report_gateway_start(f"direct spawn (PID {pid})")
+        return
     if running_pids:
         print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
         return
 
-    task_installed = is_task_registered()
-    startup_installed = is_startup_entry_installed()
-
-    if not task_installed and not startup_installed:
-        from hermes_cli.setup import prompt_yes_no
-
-        print("✗ Gateway service is not installed")
-        if not prompt_yes_no("  Install it now so the gateway starts on login?", True):
-            print("  Run: hermes gateway install")
-            return
-        install(force=False)
-        task_installed = is_task_registered()
-        startup_installed = is_startup_entry_installed()
-        if not task_installed and not startup_installed:
-            print("⚠ Gateway install did not complete in this process.")
-            print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
-            return
-
-    # Manual starts use the same console-less direct spawn path as restart()
-    # and install --start-now. Scheduled Task / Startup entries are only login
-    # persistence mechanisms.
-    pid = _spawn_detached()
-    _report_gateway_start(f"direct spawn (PID {pid})")
 
 
 def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:
@@ -1557,9 +1565,9 @@ def _force_terminate_known_gateway_pids(pids: list[int]) -> int:
 
 def _collect_gateway_stop_pids(primary_pid: int | None = None) -> list[int]:
     """Collect gateway PIDs for the active profile, preserving primary first."""
-    pids: list[int] = []
     if primary_pid is not None and primary_pid > 0:
-        pids.append(primary_pid)
+        return [primary_pid]
+    pids: list[int] = []
     try:
         for pid in _gateway_pids():
             if pid > 0 and pid not in pids:
@@ -1593,7 +1601,7 @@ def stop() -> None:
         drained = _drain_gateway_pid(pid, _windows_stop_drain_timeout())
 
     stopped_any = drained
-    if is_task_registered():
+    if not drained and is_task_registered():
         code, _out, err = _exec_schtasks(["/End", "/TN", get_task_name()])
         # schtasks returns nonzero when the task isn't currently running — don't treat that as an error.
         if code == 0:
@@ -1604,7 +1612,6 @@ def stop() -> None:
     # Phase 3: hard-kill any still-known gateway processes. Avoid the generic
     # process sweep here: Windows direct-spawn starts are profile-scoped, and a
     # stop command must be bounded even if the scanner or shutdown path is wedged.
-    stop_pids.extend(pid for pid in _collect_gateway_stop_pids() if pid not in stop_pids)
     killed = _force_terminate_known_gateway_pids(stop_pids)
     if killed:
         stopped_any = True
@@ -1631,10 +1638,10 @@ def _wait_for_gateway_absent(timeout_s: float = 30.0, interval_s: float = 0.5) -
 
     deadline = time.monotonic() + max(timeout_s, interval_s)
     while time.monotonic() < deadline:
-        if get_running_pid() is None and not _gateway_pids():
+        if get_running_pid() is None:
             return True
         time.sleep(interval_s)
-    return get_running_pid() is None and not _gateway_pids()
+    return get_running_pid() is None
 
 
 def restart() -> None:

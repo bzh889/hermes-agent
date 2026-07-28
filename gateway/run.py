@@ -8092,13 +8092,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _plugin_allow_all_vars: tuple = ()
         try:
             from gateway.platform_registry import platform_registry
+            _configured_platforms = {
+                platform.value for platform in self.config.platforms
+            }
+            _plugin_entries = platform_registry.relevant_entries(
+                _configured_platforms,
+                os.environ,
+            )
             _plugin_allowed_vars = tuple(
-                e.allowed_users_env for e in platform_registry.plugin_entries()
-                if e.allowed_users_env
+                e.allowed_users_env for e in _plugin_entries
+                if e.source == "plugin" and e.allowed_users_env
             )
             _plugin_allow_all_vars = tuple(
-                e.allow_all_env for e in platform_registry.plugin_entries()
-                if e.allow_all_env
+                e.allow_all_env for e in _plugin_entries
+                if e.source == "plugin" and e.allow_all_env
             )
         except Exception:
             pass
@@ -24494,10 +24501,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             )
             return False
 
-    # Sync bundled skills on gateway start (fast -- skips unchanged)
+    # Seed bundled skills once per checkout revision.
     try:
-        from tools.skills_sync import sync_skills
-        sync_skills(quiet=True)
+        from hermes_cli.main import _sync_bundled_skills_for_startup
+        _sync_bundled_skills_for_startup()
     except Exception:
         pass
 

@@ -78,10 +78,8 @@ def test_exec_schtasks_decodes_with_replace_errors(monkeypatch):
     assert captured["text"] is True
 
 
-def test_build_gateway_argv_keeps_venv_console_python_for_uv_venv(monkeypatch, tmp_path):
-    """No pythonw / base-interpreter detour: the venv console python.exe is
-    launched hidden (CREATE_NO_WINDOW) so descendants inherit its hidden
-    console instead of flashing their own (#54220/#56747)."""
+def test_build_gateway_argv_uses_base_python_with_full_venv_entry(monkeypatch, tmp_path):
+    """Avoid the slow venv shim without skipping canonical CLI initialization."""
 
     project = tmp_path / "project"
     scripts = project / "venv" / "Scripts"
@@ -95,8 +93,8 @@ def test_build_gateway_argv_keeps_venv_console_python_for_uv_venv(monkeypatch, t
 
     venv_python = scripts / "python.exe"
     venv_pythonw = scripts / "pythonw.exe"
-    base_pythonw = base / "pythonw.exe"
-    for exe in (venv_python, venv_pythonw, base_pythonw):
+    base_python = base / "python.exe"
+    for exe in (venv_python, venv_pythonw, base_python):
         exe.write_text("", encoding="utf-8")
     (project / "venv" / "pyvenv.cfg").write_text(
         f"home = {base}\nimplementation = CPython\nuv = 0.11.14\nversion_info = 3.11.15\n",
@@ -113,10 +111,20 @@ def test_build_gateway_argv_keeps_venv_console_python_for_uv_venv(monkeypatch, t
 
     argv, cwd, env_overlay = gateway_windows._build_gateway_argv()
 
-    assert argv[:3] == [str(venv_python), "-m", "hermes_cli.main"]
+    assert argv == [
+        str(base_python),
+        "-m",
+        "hermes_cli.venv_entry",
+        "gateway",
+        "run",
+    ]
     assert cwd == str(hermes_home.resolve())
     assert env_overlay["VIRTUAL_ENV"] == str(project / "venv")
-    assert str(project) in env_overlay["PYTHONPATH"].split(gateway_windows.os.pathsep)
+    assert env_overlay["HERMES_VENV_PYTHON"] == str(venv_python)
+    assert env_overlay["HERMES_VENV_PREFIX"] == str(project / "venv")
+    pythonpath = env_overlay["PYTHONPATH"].split(gateway_windows.os.pathsep)
+    assert str(project) in pythonpath
+    assert str(site_packages) in pythonpath
 
 
 class TestStableWindowsGatewayWorkingDir:
@@ -560,6 +568,7 @@ def test_start_noops_when_gateway_already_running(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(gateway_windows, "_prompt_install_choices", lambda *args, **kwargs: (False, True))
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 27128)
     monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [27128])
     monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: calls.append("task_check") or True)
     monkeypatch.setattr(gateway_windows, "_exec_schtasks", lambda args: calls.append(("schtasks", tuple(args))) or (0, "", ""))
@@ -571,6 +580,63 @@ def test_start_noops_when_gateway_already_running(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "already running" in out
     assert "27128" in out
+
+
+def test_start_does_not_query_login_persistence(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr(
+        gateway_windows,
+        "is_task_registered",
+        lambda: pytest.fail("manual start must not query Scheduled Tasks"),
+    )
+    monkeypatch.setattr(
+        gateway_windows,
+        "is_startup_entry_installed",
+        lambda: pytest.fail("manual start must not query Startup entries"),
+    )
+    monkeypatch.setattr(
+        gateway_windows,
+        "_spawn_detached",
+        lambda: calls.append("spawn") or 27128,
+    )
+    monkeypatch.setattr(gateway_windows, "_report_gateway_start", lambda _via: None)
+
+    gateway_windows.start()
+
+    assert calls == ["spawn"]
+
+
+def test_wait_for_gateway_ready_uses_authoritative_pid(monkeypatch):
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 27128)
+    monkeypatch.setattr(
+        "hermes_cli.gateway.find_gateway_pids",
+        lambda: pytest.fail("ready check must not scan all processes"),
+    )
+
+    assert gateway_windows._wait_for_gateway_ready(timeout_s=0.1) == [27128]
+
+
+def test_windows_restart_dispatch_does_not_probe_scheduled_task_install():
+    source = (Path(gateway_windows.__file__)).with_name("gateway.py").read_text(
+        encoding="utf-8"
+    )
+    windows_restart = source[source.index("# Prefer the Windows-specific restart path") :]
+    windows_restart = windows_restart[: windows_restart.index("if not service_available:")]
+
+    assert "gateway_windows.is_installed()" not in windows_restart
+    assert "gateway_windows.restart()" in windows_restart
+
+
+def test_collect_stop_pids_does_not_scan_when_primary_pid_is_known(monkeypatch):
+    monkeypatch.setattr(
+        gateway_windows,
+        "_gateway_pids",
+        lambda: pytest.fail("known PID must not trigger a full process scan"),
+    )
+
+    assert gateway_windows._collect_gateway_stop_pids(27128) == [27128]
 
 
 def test_install_startup_fallback_does_not_spawn_when_gateway_already_running(monkeypatch, tmp_path, capsys):

@@ -1,6 +1,19 @@
 import os
 import sys
 
+_venv_python = os.environ.get("HERMES_VENV_PYTHON", "").strip()
+_venv_prefix = os.environ.get("HERMES_VENV_PREFIX", "").strip()
+if (
+    os.name == "nt"
+    and _venv_python
+    and _venv_prefix
+    and os.path.isfile(_venv_python)
+    and os.path.isdir(_venv_prefix)
+):
+    sys.executable = _venv_python
+    sys.prefix = _venv_prefix
+    sys.exec_prefix = _venv_prefix
+
 # Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
 # from shadowing Hermes's own top-level modules.  ``hermes_bootstrap`` lives at
 # the repo root next to this package, so importing it is safe before the guard

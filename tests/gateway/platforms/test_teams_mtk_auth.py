@@ -14,6 +14,26 @@ import pytest
 from gateway.platforms.teams_mtk import _TeamsAuth
 
 
+def test_windows_tls_adapter_uses_configured_ca_bundle(tmp_path, monkeypatch):
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter_class = getattr(teams_mtk, "_WindowsTLS12HTTPAdapter", None)
+    if adapter_class is None:
+        pytest.skip("Teams SDK dependencies are not installed")
+
+    bundle = tmp_path / "combined-ca.pem"
+    bundle.write_text("test bundle", encoding="utf-8")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+    context = MagicMock()
+
+    with patch.object(
+        teams_mtk.ssl, "create_default_context", return_value=context
+    ) as create_context:
+        adapter_class()
+
+    create_context.assert_called_once_with(cafile=str(bundle))
+
+
 def _jwt_with_claims(**claims) -> str:
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
     payload = base64.urlsafe_b64encode(

@@ -181,7 +181,9 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     # that are not loaded.
     try:
         from gateway.platform_registry import platform_registry
-        for entry in platform_registry.plugin_entries():
+        for entry in platform_registry.relevant_entries(
+            adapter_platform_names, environ={}
+        ):
             if (
                 entry.name not in _SKIP_SESSION_DISCOVERY
                 and entry.name not in platforms

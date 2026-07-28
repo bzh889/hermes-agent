@@ -158,7 +158,7 @@ def test_rebuild_when_tui_source_newer_than_bundle(tmp_path: Path, main_mod) -> 
     assert main_mod._tui_need_rebuild(tmp_path) is True
 
 
-def test_make_tui_argv_skips_build_only_on_termux_when_fresh(
+def test_make_tui_argv_skips_build_when_bundle_is_fresh(
     tmp_path: Path, main_mod, monkeypatch
 ) -> None:
     _touch_tui_entry(tmp_path)
@@ -309,7 +309,7 @@ def test_make_tui_argv_npm_install_forces_include_dev(
     assert "--include=dev" in install_cmd
 
 
-def test_make_tui_argv_keeps_desktop_always_build_behaviour(
+def test_make_tui_argv_skips_desktop_build_when_bundle_is_fresh(
     tmp_path: Path, main_mod, monkeypatch
 ) -> None:
     _touch_tui_entry(tmp_path)
@@ -318,19 +318,15 @@ def test_make_tui_argv_keeps_desktop_always_build_behaviour(
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
     monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
-    calls = []
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("fresh desktop TUI launch must not rebuild")
 
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(main_mod.subprocess, "run", fail_run)
 
-    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    argv, cwd = main_mod._make_tui_argv(tmp_path, tui_dev=False)
 
-    main_mod._make_tui_argv(tmp_path, tui_dev=False)
-
-    assert calls
-    assert calls[0][0][0] == ["/bin/npm", "run", "build"]
-    _assert_utf8_replace_capture(calls[0][1])
+    assert argv == ["/bin/node", "--expose-gc", str(tmp_path / "dist" / "entry.js")]
+    assert cwd == tmp_path
 
 
 def test_make_tui_argv_decodes_dev_prebuild_with_utf8_replace(

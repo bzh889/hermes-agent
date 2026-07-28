@@ -181,10 +181,17 @@ class PlatformRegistry:
         # actually asks for that platform (gateway start, cron delivery,
         # `hermes setup`/`gateway status`, send_message).
         self._deferred: dict[str, Callable[[], None]] = {}
+        self._deferred_required_env: dict[str, tuple[str, ...]] = {}
 
     # -- deferred loading ----------------------------------------------------
 
-    def register_deferred(self, name: str, loader: Callable[[], None]) -> None:
+    def register_deferred(
+        self,
+        name: str,
+        loader: Callable[[], None],
+        *,
+        required_env: list[str] | tuple[str, ...] = (),
+    ) -> None:
         """Register a lazy loader for a platform that hasn't been imported yet.
 
         *loader* is a zero-arg callable that imports the owning plugin module,
@@ -198,10 +205,12 @@ class PlatformRegistry:
             # Already concretely registered; no need to defer.
             return
         self._deferred[name] = loader
+        self._deferred_required_env[name] = tuple(required_env)
 
     def _resolve(self, name: str) -> None:
         """Run the deferred loader for *name* if one is pending."""
         loader = self._deferred.pop(name, None)
+        self._deferred_required_env.pop(name, None)
         if loader is None:
             return
         try:
@@ -236,6 +245,7 @@ class PlatformRegistry:
         """
         # A concrete registration supersedes any pending deferred loader.
         self._deferred.pop(entry.name, None)
+        self._deferred_required_env.pop(entry.name, None)
         if entry.name in self._entries:
             prev = self._entries[entry.name]
             logger.info(
@@ -250,6 +260,7 @@ class PlatformRegistry:
     def unregister(self, name: str) -> bool:
         """Remove a platform entry.  Returns True if it existed."""
         self._deferred.pop(name, None)
+        self._deferred_required_env.pop(name, None)
         return self._entries.pop(name, None) is not None
 
     def get(self, name: str) -> Optional[PlatformEntry]:
@@ -267,6 +278,20 @@ class PlatformRegistry:
         """Return only plugin-registered platform entries."""
         self._resolve_all()
         return [e for e in self._entries.values() if e.source == "plugin"]
+
+    def relevant_entries(
+        self,
+        configured_names: set[str] | None = None,
+        environ: Any = None,
+    ) -> list[PlatformEntry]:
+        """Return loaded entries after resolving only configured platforms."""
+        configured = configured_names or set()
+        env = environ or {}
+        for name in list(self._deferred):
+            required_env = self._deferred_required_env.get(name, ())
+            if name in configured or any(env.get(var) for var in required_env):
+                self._resolve(name)
+        return list(self._entries.values())
 
     def is_registered(self, name: str) -> bool:
         # A deferred (not-yet-imported) platform still counts as registered --

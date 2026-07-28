@@ -136,13 +136,18 @@ class TestBuildChannelDirectoryOffload:
         with patch("gateway.channel_directory._build_from_sessions", side_effect=fake_build_from_sessions), \
              patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
              patch(
-                 "gateway.platform_registry.platform_registry.plugin_entries",
+                 "gateway.platform_registry.platform_registry.relevant_entries",
                  return_value=[plugin_entry],
+             ) as relevant_entries, \
+             patch(
+                 "gateway.platform_registry.platform_registry.plugin_entries",
+                 side_effect=AssertionError("must not resolve every platform plugin"),
              ):
             asyncio.run(build_channel_directory({"irc": object()}))
 
         assert [name for name, _ in calls] == ["irc"]
         assert calls[0][1] != loop_thread
+        relevant_entries.assert_called_once_with({"irc"}, environ={})
 
     def test_slack_session_merge_runs_off_event_loop_thread(self):
         loop_thread = threading.get_ident()

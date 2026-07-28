@@ -164,6 +164,76 @@ export function getVenvSitePackagesEntries(
   return entries
 }
 
+export function findPreferredVenvRoot(
+  root: string,
+  opts: {
+    isWindows?: boolean
+    fileExists?: (p: string) => boolean
+  } = {}
+): string | null {
+  const isWindows = opts.isWindows ?? process.platform === 'win32'
+  const fileExists =
+    opts.fileExists ??
+    ((p: string) => {
+      try {
+        return fs.statSync(p).isFile()
+      } catch {
+        return false
+      }
+    })
+  const pythonPath = isWindows ? path.join('Scripts', 'python.exe') : path.join('bin', 'python')
+
+  for (const name of ['.venv', 'venv']) {
+    const candidate = path.join(root, name)
+
+    if (fileExists(path.join(candidate, pythonPath))) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+export function findVenvBasePython(
+  venvRoot: string,
+  opts: {
+    isWindows?: boolean
+    fileExists?: (p: string) => boolean
+    readFile?: (p: string) => string | undefined
+  } = {}
+): string | null {
+  const isWindows = opts.isWindows ?? process.platform === 'win32'
+  const fileExists =
+    opts.fileExists ??
+    ((p: string) => {
+      try {
+        return fs.statSync(p).isFile()
+      } catch {
+        return false
+      }
+    })
+  const readFile =
+    opts.readFile ??
+    ((p: string) => {
+      try {
+        return fs.readFileSync(p, 'utf8')
+      } catch {
+        return undefined
+      }
+    })
+  const cfg = readFile(path.join(venvRoot, 'pyvenv.cfg'))
+
+  if (!cfg) {
+    return null
+  }
+
+  const executable = cfg.match(/^executable\s*=\s*(.+)$/im)?.[1]?.trim()
+  const home = cfg.match(/^home\s*=\s*(.+)$/im)?.[1]?.trim()
+  const candidate = executable || (home ? path.join(home, isWindows ? 'python.exe' : 'python') : null)
+
+  return candidate && fileExists(candidate) ? candidate : null
+}
+
 export interface ResolveVenvHermesCommandDeps {
   isWindows: boolean
   isCommandScript: (command: string) => boolean

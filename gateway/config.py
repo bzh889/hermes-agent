@@ -1509,8 +1509,8 @@ def load_gateway_config() -> GatewayConfig:
 
             if platforms_data:
                 gw_data["platforms"] = platforms_data
-            # Iterate built-in platforms plus any registered plugin platforms
-            # so plugin authors get the same shared-key bridging (#24836).
+            # Discover lightweight plugin manifests, then materialize only
+            # platforms that are configured in YAML or the environment.
             try:
                 from hermes_cli.plugins import discover_plugins
                 discover_plugins()  # idempotent
@@ -1519,15 +1519,26 @@ def load_gateway_config() -> GatewayConfig:
                 logger.debug("plugin discovery skipped: %s", e)
                 _pr = None
 
+            _configured_platform_names = {
+                str(name) for name in platforms_data
+            }
+            for _name, _value in yaml_cfg.items():
+                if not isinstance(_value, dict):
+                    continue
+                try:
+                    Platform(_name)
+                except (ValueError, AttributeError):
+                    continue
+                _configured_platform_names.add(_name)
+
             _shared_loop_targets: list = list(Platform)
-            if _pr is not None:
-                for _entry in _pr.plugin_entries():
-                    try:
-                        _plat = Platform(_entry.name)
-                    except (ValueError, KeyError):
-                        continue
-                    if _plat not in _shared_loop_targets:
-                        _shared_loop_targets.append(_plat)
+            for _name in _configured_platform_names:
+                try:
+                    _plat = Platform(_name)
+                except (ValueError, KeyError):
+                    continue
+                if _plat not in _shared_loop_targets:
+                    _shared_loop_targets.append(_plat)
 
             for plat in _shared_loop_targets:
                 if plat == Platform.LOCAL:
@@ -1676,7 +1687,10 @@ def load_gateway_config() -> GatewayConfig:
             # blocks (below; no-op when a hook already set their env var) →
             # ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
             if _pr is not None:
-                for entry in _pr.all_entries():
+                for entry in _pr.relevant_entries(
+                    _configured_platform_names,
+                    os.environ,
+                ):
                     if entry.apply_yaml_config_fn is None:
                         continue
                     platform_cfg = yaml_cfg.get(entry.name)
@@ -2569,7 +2583,13 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
-        for entry in platform_registry.plugin_entries():
+        configured_names = {platform.value for platform in config.platforms}
+        for entry in platform_registry.relevant_entries(
+            configured_names,
+            os.environ,
+        ):
+            if entry.source != "plugin":
+                continue
             try:
                 platform = Platform(entry.name)
             except Exception as e:

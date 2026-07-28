@@ -186,6 +186,8 @@ import { hiddenWindowsChildOptions } from './windows-child-options'
 import {
   buildPathExtCandidates,
   chooseUpdaterArgs,
+  findPreferredVenvRoot,
+  findVenvBasePython,
   getVenvSitePackagesEntries,
   resolveVenvHermesCommand
 } from './windows-hermes-path'
@@ -3633,20 +3635,27 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     return null
   }
 
-  const venvRoot = path.join(root, 'venv')
-  const venvPython = getVenvPython(venvRoot)
-  const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python
+  const venvRoot = findPreferredVenvRoot(root, { isWindows: IS_WINDOWS, fileExists })
+  const basePython = IS_WINDOWS && venvRoot ? findVenvBasePython(venvRoot, { isWindows: true, fileExists }) : null
+  const venvPython = venvRoot ? getVenvPython(venvRoot) : null
+  const useFastWindowsEntry = Boolean(basePython && venvPython)
+  const env = buildDesktopBackendEnv({
+    hermesHome: HERMES_HOME,
+    pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
+    venvRoot
+  })
+
+  if (useFastWindowsEntry) {
+    env.HERMES_VENV_PYTHON = venvPython
+    env.HERMES_VENV_PREFIX = venvRoot
+  }
 
   return {
     kind: 'python',
     label,
-    command,
-    args: ['-m', 'hermes_cli.main', ...backendArgs],
-    env: buildDesktopBackendEnv({
-      hermesHome: HERMES_HOME,
-      pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
-      venvRoot
-    }),
+    command: basePython || python,
+    args: ['-m', useFastWindowsEntry ? 'hermes_cli.desktop_entry' : 'hermes_cli.main', ...backendArgs],
+    env,
     root,
     bootstrap: Boolean(options.bootstrap),
     shell: false

@@ -89,6 +89,19 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
 # ── TestPluginDiscovery ────────────────────────────────────────────────────
 
 
+def test_platform_manifest_can_declare_multiple_registry_names():
+    manifest = PluginManifest(
+        name="wecom-platform",
+        kind="platform",
+        platforms=["wecom", "wecom_callback"],
+    )
+
+    assert PluginManager()._platform_names_from_manifest(manifest) == (
+        "wecom",
+        "wecom_callback",
+    )
+
+
 class TestPluginDiscovery:
     """Tests for plugin discovery from directories and entry points."""
 

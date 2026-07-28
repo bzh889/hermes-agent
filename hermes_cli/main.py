@@ -906,20 +906,46 @@ def _mark_termux_bundled_skills_synced() -> None:
         pass
 
 
-def _sync_bundled_skills_for_startup() -> bool:
-    """Sync bundled skills, but skip unchanged Termux checkouts cheaply.
+def _bundled_skills_fingerprint() -> str:
+    return _termux_bundled_skills_fingerprint()
 
-    Hashing every bundled skill is safe but expensive on older Android
-    storage. The git/ref stamp keeps post-update correctness: a changed
+
+def _bundled_skills_sync_needed() -> bool:
+    if (
+        os.environ.get("HERMES_FORCE_SKILLS_SYNC") == "1"
+        or os.environ.get("HERMES_TERMUX_FORCE_SKILLS_SYNC") == "1"
+    ):
+        return True
+    try:
+        stamp = _termux_bundled_skills_stamp_path()
+        return stamp.read_text(encoding="utf-8").strip() != _bundled_skills_fingerprint()
+    except OSError:
+        return True
+
+
+def _mark_bundled_skills_synced() -> None:
+    try:
+        stamp = _termux_bundled_skills_stamp_path()
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(_bundled_skills_fingerprint() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _sync_bundled_skills_for_startup() -> bool:
+    """Sync bundled skills once per checkout revision.
+
+    Hashing every bundled and installed skill is expensive on Windows and
+    Termux storage. The git/ref stamp keeps post-update correctness: a changed
     checkout revision forces one real sync, then later starts skip it.
     """
-    if _is_termux_startup_environment() and not _termux_bundled_skills_sync_needed():
+    if not _bundled_skills_sync_needed():
         return False
 
     from tools.skills_sync import sync_skills
 
     sync_skills(quiet=True)
-    _mark_termux_bundled_skills_synced()
+    _mark_bundled_skills_synced()
     return True
 
 
@@ -1950,12 +1976,12 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     #    dependencies into the hot path.
     did_install = False
     termux_startup = _is_termux_startup_environment()
-    termux_need_rebuild = False
-    if termux_startup and not tui_dev:
-        termux_need_rebuild = _tui_need_rebuild(tui_dir)
+    tui_need_rebuild = False
+    if not tui_dev:
+        tui_need_rebuild = _tui_need_rebuild(tui_dir)
 
     skip_install_for_fresh_termux_bundle = (
-        termux_startup and not tui_dev and not termux_need_rebuild
+        termux_startup and not tui_dev and not tui_need_rebuild
     )
     if (
         not skip_install_for_fresh_termux_bundle
@@ -2039,12 +2065,10 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             return [str(tsx), "src/entry.tsx"], tui_dir
         return [npm, "start"], tui_dir
 
-    # Desktop/dev launches retain the historical "always rebuild" behaviour.
-    # Termux cold starts use the freshness check because esbuild startup is
-    # expensive on old mobile CPUs.
-    should_build = True
-    if termux_startup:
-        should_build = did_install or termux_need_rebuild
+    # A production bundle only needs rebuilding after an install or when a
+    # source/config input is newer. Rebuilding unchanged sources on every
+    # Windows launch can delay the first frame by tens of seconds.
+    should_build = did_install or tui_need_rebuild
 
     if should_build:
         npm = _node_bin("npm")
@@ -2194,6 +2218,25 @@ def _apply_tui_python_env(env: dict) -> None:
         python_is_executable = bool(shutil.which(python, path=env.get("PATH")))
     if not python_is_executable:
         env["HERMES_PYTHON"] = sys.executable
+
+    if (
+        sys.platform == "win32"
+        and sys.executable != getattr(sys, "_base_executable", sys.executable)
+        and env.get("HERMES_PYTHON") == sys.executable
+    ):
+        site_packages = Path(sys.prefix) / "Lib" / "site-packages"
+        if site_packages.is_dir():
+            env.setdefault("HERMES_TUI_GATEWAY_PYTHON", sys._base_executable)
+            env["HERMES_VENV_PYTHON"] = sys.executable
+            env["HERMES_VENV_PREFIX"] = sys.prefix
+            pythonpath = [
+                item
+                for item in str(env.get("PYTHONPATH") or "").split(os.pathsep)
+                if item
+            ]
+            if str(site_packages) not in pythonpath:
+                pythonpath.insert(0, str(site_packages))
+            env["PYTHONPATH"] = os.pathsep.join(pythonpath)
 
 
 def _launch_tui(
@@ -2392,9 +2435,7 @@ def _sync_bundled_skills_quietly() -> None:
     empty skills library.
     """
     try:
-        from tools.skills_sync import sync_skills
-
-        sync_skills(quiet=True)
+        _sync_bundled_skills_for_startup()
     except Exception:
         pass
 
@@ -2656,8 +2697,6 @@ def cmd_chat(args):
 
 def cmd_gateway(args):
     """Gateway management commands."""
-    _sync_bundled_skills_quietly()
-
     from hermes_cli.gateway import gateway_command
 
     gateway_command(args)
@@ -5151,7 +5190,8 @@ def _run_npm_install_deterministic(
     run_env = {**os.environ, **(env or {}), "CI": "1"}
 
     lockfile = cwd / "package-lock.json"
-    if lockfile.exists():
+    workspace_scoped = "--workspace" in extra_args
+    if lockfile.exists() and not workspace_scoped:
         ci_cmd = [npm, "ci", "--include=dev", *extra_args]
         ci_result = subprocess.run(
             ci_cmd,
@@ -5167,6 +5207,8 @@ def _run_npm_install_deterministic(
             return ci_result
         # Fall through to `npm install` — lockfile may be out of sync on a
         # WIP fork/branch, or `npm ci` may not be available on very old npm.
+    # `npm ci --workspace ...` still removes the workspace root's complete
+    # node_modules tree. A scoped repair must preserve sibling workspaces.
     install_cmd = [npm, "install", "--no-save", "--include=dev", *extra_args]
     return subprocess.run(
         install_cmd,

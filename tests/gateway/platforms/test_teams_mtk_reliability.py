@@ -464,6 +464,52 @@ async def test_sdk_missing_id_readback_is_correlated_and_off_event_loop():
     assert fetch_threads and fetch_threads[0] != event_loop_thread
 
 
+def test_sdk_http_layer_uses_verified_tls12_on_windows():
+    """The Windows MSG transport must avoid the observed TLS negotiation EOF."""
+    import requests
+    import ssl
+    from types import SimpleNamespace
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    assert teams_mtk._SDKHTTPLayer is not None
+    with patch.object(sys, "platform", "win32"):
+        layer = teams_mtk._SDKHTTPLayer(MagicMock(), verify_ssl=True)
+    try:
+        assert layer._session.trust_env is False
+        https_adapter = layer._session.get_adapter("https://msg.example.test")
+        context = https_adapter.poolmanager.connection_pool_kw.get("ssl_context")
+        assert context is not None
+        assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert context.maximum_version == ssl.TLSVersion.TLSv1_2
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        prepared = requests.Request(
+            "GET", "https://msg.example.test"
+        ).prepare()
+        _, request_pool_kwargs = https_adapter.build_connection_pool_key_attributes(
+            prepared, verify=True, cert=None
+        )
+        assert request_pool_kwargs["ssl_context"] is context
+        connection = SimpleNamespace(
+            cert_reqs="context-owned",
+            ca_certs="context-owned",
+            ca_cert_dir="context-owned",
+            cert_file=None,
+            key_file=None,
+        )
+        https_adapter.cert_verify(
+            connection,
+            "https://msg.example.test",
+            verify=True,
+            cert=None,
+        )
+        assert connection.cert_reqs == "context-owned"
+        assert connection.ca_certs == "context-owned"
+        assert connection.ca_cert_dir == "context-owned"
+    finally:
+        layer._session.close()
+
+
 def test_sdk_fetch_reuses_one_http_transport_across_conversations():
     """Polling must reuse keep-alive instead of repeating flaky TLS handshakes."""
     adapter = _make_adapter()

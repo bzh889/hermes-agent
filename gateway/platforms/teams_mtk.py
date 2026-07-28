@@ -24,11 +24,14 @@ import os
 import re
 import ssl
 import stat
+import sys
 import time
 import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from requests.adapters import HTTPAdapter as _RequestsHTTPAdapter
 
 from gateway.platforms.base import BasePlatformAdapter
 
@@ -927,6 +930,50 @@ class _SDKAuthAdapter:
 
 
 if _SDK_AVAILABLE:
+    class _WindowsTLS12HTTPAdapter(_RequestsHTTPAdapter):
+        """Verified TLS 1.2 transport for Windows Teams MSG endpoints."""
+
+        def __init__(self, *args, **kwargs):
+            ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get(
+                "SSL_CERT_FILE"
+            )
+            if ca_bundle and Path(ca_bundle).is_file():
+                self._ssl_context = ssl.create_default_context(cafile=ca_bundle)
+            else:
+                self._ssl_context = ssl.create_default_context()
+            self._ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self._ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+            super().__init__(*args, **kwargs)
+
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["ssl_context"] = self._ssl_context
+            return super().init_poolmanager(
+                connections, maxsize, block=block, **pool_kwargs
+            )
+
+        def proxy_manager_for(self, proxy, **proxy_kwargs):
+            proxy_kwargs["ssl_context"] = self._ssl_context
+            return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+        def build_connection_pool_key_attributes(self, request, verify, cert=None):
+            host_params, pool_kwargs = super().build_connection_pool_key_attributes(
+                request, verify, cert
+            )
+            if verify is True:
+                # Requests 2.32+ otherwise replaces the adapter's pool context
+                # with its own preloaded context for every verified request.
+                pool_kwargs["ssl_context"] = self._ssl_context
+            return host_params, pool_kwargs
+
+        def cert_verify(self, conn, url, verify, cert):
+            if verify is True and cert is None:
+                # The custom context already enforces CA and hostname checks.
+                # Rewriting these pool attributes makes the affected Windows
+                # MSG endpoint abort the otherwise-valid TLS 1.2 handshake.
+                return
+            return super().cert_verify(conn, url, verify, cert)
+
+
     class _SDKHTTPLayer(_SDKBaseHTTPLayer):
         """SDK transport with gateway-discovered regional MSG routing.
 
@@ -934,6 +981,14 @@ if _SDK_AVAILABLE:
         only that exact trusted prefix at the transport boundary; payload,
         retry, TLS, and authentication behavior remain SDK-owned.
         """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if sys.platform == "win32":
+                # MTK's environment proxy aborts this internal MSG TLS path;
+                # the host is directly reachable with the verified context.
+                self._session.trust_env = False
+                self._session.mount("https://", _WindowsTLS12HTTPAdapter())
 
         def _request(self, method: str, url: str, **kwargs):
             if url == _DEFAULT_MSG_BASE or url.startswith(_DEFAULT_MSG_BASE + "/"):

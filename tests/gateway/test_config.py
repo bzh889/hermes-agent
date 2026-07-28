@@ -94,6 +94,49 @@ class TestHomeChannelRoundtrip:
         assert slack.home_channel.user_id == "U123"
 
 
+def test_load_gateway_config_does_not_materialize_every_platform_plugin(
+    tmp_path, monkeypatch
+):
+    from gateway.platform_registry import platform_registry
+    import hermes_cli.plugins
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "gateway:\n"
+        "  teams_mtk:\n"
+        "    enabled: true\n"
+        "  api_server:\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(hermes_cli.plugins, "discover_plugins", lambda: None)
+
+    eager_calls = []
+
+    monkeypatch.setattr(
+        platform_registry,
+        "plugin_entries",
+        lambda: eager_calls.append("plugin_entries") or [],
+    )
+    monkeypatch.setattr(
+        platform_registry,
+        "all_entries",
+        lambda: eager_calls.append("all_entries") or [],
+    )
+
+    home_token = set_hermes_home_override(str(hermes_home))
+    try:
+        config = load_gateway_config()
+    finally:
+        reset_hermes_home_override(home_token)
+
+    assert config.platforms[Platform.TEAMS_MTK].enabled is True
+    assert config.platforms[Platform.API_SERVER].enabled is True
+    assert eager_calls == []
+
+
 class TestPlatformConfigRoundtrip:
     def test_to_dict_from_dict(self):
         pc = PlatformConfig(

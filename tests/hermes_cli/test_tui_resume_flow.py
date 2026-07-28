@@ -512,6 +512,68 @@ def test_termux_forced_bundled_skill_sync_runs(monkeypatch, tmp_path, main_mod):
     assert calls == [True]
 
 
+def test_windows_skips_bundled_skill_sync_when_checkout_stamp_is_fresh(
+    monkeypatch, tmp_path, main_mod
+):
+    calls = []
+
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    monkeypatch.setattr(main_mod, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(main_mod, "_bundled_skills_fingerprint", lambda: "fp1")
+    main_mod._mark_bundled_skills_synced()
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.skills_sync",
+        types.SimpleNamespace(sync_skills=lambda quiet: calls.append(quiet)),
+    )
+
+    assert main_mod._sync_bundled_skills_for_startup() is False
+    assert calls == []
+
+
+def test_quiet_startup_sync_uses_checkout_guard(monkeypatch, main_mod):
+    guarded_calls = []
+    direct_calls = []
+
+    monkeypatch.setattr(
+        main_mod,
+        "_sync_bundled_skills_for_startup",
+        lambda: guarded_calls.append(True),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.skills_sync",
+        types.SimpleNamespace(sync_skills=lambda quiet: direct_calls.append(quiet)),
+    )
+
+    main_mod._sync_bundled_skills_quietly()
+
+    assert guarded_calls == [True]
+    assert direct_calls == []
+
+
+def test_gateway_management_command_does_not_sync_skills(monkeypatch, main_mod):
+    gateway_calls = []
+    sync_calls = []
+
+    monkeypatch.setattr(
+        main_mod,
+        "_sync_bundled_skills_quietly",
+        lambda: sync_calls.append(True),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.gateway",
+        types.SimpleNamespace(gateway_command=lambda args: gateway_calls.append(args)),
+    )
+    args = object()
+
+    main_mod.cmd_gateway(args)
+
+    assert gateway_calls == [args]
+    assert sync_calls == []
+
+
 def test_read_git_revision_fingerprint_resolves_packed_refs(tmp_path, main_mod):
     repo = tmp_path / "repo"
     git_dir = repo / ".git"
@@ -1671,6 +1733,21 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows venv launcher optimization")
+def test_apply_tui_python_env_exposes_fast_base_python_without_losing_venv(
+    main_mod,
+):
+    env = {}
+
+    main_mod._apply_tui_python_env(env)
+
+    assert env["HERMES_PYTHON"] == sys.executable
+    assert env["HERMES_TUI_GATEWAY_PYTHON"] == sys._base_executable
+    assert env["HERMES_VENV_PYTHON"] == sys.executable
+    assert env["HERMES_VENV_PREFIX"] == sys.prefix
+    assert str(Path(sys.prefix) / "Lib" / "site-packages") in env["PYTHONPATH"]
 
 
 def test_launch_tui_worktree_validates_relative_python_against_final_cwd(

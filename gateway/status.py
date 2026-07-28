@@ -413,6 +413,7 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     joined = " ".join(tokens)
     has_gateway_entry = (
         "hermes_cli.main" in joined
+        or "hermes_cli.venv_entry" in joined
         or "hermes_cli/main.py" in joined
         or any(t.rsplit("/", 1)[-1] in ("hermes", "hermes.exe") for t in tokens)
     )

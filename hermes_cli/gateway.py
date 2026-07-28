@@ -7316,7 +7316,10 @@ def _gateway_command_inner(args):
             # path that can be reaped with the old gateway process.  If the
             # Windows backend raises, intentionally preserve the existing
             # generic failure fallback below.
-            service_configured = gateway_windows.is_installed()
+            # Windows restart always uses the detached lifecycle path, whether
+            # login persistence is installed or not. Avoid a blocking
+            # schtasks query on every manual restart.
+            service_configured = True
             try:
                 gateway_windows.restart()
                 return

@@ -288,6 +288,7 @@ class PluginManifest:
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
+    platforms: List[str] = field(default_factory=list)
     source: str = ""        # "user", "project", or "entrypoint"
     path: Optional[str] = None
     # Plugin kind — see plugins.py module docstring for semantics.
@@ -1640,6 +1641,7 @@ class PluginManager:
                 requires_env=data.get("requires_env", []),
                 provides_tools=data.get("provides_tools", []),
                 provides_hooks=data.get("provides_hooks", []),
+                platforms=data.get("platforms", []),
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
@@ -1704,6 +1706,16 @@ class PluginManager:
             return Path(manifest.path).name
         return name
 
+    def _platform_names_from_manifest(
+        self, manifest: PluginManifest
+    ) -> tuple[str, ...]:
+        names = tuple(
+            name.strip()
+            for name in manifest.platforms
+            if isinstance(name, str) and name.strip()
+        )
+        return names or (self._platform_name_from_manifest(manifest),)
+
     def _register_deferred_platform(self, manifest: PluginManifest) -> None:
         """Register a lazy loader for a bundled platform plugin.
 
@@ -1714,7 +1726,12 @@ class PluginManager:
         hand the registry a loader that runs the normal eager-load path.
         """
         lookup_key = manifest.key or manifest.name
-        platform_name = self._platform_name_from_manifest(manifest)
+        platform_names = self._platform_names_from_manifest(manifest)
+        required_env = tuple(
+            item if isinstance(item, str) else item.get("name", "")
+            for item in manifest.requires_env
+        )
+        required_env = tuple(name for name in required_env if name)
 
         # Record an enabled placeholder for introspection (`hermes plugins
         # list`). The real module load swaps in a fully-populated LoadedPlugin
@@ -1729,10 +1746,15 @@ class PluginManager:
         try:
             from gateway.platform_registry import platform_registry
 
-            platform_registry.register_deferred(platform_name, _loader)
+            for platform_name in platform_names:
+                platform_registry.register_deferred(
+                    platform_name,
+                    _loader,
+                    required_env=required_env,
+                )
             logger.debug(
                 "Registered deferred platform loader: %s (plugin=%s)",
-                platform_name,
+                ", ".join(platform_names),
                 lookup_key,
             )
         except Exception:

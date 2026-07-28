@@ -186,6 +186,58 @@ class TestPlatformRegistry:
         plugin_names = {e.name for e in reg.plugin_entries()}
         assert plugin_names == {"plugged"}
 
+    def test_relevant_entries_resolves_only_configured_deferred_platform(self):
+        reg = PlatformRegistry()
+        loaded = []
+
+        def register_loaded(name):
+            def load():
+                loaded.append(name)
+                entry, _ = self._make_entry(name)
+                reg.register(entry)
+
+            return load
+
+        reg.register_deferred(
+            "wanted",
+            register_loaded("wanted"),
+            required_env=["WANTED_TOKEN"],
+        )
+        reg.register_deferred(
+            "unused",
+            register_loaded("unused"),
+            required_env=["UNUSED_TOKEN"],
+        )
+
+        entries = reg.relevant_entries({"wanted"}, {})
+
+        assert {entry.name for entry in entries} == {"wanted"}
+        assert loaded == ["wanted"]
+        assert reg.is_registered("unused")
+
+    def test_relevant_entries_resolves_env_configured_deferred_platform(self):
+        reg = PlatformRegistry()
+        loaded = []
+
+        def load():
+            loaded.append("env-platform")
+            entry, _ = self._make_entry("env-platform")
+            reg.register(entry)
+
+        reg.register_deferred(
+            "env-platform",
+            load,
+            required_env=["ENV_PLATFORM_TOKEN"],
+        )
+
+        entries = reg.relevant_entries(
+            set(),
+            {"ENV_PLATFORM_TOKEN": "configured"},
+        )
+
+        assert {entry.name for entry in entries} == {"env-platform"}
+        assert loaded == ["env-platform"]
+
     def test_re_register_replaces(self):
         reg = PlatformRegistry()
         entry1, mock1 = self._make_entry("dup")
