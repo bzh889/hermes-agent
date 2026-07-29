@@ -1,10 +1,10 @@
 """Regression tests for active-session TEXT follow-up queueing.
 
 When the agent is actively running, rapid text follow-ups should survive as
-one next-turn pending message instead of clobbering each other. In
-``busy_text_mode=queue`` those active follow-ups first pass through a short
-debounce so bursty multi-message thoughts are merged before the active drain
-hands off the next turn.
+one message instead of clobbering each other. In ``busy_text_mode=queue``
+those follow-ups merge before the active drain hands off the next turn. In
+``busy_text_mode=interrupt``, group-message bursts from one sender merge before
+one redirect while direct messages still dispatch immediately.
 """
 
 from __future__ import annotations
@@ -153,6 +153,62 @@ async def test_debounce_buffers_rapid_text_then_flushes_to_pending():
 
     assert session_key not in adapter._text_debounce
     assert adapter._pending_messages[session_key].text == "part two\npart three"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_group_text_burst_debounces_into_one_busy_dispatch():
+    adapter = _make_adapter()
+    adapter._busy_text_mode = "interrupt"
+    adapter._busy_text_debounce_seconds = 0.05
+    adapter._busy_session_handler = AsyncMock(return_value=True)
+
+    first = _make_event(
+        "part one",
+        chat_type="group",
+        user_id="alice",
+        user_name="Alice",
+        thread_id="topic-1",
+    )
+    second = _make_event(
+        "part two",
+        chat_type="group",
+        user_id="alice",
+        user_name="Alice",
+        thread_id="topic-1",
+    )
+    session_key = build_session_key(first.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(first)
+    await adapter.handle_message(second)
+
+    adapter._busy_session_handler.assert_not_awaited()
+    assert _debounced_event(adapter, session_key).text == "part one\npart two"
+
+    await asyncio.sleep(0.15)
+
+    adapter._busy_session_handler.assert_awaited_once()
+    merged_event, merged_session_key = adapter._busy_session_handler.await_args.args
+    assert merged_session_key == session_key
+    assert merged_event.text == "part one\npart two"
+    assert session_key not in adapter._text_debounce
+    assert session_key not in adapter._pending_messages
+
+
+@pytest.mark.asyncio
+async def test_interrupt_dm_text_dispatches_without_debounce():
+    adapter = _make_adapter()
+    adapter._busy_text_mode = "interrupt"
+    adapter._busy_session_handler = AsyncMock(return_value=True)
+
+    event = _make_event("urgent correction", chat_type="dm")
+    session_key = build_session_key(event.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    adapter._busy_session_handler.assert_awaited_once_with(event, session_key)
+    assert session_key not in adapter._text_debounce
 
 
 @pytest.mark.asyncio

@@ -1883,6 +1883,7 @@ class TextDebounceState:
     task: asyncio.Task | None
     first_ts: float
     last_ts: float
+    dispatch_busy: bool = False
 
 
 _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -4481,6 +4482,21 @@ class BasePlatformAdapter(ABC):
             )
         return result
 
+    def _is_interrupt_group_text_debounce_candidate(self, event: MessageEvent) -> bool:
+        """Return True for pure group text eligible for busy redirect debounce."""
+        source = getattr(event, "source", None)
+        return (
+            getattr(self, "_busy_text_mode", "interrupt") == "interrupt"
+            and getattr(source, "chat_type", None) in {"group", "supergroup", "channel"}
+            and event.message_type == MessageType.TEXT
+            and not getattr(event, "internal", False)
+            and not event.is_command()
+            and bool((event.text or "").strip())
+            and not getattr(event, "media_urls", None)
+            and not getattr(event, "media_types", None)
+            and not getattr(event, "media_data", None)
+        )
+
     def _can_merge_text_debounce_events(self, existing: MessageEvent, event: MessageEvent) -> bool:
         """Return True when two text debounce events came from the same sender."""
 
@@ -4510,10 +4526,20 @@ class BasePlatformAdapter(ABC):
         hard_cap_deadline = state.first_ts + self._busy_text_hard_cap_seconds
         return max(0.0, min(window_deadline, hard_cap_deadline) - now)
 
-    async def _queue_text_debounce(self, session_key: str, event: MessageEvent) -> None:
-        """Buffer normal queue-mode busy text and schedule a bounded flush."""
+    async def _queue_text_debounce(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        *,
+        dispatch_busy: bool = False,
+    ) -> None:
+        """Buffer normal busy text and schedule a bounded flush."""
         store = self._text_debounce_store()
         state = store.get(session_key)
+
+        if state is not None and state.dispatch_busy != dispatch_busy:
+            await self._flush_text_debounce_now(session_key)
+            state = store.get(session_key)
 
         if state is not None and not self._can_merge_text_debounce_events(state.event, event):
             # Preserve sender attribution in shared sessions. The current
@@ -4539,6 +4565,7 @@ class BasePlatformAdapter(ABC):
                 task=None,
                 first_ts=now,
                 last_ts=now,
+                dispatch_busy=dispatch_busy,
             )
             store[session_key] = state
         else:
@@ -4576,7 +4603,7 @@ class BasePlatformAdapter(ABC):
                 state.task = None
 
     async def _flush_text_debounce_now(self, session_key: str) -> bool:
-        """Force-flush one debounced busy-text burst into the pending slot."""
+        """Force-flush one debounced busy-text burst."""
         store = self._text_debounce_store()
         state = store.get(session_key)
         if state is None:
@@ -4597,6 +4624,17 @@ class BasePlatformAdapter(ABC):
         state = store.pop(session_key, None)
         if state is None:
             return False
+        if state.dispatch_busy and self._busy_session_handler is not None:
+            try:
+                if await self._busy_session_handler(state.event, session_key):
+                    return True
+            except Exception as exc:
+                logger.error(
+                    "[%s] Debounced busy-session handler failed: %s",
+                    self.name,
+                    exc,
+                    exc_info=True,
+                )
         merge_pending_message_event(
             self._pending_messages,
             session_key,
@@ -5008,6 +5046,21 @@ class BasePlatformAdapter(ABC):
                             self.name, e, exc_info=True,
                         )
                     return
+
+            if self._is_interrupt_group_text_debounce_candidate(event):
+                logger.debug(
+                    "[%s] New group text while session %s is active — "
+                    "debouncing redirect (busy_text_mode=interrupt, window=%.2fs)",
+                    self.name,
+                    session_key,
+                    self._busy_text_debounce_seconds,
+                )
+                await self._queue_text_debounce(
+                    session_key,
+                    event,
+                    dispatch_busy=True,
+                )
+                return
 
             if self._busy_session_handler is not None:
                 try:

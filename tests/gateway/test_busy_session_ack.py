@@ -236,6 +236,54 @@ class TestBusySessionAck:
         assert "Redirected current run" in content
 
     @pytest.mark.asyncio
+    async def test_interrupt_mode_steers_at_active_subagent_boundary(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="Change the acceptance criteria")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent._active_children = [object()]
+        agent._active_children_lock = None
+        agent.steer.return_value = True
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        assert await runner._handle_active_session_busy_message(event, sk) is True
+
+        agent.steer.assert_called_once_with("Change the acceptance criteria")
+        agent.redirect.assert_not_called()
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "Steered" in content
+
+    @pytest.mark.asyncio
+    async def test_interrupt_mode_steers_at_compression_boundary(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        runner._session_has_compression_in_flight = AsyncMock(return_value=True)
+        adapter = _make_adapter()
+        event = _make_event(text="Use the new constraint first")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent._active_children = []
+        agent.steer.return_value = True
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        assert await runner._handle_active_session_busy_message(event, sk) is True
+
+        agent.steer.assert_called_once_with("Use the new constraint first")
+        agent.redirect.assert_not_called()
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "Steered" in content
+
+    @pytest.mark.asyncio
     async def test_text_event_with_attachment_is_queued_not_redirected(self):
         runner, _sentinel = _make_runner()
         runner._busy_input_mode = "interrupt"
@@ -524,7 +572,7 @@ class TestBusySessionAck:
         runner.adapters[shared_platform] = adapter
 
         agent = MagicMock()
-        agent._active_children = []  # real list → not demoted to queue
+        agent._active_children = []  # real list → normal redirect path
         runner._running_agents[sk] = agent
 
         await runner._handle_active_session_busy_message(first, sk)

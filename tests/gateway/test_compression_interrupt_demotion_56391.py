@@ -1,9 +1,9 @@
 """Regression tests for #56391.
 
 When context compression is in flight (state.db compression lock held),
-gateway ``busy_input_mode='interrupt'`` must demote to queue semantics so a
-rapid message burst cannot start a follow-up turn against the pre-rotation
-parent and fork orphaned compression siblings.
+gateway ``busy_input_mode='interrupt'`` must route text through the safe steer
+boundary so a rapid message burst cannot start a follow-up turn against the
+pre-rotation parent and fork orphaned compression siblings.
 """
 
 from __future__ import annotations
@@ -96,6 +96,7 @@ def _make_parent_no_subagents() -> MagicMock:
     parent = MagicMock()
     parent._active_children = []
     parent._active_children_lock = threading.Lock()
+    parent.steer.return_value = True
     parent.get_activity_summary.return_value = {
         "api_call_count": 3,
         "max_iterations": 60,
@@ -126,7 +127,7 @@ class TestSessionHasCompressionInFlight:
         assert await runner._session_has_compression_in_flight(sk) is False
 
 
-class TestBusyHandlerDemotesInterruptForCompression:
+class TestBusyHandlerRoutesInterruptSafelyForCompression:
     @pytest.mark.asyncio
     async def test_does_not_interrupt_when_compression_in_flight(self) -> None:
         runner = _make_runner()
@@ -142,10 +143,11 @@ class TestBusyHandlerDemotesInterruptForCompression:
 
         assert handled is True
         parent.interrupt.assert_not_called()
-        assert adapter._pending_messages.get(sk) is event
+        parent.steer.assert_called_once_with("follow up during compression")
+        assert sk not in adapter._pending_messages
 
     @pytest.mark.asyncio
-    async def test_ack_explains_compression_demotion(self) -> None:
+    async def test_ack_explains_safe_steer(self) -> None:
         runner = _make_runner()
         adapter = _make_adapter()
         event = _make_event(text="hi mid-compress")
@@ -161,9 +163,8 @@ class TestBusyHandlerDemotesInterruptForCompression:
 
         adapter._send_with_retry.assert_called_once()
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Compressing context" in content
-        assert "queued" in content.lower()
-        assert "/stop" in content
+        assert "Steered into current run" in content
+        assert "queued" not in content.lower()
         assert "Interrupting" not in content
 
     @pytest.mark.asyncio
@@ -200,7 +201,10 @@ class TestBusyHandlerDemotesInterruptForCompression:
 
         assert handled is True
         parent.interrupt.assert_not_called()
-        assert adapter._pending_messages.get(sk) is event
+        parent.steer.assert_called_once_with(
+            "follow up while lock state is unavailable"
+        )
+        assert sk not in adapter._pending_messages
 
     @pytest.mark.asyncio
     async def test_pending_sentinel_does_not_trigger_false_positive(self) -> None:

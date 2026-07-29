@@ -1,12 +1,12 @@
 """Regression test: the ``_handle_message`` PRIORITY busy-path must also
-demote ``busy_input_mode='interrupt'`` to queue semantics when context
-compression is in flight (#56391), the same as
+route ``busy_input_mode='interrupt'`` through the safe steer boundary when
+context compression is in flight (#56391), the same as
 ``_handle_active_session_busy_message`` already does.
 
 Both code paths handle a message arriving while an agent is already running
 for the session. ``_handle_active_session_busy_message`` (the
 ``busy_session_handler`` callback most platform adapters register via
-``gateway/platforms/base.py``) demotes ``interrupt`` -> ``queue`` for two
+``gateway/platforms/base.py``) routes ``interrupt`` -> ``steer`` for two
 independent reasons:
 
   * active subagents (#30170)
@@ -17,12 +17,11 @@ block (see the ``if _quick_key in self._running_agents:`` guard) that a
 plain-text follow-up reaches directly — mirrors_test_running_agent_session_
 toggles.py already proves ``_handle_message`` is invoked directly with an
 active running agent, not only through the adapter dispatch layer. That
-PRIORITY block's own comment says it mirrors
-``_handle_active_session_busy_message``'s subagent-demotion rationale
-verbatim, and it does demote for active subagents — but it never checks
-``_session_has_compression_in_flight``, so a plain-text follow-up landing on
-this path while compression is mid-flight still interrupts, racing a new
-turn against the pre-rotation parent session exactly as #56391 describes.
+PRIORITY block must mirror ``_handle_active_session_busy_message`` for both
+active subagents and ``_session_has_compression_in_flight``. Otherwise a
+plain-text follow-up landing on this path while compression is mid-flight can
+still interrupt, racing a new turn against the pre-rotation parent session
+exactly as #56391 describes.
 """
 
 from datetime import datetime
@@ -109,8 +108,7 @@ def _make_runner(*, compression_in_flight: bool):
     runner._draining = False
     runner._busy_input_mode = "interrupt"
 
-    # No subagents active — isolates the compression-demotion behavior from
-    # the (already-correct) subagent-demotion branch.
+    # No subagents active — isolates the compression safe-boundary behavior.
     runner._agent_has_active_subagents = lambda _agent: False
     runner._session_has_compression_in_flight = AsyncMock(
         return_value=compression_in_flight
@@ -118,6 +116,7 @@ def _make_runner(*, compression_in_flight: bool):
 
     import time
     agent_mock = MagicMock()
+    agent_mock.steer.return_value = True
     agent_mock.get_activity_summary.return_value = {
         "seconds_since_activity": 0.0,
         "last_activity_desc": "api_call",
@@ -136,15 +135,15 @@ def _make_runner(*, compression_in_flight: bool):
 @pytest.mark.asyncio
 async def test_priority_path_does_not_interrupt_when_compression_in_flight():
     """A plain-text follow-up must NOT interrupt the running agent while
-    context compression is in flight — it must queue instead, mirroring
-    _handle_active_session_busy_message's #56391 demotion."""
+    context compression is in flight — it must steer into the current run
+    rather than start a next turn against the pre-rotation parent."""
     runner, agent_mock, sk = _make_runner(compression_in_flight=True)
 
     await runner._handle_message(_make_event("still there?"))
 
     agent_mock.interrupt.assert_not_called()
-    queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
-    assert queued is not None and queued.text == "still there?"
+    agent_mock.steer.assert_called_once_with("still there?")
+    assert sk not in runner.adapters[Platform.TELEGRAM]._pending_messages
 
 
 @pytest.mark.asyncio

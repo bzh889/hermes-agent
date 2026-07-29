@@ -6071,11 +6071,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         parent's ``_active_children`` list and calls ``interrupt()`` on
         every child synchronously, which aborts in-flight subagent work
         and produces a fallback cascade with no actionable signal.
-        Demoting ``busy_input_mode='interrupt'`` to ``queue`` semantics
-        whenever this helper returns True protects subagent work from
-        conversational follow-ups while leaving the explicit ``/stop``
-        path (which goes through ``_interrupt_and_clear_session``)
-        untouched. Safe-by-default: returns False on any attribute or
+        Routing ``busy_input_mode='interrupt'`` through the safe ``steer``
+        boundary whenever this helper returns True protects subagent work
+        without postponing a conversational correction until the entire
+        parent turn finishes. The explicit ``/stop`` path (which goes through
+        ``_interrupt_and_clear_session``) remains a hard stop. Safe-by-default:
+        returns False on any attribute or
         lock error so a missing/broken parent never blocks the existing
         interrupt path.
         """
@@ -6106,8 +6107,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Context compression is interrupt-protected (#23975) but gateway
         ``interrupt`` busy-input mode can still start a follow-up turn against
         the pre-rotation parent while compression is mid-flight, producing
-        orphaned compression siblings (#56391). Callers demote interrupt to
-        queue when this returns True.
+        orphaned compression siblings (#56391). Callers route interrupt to
+        the safe steer boundary when this returns True.
 
         Both blocking sources — the ``session_store`` lock + JSON load, and the
         SQLite ``get_compression_lock_holder`` SELECT — are offloaded to a
@@ -6366,34 +6367,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # to queue semantics so nothing is lost.
         # #30170 — Subagent protection. ``AIAgent.interrupt()`` cascades
         # to every entry in the parent's ``_active_children`` list and
-        # aborts in-flight ``delegate_task`` work. Demote ``interrupt``
-        # to ``queue`` when the parent is currently driving subagents so
-        # a conversational follow-up doesn't destroy minutes of subagent
-        # work. Explicit ``/stop`` and ``/new`` slash commands go through
-        # ``_interrupt_and_clear_session`` and are unaffected — the
-        # operator still has a way to force-cancel everything.
-        demoted_for_subagents = (
+        # aborts in-flight ``delegate_task`` work. Route conversational
+        # follow-ups through ``steer`` so the parent sees them at the next
+        # safe tool boundary without destroying subagent progress. Explicit
+        # ``/stop`` and ``/new`` still go through the hard-stop path.
+        steer_for_subagents = (
             effective_mode == "interrupt"
             and self._agent_has_active_subagents(running_agent)
         )
-        if demoted_for_subagents:
+        if steer_for_subagents:
             logger.info(
-                "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
+                "Routing busy_input_mode 'interrupt' through 'steer' for session %s "
                 "because the running agent has active subagents (#30170)",
                 session_key,
             )
-            effective_mode = "queue"
-        demoted_for_compression = (
+            effective_mode = "steer"
+        steer_for_compression = (
             effective_mode == "interrupt"
             and await self._session_has_compression_in_flight(session_key)
         )
-        if demoted_for_compression:
+        if steer_for_compression:
             logger.info(
-                "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
+                "Routing busy_input_mode 'interrupt' through 'steer' for session %s "
                 "because context compression is in flight (#56391)",
                 session_key,
             )
-            effective_mode = "queue"
+            effective_mode = "steer"
         steered = False
         redirected = False
         if effective_mode == "steer":
@@ -6565,15 +6564,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 f"↪ Redirected current run{status_detail}. "
                 f"I'll adjust using your correction."
             )
-        elif is_queue_mode and demoted_for_subagents:
-            # #30170 — explain the demotion so the user knows their
-            # follow-up didn't accidentally kill the subagent and
-            # discovers `/stop` as the explicit escape hatch.
+        elif is_queue_mode and steer_for_subagents:
+            # #30170 — steer was unavailable/rejected, so explain the safe
+            # queue fallback and preserve `/stop` as the explicit escape hatch.
             message = (
                 f"⏳ Subagent working{status_detail} — your message is queued for "
                 f"when it finishes (use /stop to cancel everything)."
             )
-        elif is_queue_mode and demoted_for_compression:
+        elif is_queue_mode and steer_for_compression:
             message = (
                 f"⏳ Compressing context{status_detail} — your message is queued for "
                 f"when it finishes (use /stop to cancel everything)."
@@ -11863,35 +11861,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("PRIORITY steer-fallback-to-queue for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
-            # #30170 — Subagent protection (PRIORITY path). Same rationale
-            # as ``_handle_active_session_busy_message``: an interrupt
-            # cascades through ``_active_children`` and aborts in-flight
-            # delegate_task work. Demote to queue semantics when the
-            # parent is currently driving subagents so a conversational
-            # follow-up doesn't destroy minutes of subagent progress.
-            # /stop reaches its dedicated handler above, so the operator
-            # still has a clean escape hatch.
+            # #30170 / #56391 — At subagent and compression boundaries a
+            # hard interrupt is unsafe, but postponing the message until the
+            # entire turn finishes is also wrong. Steer it into the current
+            # run so it is considered at the next safe boundary; queue only
+            # if this runtime cannot accept the steer.
+            _safe_steer_reason = None
             if self._agent_has_active_subagents(running_agent):
+                _safe_steer_reason = "active subagents (#30170)"
+            elif await self._session_has_compression_in_flight(_quick_key):
+                _safe_steer_reason = "context compression in flight (#56391)"
+            if _safe_steer_reason is not None:
+                _safe_steer_text = (event.text or "").strip()
+                _safe_steered = False
+                if (
+                    event.message_type == MessageType.TEXT
+                    and not event.media_urls
+                    and not event.media_types
+                    and _safe_steer_text
+                    and hasattr(running_agent, "steer")
+                ):
+                    try:
+                        _safe_steered = bool(running_agent.steer(_safe_steer_text))
+                    except Exception as exc:
+                        logger.warning(
+                            "PRIORITY safe-boundary steer failed for session %s: %s",
+                            _quick_key,
+                            exc,
+                        )
+                if _safe_steered:
+                    logger.info(
+                        "PRIORITY interrupt routed through steer for session %s "
+                        "because of %s",
+                        _quick_key,
+                        _safe_steer_reason,
+                    )
+                    return None
                 logger.info(
-                    "PRIORITY interrupt demoted to queue for session %s "
-                    "because the running agent has active subagents (#30170)",
+                    "PRIORITY safe-boundary steer fell back to queue for session %s "
+                    "because of %s",
                     _quick_key,
-                )
-                self._queue_or_replace_pending_event(_quick_key, event)
-                return None
-            # #56391 — Compression protection (PRIORITY path). Same
-            # rationale as ``_handle_active_session_busy_message``: context
-            # compression is interrupt-protected (#23975), but an interrupt
-            # here starts a new turn against the pre-rotation parent
-            # session while the still-running compression later rotates
-            # the id out from under it, forking orphaned compression
-            # siblings. Demote to queue semantics so the follow-up waits
-            # for the in-flight compression + rotation to land.
-            if await self._session_has_compression_in_flight(_quick_key):
-                logger.info(
-                    "PRIORITY interrupt demoted to queue for session %s "
-                    "because context compression is in flight (#56391)",
-                    _quick_key,
+                    _safe_steer_reason,
                 )
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
