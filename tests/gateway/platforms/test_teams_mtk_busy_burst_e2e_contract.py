@@ -134,10 +134,16 @@ def test_busy_group_burst_redirect_is_named_and_verifies_one_ack_and_final(
             "E2EBURSTABCDEF123456A E2EBURSTABCDEF123456B"
         ),
     }
+    preflight_status = {
+        "id": "preflight-status",
+        "content": "Hermes gateway status",
+        "_raw_content": _branded_bot_html("Hermes gateway status"),
+    }
     current_messages = [
         final,
         ack,
         progress,
+        preflight_status,
         correction_b,
         correction_a,
         initial,
@@ -162,7 +168,11 @@ def test_busy_group_burst_redirect_is_named_and_verifies_one_ack_and_final(
     monkeypatch.setattr(
         e2e,
         "_busy_burst_group_idle_preflight",
-        lambda **_kwargs: (True, "control group idle"),
+        lambda **_kwargs: (
+            True,
+            "control group idle",
+            {"preflight-status"},
+        ),
     )
     monkeypatch.setattr(
         e2e,

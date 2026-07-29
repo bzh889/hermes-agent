@@ -2443,7 +2443,7 @@ def _busy_burst_group_idle_preflight(
     *,
     timeout: float = 45,
     poll_interval: float = 3,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, set[str]]:
     """Fail fast without disturbing an unrelated active turn in the test group."""
     from agent.i18n import t
 
@@ -2482,11 +2482,19 @@ def _busy_burst_group_idle_preflight(
                     continue
                 status_message_ids.add(message_id)
                 if running_line in body:
-                    return False, "control group already has an active agent turn"
+                    return (
+                        False,
+                        "control group already has an active agent turn",
+                        set(status_message_ids),
+                    )
                 if idle_line in body:
-                    return True, "control group idle"
+                    return True, "control group idle", set(status_message_ids)
             if time.monotonic() >= deadline:
-                return False, "timed out reading the control group's /status response"
+                return (
+                    False,
+                    "timed out reading the control group's /status response",
+                    set(status_message_ids),
+                )
             time.sleep(poll_interval)
     finally:
         cleanup_errors = []
@@ -2529,7 +2537,7 @@ def test_busy_group_burst_redirect(
     preconditions_ok, runtime_evidence = _busy_burst_preconditions()
     if not preconditions_ok:
         return False, runtime_evidence
-    idle_ok, idle_evidence = _busy_burst_group_idle_preflight(
+    idle_ok, idle_evidence, preflight_message_ids = _busy_burst_group_idle_preflight(
         timeout=min(45, tool_start_timeout),
         poll_interval=poll_interval,
     )
@@ -2564,6 +2572,10 @@ def test_busy_group_burst_redirect(
             for message in baseline_messages
             if message.get("id")
         }
+        # MSG read-back is eventually consistent after deletion.  Keep the
+        # preflight /status card excluded even if it briefly disappears from
+        # the baseline page and reappears while the live assertion is polling.
+        baseline_ids.update(preflight_message_ids)
         graph_message_ids.append(send_chat_message(GROUP_CHAT_ID, initial_prompt))
         if not _wait_for_process_marker(
             tool_marker,
