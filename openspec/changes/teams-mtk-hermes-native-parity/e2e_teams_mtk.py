@@ -2333,6 +2333,400 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
                 )
 
 
+def _busy_burst_preconditions() -> tuple[bool, str]:
+    """Verify this runner and the live gateway use the intended checkout/config."""
+    import psutil
+
+    from hermes_cli.config import load_config
+    from hermes_constants import get_hermes_home
+
+    config = load_config()
+    busy_mode = str(config.get("display", {}).get("busy_input_mode") or "")
+    teams_config = config.get("gateway", {}).get("teams_mtk", {})
+    group_config = teams_config.get("groups", {}).get(GROUP_CHAT_ID, {})
+    require_mention = bool(
+        group_config.get("require_mention", teams_config.get("require_mention", True))
+    )
+    if busy_mode != "interrupt":
+        return False, f"display.busy_input_mode={busy_mode!r}, expected 'interrupt'"
+    if require_mention:
+        return False, "control group still requires @mention"
+
+    pid_path = get_hermes_home() / "gateway.pid"
+    if not pid_path.is_file():
+        return False, "gateway.pid is missing"
+    try:
+        raw_pid = pid_path.read_text(encoding="utf-8").strip()
+        try:
+            pid_metadata = json.loads(raw_pid)
+            pid = int(pid_metadata.get("pid", 0))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            pid_metadata = {}
+            pid = int(raw_pid)
+        process = psutil.Process(pid)
+        gateway_cwd = os.path.normcase(os.path.realpath(process.cwd()))
+        gateway_executable = os.path.normcase(os.path.realpath(process.exe()))
+        gateway_environment = process.environ()
+    except (OSError, ValueError, psutil.Error) as exc:
+        return False, f"gateway process check failed ({type(exc).__name__})"
+
+    repo_root = os.path.normcase(
+        os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    )
+    runner_executable = os.path.normcase(os.path.realpath(sys.executable))
+    expected_entry = os.path.join(repo_root, "hermes_cli", "gateway_runtime_entry.py")
+    recorded_argv = pid_metadata.get("argv") or []
+    recorded_entry = os.path.normcase(
+        os.path.realpath(str(recorded_argv[0]))
+    ) if recorded_argv else ""
+    pythonpath_entries = {
+        os.path.normcase(os.path.realpath(entry))
+        for entry in str(gateway_environment.get("PYTHONPATH") or "").split(os.pathsep)
+        if entry
+    }
+    configured_venv = os.path.normcase(
+        os.path.realpath(str(gateway_environment.get("VIRTUAL_ENV") or ""))
+    )
+    runner_venv = os.path.dirname(os.path.dirname(runner_executable))
+    source_matches = recorded_entry == expected_entry and (
+        gateway_cwd == repo_root or repo_root in pythonpath_entries
+    )
+    interpreter_matches = (
+        os.path.dirname(gateway_executable) == os.path.dirname(runner_executable)
+        or configured_venv == runner_venv
+    )
+    if not source_matches:
+        return False, "live gateway source does not match this checkout"
+    if not interpreter_matches:
+        return False, "live gateway does not use this runner's venv"
+    return (
+        True,
+        f"gateway pid={pid}; source=gateway_runtime_entry.py; checkout=current; "
+        f"interpreter={os.path.basename(gateway_executable)}; venv=current; "
+        "config=interrupt/no-mention",
+    )
+
+
+def _wait_for_process_marker(
+    marker: str,
+    *,
+    timeout: float,
+    poll_interval: float,
+) -> bool:
+    """Wait until the model's requested long terminal command is truly running."""
+    import psutil
+
+    deadline = time.monotonic() + timeout
+    while True:
+        for process in psutil.process_iter(["cmdline"]):
+            try:
+                command_line = " ".join(process.info.get("cmdline") or [])
+            except (OSError, psutil.Error):
+                continue
+            if marker in command_line:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+
+
+def _is_hermes_bot_message(message: dict) -> bool:
+    rendered = str(message.get("_raw_content") or message.get("content") or "")
+    properties = str(message.get("properties") or "")
+    return (
+        ("🤖 Hermes" in rendered and "— Hermes ·" in rendered)
+        or "hermes_sender" in properties
+    )
+
+
+def _busy_burst_group_idle_preflight(
+    *,
+    timeout: float = 45,
+    poll_interval: float = 3,
+) -> tuple[bool, str]:
+    """Fail fast without disturbing an unrelated active turn in the test group."""
+    from agent.i18n import t
+
+    baseline_messages = get_messages_raw(GROUP_CHAT_ID, page_size=40)
+    baseline_ids = {
+        str(message.get("id") or "")
+        for message in baseline_messages
+        if message.get("id")
+    }
+    graph_message_id = ""
+    status_message_ids: set[str] = set()
+    try:
+        graph_message_id = send_chat_message(GROUP_CHAT_ID, "/status")
+        status_header = t("gateway.status.header")
+        idle_line = t(
+            "gateway.status.agent_running",
+            state=t("gateway.status.state_no"),
+        )
+        running_line = t(
+            "gateway.status.agent_running",
+            state=t("gateway.status.state_yes"),
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            latest_messages = get_messages_raw(GROUP_CHAT_ID, page_size=40)
+            for message in latest_messages:
+                message_id = str(message.get("id") or "")
+                if (
+                    not message_id
+                    or message_id in baseline_ids
+                    or not _is_hermes_bot_message(message)
+                ):
+                    continue
+                body = _visible_model_body(message)
+                if status_header not in body:
+                    continue
+                status_message_ids.add(message_id)
+                if running_line in body:
+                    return False, "control group already has an active agent turn"
+                if idle_line in body:
+                    return True, "control group idle"
+            if time.monotonic() >= deadline:
+                return False, "timed out reading the control group's /status response"
+            time.sleep(poll_interval)
+    finally:
+        cleanup_errors = []
+        if graph_message_id:
+            try:
+                delete_graph_message(GROUP_CHAT_ID, graph_message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+        for message_id in sorted(status_message_ids):
+            try:
+                delete_msg_message(GROUP_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "busy burst status cleanup failed (" + ", ".join(cleanup_errors) + ")"
+            )
+
+
+def test_busy_group_burst_redirect(
+    log_path: str,
+    baseline: int,
+    *,
+    tool_start_timeout: float = 240,
+    reply_timeout: float = 300,
+    poll_interval: float = 3,
+    settle_seconds: float = 12,
+) -> tuple[bool, str]:
+    """Group burst: one redirect, both corrections in one final, no stale output.
+
+    The initial turn must enter a real long-running terminal process before two
+    same-sender Graph messages are released together. MSG read-back then proves
+    that Teams rendered exactly one redirect acknowledgement and one final card,
+    that both correction markers survived, and that the stale marker did not.
+    """
+    del log_path, baseline
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    preconditions_ok, runtime_evidence = _busy_burst_preconditions()
+    if not preconditions_ok:
+        return False, runtime_evidence
+    idle_ok, idle_evidence = _busy_burst_group_idle_preflight(
+        timeout=min(45, tool_start_timeout),
+        poll_interval=poll_interval,
+    )
+    if not idle_ok:
+        return False, idle_evidence
+
+    # Keep markers strictly alphanumeric. ``strip_teams_html`` escapes
+    # underscores as Markdown, so an underscore would create a false mismatch.
+    token = uuid.uuid4().hex[:12].upper()
+    prefix = f"E2EBURST{token}"
+    tool_marker = f"{prefix}TOOL"
+    old_marker = f"{prefix}OLD"
+    marker_a = f"{prefix}A"
+    marker_b = f"{prefix}B"
+    initial_prompt = (
+        "E2E busy burst verification. Use the terminal tool exactly once to run "
+        f"venv/Scripts/python.exe -c \"import time; print('{tool_marker}', "
+        f"flush=True); time.sleep(45); print('{old_marker}', flush=True)\". "
+        f"Do not use another tool. After it finishes, reply with exactly {old_marker}."
+    )
+    corrections = (
+        f"Correction A: include exactly {marker_a} in the final reply and do not output {old_marker}.",
+        f"Correction B: include exactly {marker_b} in the final reply and do not output {old_marker}.",
+    )
+
+    graph_message_ids: list[str] = []
+    bot_message_ids: set[str] = set()
+    try:
+        baseline_messages = get_messages_raw(GROUP_CHAT_ID, page_size=40)
+        baseline_ids = {
+            str(message.get("id") or "")
+            for message in baseline_messages
+            if message.get("id")
+        }
+        graph_message_ids.append(send_chat_message(GROUP_CHAT_ID, initial_prompt))
+        if not _wait_for_process_marker(
+            tool_marker,
+            timeout=tool_start_timeout,
+            poll_interval=poll_interval,
+        ):
+            return False, "long terminal process marker was never observed"
+
+        release = threading.Barrier(len(corrections) + 1)
+
+        def send_correction(content: str) -> str:
+            release.wait()
+            return send_chat_message(GROUP_CHAT_ID, content)
+
+        with ThreadPoolExecutor(max_workers=len(corrections)) as executor:
+            futures = [executor.submit(send_correction, content) for content in corrections]
+            release.wait()
+            for future in as_completed(futures):
+                graph_message_ids.append(future.result())
+
+        latest_messages: list[dict] = []
+        deadline = time.monotonic() + reply_timeout
+        while True:
+            latest_messages = get_messages_raw(GROUP_CHAT_ID, page_size=40)
+            new_bot_messages = [
+                message
+                for message in latest_messages
+                if str(message.get("id") or "") not in baseline_ids
+                and _is_hermes_bot_message(message)
+            ]
+            bot_message_ids.update(
+                str(message.get("id") or "")
+                for message in new_bot_messages
+                if message.get("id")
+            )
+            visible_bodies = [_visible_model_body(message) for message in new_bot_messages]
+            if any(marker_a in body and marker_b in body for body in visible_bodies):
+                break
+            if time.monotonic() >= deadline:
+                return (
+                    False,
+                    "no final Teams bot card contained both burst correction markers "
+                    f"(new bot cards={len(new_bot_messages)})",
+                )
+            time.sleep(poll_interval)
+
+        time.sleep(settle_seconds)
+        latest_messages = get_messages_raw(GROUP_CHAT_ID, page_size=40)
+        new_bot_by_id = {
+            str(message.get("id") or ""): message
+            for message in latest_messages
+            if str(message.get("id") or "") not in baseline_ids
+            and message.get("id")
+            and _is_hermes_bot_message(message)
+        }
+        bot_message_ids.update(new_bot_by_id)
+        visible_by_id = {
+            message_id: _visible_model_body(message)
+            for message_id, message in new_bot_by_id.items()
+        }
+        acknowledgements = [
+            message_id
+            for message_id, body in visible_by_id.items()
+            if "redirected current run" in body.lower()
+        ]
+        finals = [
+            message_id
+            for message_id, body in visible_by_id.items()
+            if marker_a in body and marker_b in body
+        ]
+        if len(acknowledgements) != 1:
+            return False, f"expected one redirect acknowledgement, got {len(acknowledgements)}"
+        if len(finals) != 1:
+            return False, f"expected one final card with A+B, got {len(finals)}"
+        expected_ids = {acknowledgements[0], finals[0]}
+        extra_ids = set(new_bot_by_id) - expected_ids
+        progress_ids = {
+            message_id
+            for message_id in extra_ids
+            if "running" in visible_by_id[message_id].lower()
+            and prefix not in visible_by_id[message_id]
+        }
+        if len(extra_ids) > 1 or progress_ids != extra_ids:
+            diagnostics = [
+                {
+                    "chars": len(body),
+                    "ack": "redirected current run" in body.lower(),
+                    "final": marker_a in body and marker_b in body,
+                    "old": old_marker in body,
+                    "marker": prefix in body,
+                    "terminal": "terminal" in body.lower(),
+                    "tool": "tool" in body.lower(),
+                    "running": "running" in body.lower(),
+                    "completed": "completed" in body.lower(),
+                    "thinking": "thinking" in body.lower(),
+                }
+                for body in visible_by_id.values()
+            ]
+            return (
+                False,
+                "expected ack+final and at most one standard running progress "
+                f"card, got {len(new_bot_by_id)} bot cards; "
+                f"classes={json.dumps(diagnostics, ensure_ascii=True)}",
+            )
+        if old_marker in visible_by_id[finals[0]]:
+            return False, "stale OLD marker leaked into the final reply"
+
+        final_runtime_ok, final_runtime_evidence = _busy_burst_preconditions()
+        if not final_runtime_ok:
+            return False, f"post-test runtime check failed: {final_runtime_evidence}"
+        return (
+            True,
+            "one redirect acknowledgement + one final Teams card; "
+            f"progress cards={len(progress_ids)}; A+B present; OLD absent; "
+            f"{idle_evidence}; {runtime_evidence}; "
+            f"post={final_runtime_evidence}",
+        )
+    finally:
+        cleanup_errors = []
+        for message_id in graph_message_ids:
+            try:
+                delete_graph_message(GROUP_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+        msg_cleanup_ids = set(bot_message_ids)
+        try:
+            for message in get_messages_raw(GROUP_CHAT_ID, page_size=60):
+                rendered = str(
+                    message.get("_raw_content")
+                    or message.get("content")
+                    or ""
+                )
+                message_id = str(message.get("id") or "")
+                if message_id and prefix in rendered:
+                    msg_cleanup_ids.add(message_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-read:{type(exc).__name__}")
+        for message_id in sorted(msg_cleanup_ids):
+            try:
+                delete_msg_message(GROUP_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        try:
+            remaining = [
+                message
+                for message in get_messages_raw(GROUP_CHAT_ID, page_size=60)
+                if prefix
+                in str(
+                    message.get("_raw_content")
+                    or message.get("content")
+                    or ""
+                )
+            ]
+            if remaining:
+                cleanup_errors.append(f"msg-remain:{len(remaining)}")
+        except Exception as exc:
+            cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "busy burst E2E cleanup failed (" + ", ".join(cleanup_errors) + ")"
+            )
+
+
 # ── Runner ────────────────────────────────────────────────────────
 
 NAMED_TESTS = {
@@ -2357,6 +2751,7 @@ NAMED_TESTS = {
     "contact-directory-fallback": test_contact_directory_fallback,
     "find-conversation": test_find_conversation,
     "standalone-sender-fn": test_standalone_sender_fn,
+    "busy-group-burst-redirect": test_busy_group_burst_redirect,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
     "streaming-no-echo-duplication": test_streaming_no_echo_duplication,
     "no-residual-markdown-in-reply": test_no_residual_markdown_in_reply,

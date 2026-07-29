@@ -1884,6 +1884,7 @@ class TextDebounceState:
     first_ts: float
     last_ts: float
     dispatch_busy: bool = False
+    message_count: int = 1
 
 
 _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -4570,11 +4571,26 @@ class BasePlatformAdapter(ABC):
             store[session_key] = state
         else:
             if event.text:
-                state.event.text = (
-                    f"{state.event.text}\n{event.text}"
-                    if state.event.text
-                    else event.text
-                )
+                if state.dispatch_busy and state.event.text:
+                    if state.message_count == 1:
+                        state.event.text = (
+                            "[Burst update: apply ALL numbered messages below together. "
+                            "Do not treat a later item as replacing an earlier item unless "
+                            "it explicitly says so.]\n"
+                            f"1. {state.event.text}\n"
+                            f"2. {event.text}"
+                        )
+                    else:
+                        state.event.text = (
+                            f"{state.event.text}\n{state.message_count + 1}. {event.text}"
+                        )
+                else:
+                    state.event.text = (
+                        f"{state.event.text}\n{event.text}"
+                        if state.event.text
+                        else event.text
+                    )
+                state.message_count += 1
             latest_message_id = getattr(event, "message_id", None)
             latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
             if latest_message_id is not None:

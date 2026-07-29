@@ -176,21 +176,37 @@ async def test_interrupt_group_text_burst_debounces_into_one_busy_dispatch():
         user_name="Alice",
         thread_id="topic-1",
     )
+    third = _make_event(
+        "part three",
+        chat_type="group",
+        user_id="alice",
+        user_name="Alice",
+        thread_id="topic-1",
+    )
     session_key = build_session_key(first.source)
     adapter._active_sessions[session_key] = asyncio.Event()
 
     await adapter.handle_message(first)
     await adapter.handle_message(second)
+    await adapter.handle_message(third)
 
     adapter._busy_session_handler.assert_not_awaited()
-    assert _debounced_event(adapter, session_key).text == "part one\npart two"
+    expected_burst = (
+        "[Burst update: apply ALL numbered messages below together. "
+        "Do not treat a later item as replacing an earlier item unless it "
+        "explicitly says so.]\n"
+        "1. part one\n"
+        "2. part two\n"
+        "3. part three"
+    )
+    assert _debounced_event(adapter, session_key).text == expected_burst
 
     await asyncio.sleep(0.15)
 
     adapter._busy_session_handler.assert_awaited_once()
     merged_event, merged_session_key = adapter._busy_session_handler.await_args.args
     assert merged_session_key == session_key
-    assert merged_event.text == "part one\npart two"
+    assert merged_event.text == expected_burst
     assert session_key not in adapter._text_debounce
     assert session_key not in adapter._pending_messages
 
