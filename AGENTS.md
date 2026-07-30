@@ -4,6 +4,27 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Agent skills
+
+### Issue tracker
+
+Engineering-skill issues are tracked as local Markdown files under
+`.scratch/<feature>/`; existing OpenSpec changes remain authoritative and
+tickets link to them rather than duplicating them. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five canonical role strings: `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, and `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses a multi-context layout rooted at `CONTEXT-MAP.md`,
+with contexts for Core, Gateway, Desktop, TUI, and Web. See
+`docs/agents/domain.md`.
+
 ## MTK upstream upgrades
 
 Before updating this checkout from official Hermes upstream, read
