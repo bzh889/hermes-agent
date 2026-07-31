@@ -961,3 +961,67 @@ VIP 訊息路由到 `vip_notify_target`，非 VIP 正常處理。
 - C-4 是 auth 問題——修完附件才能用，但不阻塞其他功能
 - C-2 是 echo guard—— poll.py 用戶才需要，非 poll 用戶不受影響
 - SDK-0 放最後——先讓 SDK 是對的再整入，免得 gateway 繼承 bug
+
+## §12. Query Revision and Native Reply Contract
+
+### Problem Statement
+
+Teams permits an existing message to be edited without changing its message identity. The current Teams MTK cursor treats every same-or-older identity as already processed, so an edited user query is silently lost. Native replies also carry a relation to another message, but the current normalization path reduces the quote to a display preview and does not populate Hermes' structured reply context. As a result, Hermes can answer an obsolete query, miss a correction, or reason from an incomplete quoted source.
+
+### Solution
+
+Extend the existing Skype SDK and Teams MTK adapter rather than introducing another transport. Preserve revision and reply relation data at normalization, maintain bounded conversation-scoped revision state, and dispatch a same-identity message exactly once when its revision changes. Resolve native reply relations to the exact source object and promote the complete source into the existing normalized message event. When Hermes sends with a reply target, use the SDK's native reply operation and degrade to an explicitly logged flat send only when the native operation is unavailable before any remote side effect can begin.
+
+### User Stories
+
+1. As a Teams user, I want Hermes to notice when I edit my original question, so that it answers the corrected request rather than the obsolete one.
+2. As a Teams user, I want one edit to produce one revised agent turn, so that polling and WebSocket overlap do not generate duplicate answers.
+3. As a Teams user, I want an unchanged message returned by repeated polling to remain silent, so that ordinary catch-up does not replay old work.
+4. As a Teams user, I want a native reply to a long source message to retain the complete source context, so that Hermes does not infer intent from a truncated preview.
+5. As a Teams user, I want Hermes' response to retain the native Teams reply relation when a reply target is supplied, so that the conversation remains visually and semantically anchored.
+6. As a Teams user, I want a clearly logged flat reply only when native reply delivery is unavailable, so that degraded behavior is diagnosable rather than silently losing the relation.
+7. As a gateway operator, I want revision tracking scoped by conversation and message identity, so that identities from different chats cannot collide.
+8. As a gateway operator, I want deterministic content hashing when tenant-specific revision fields are missing, so that the behavior remains correct without assuming every tenant exposes the same private fields.
+9. As a gateway operator, I want bot ownership to survive an edit even when the service removes the sender property, so that editing an outbound message cannot create an echo loop.
+10. As a maintainer, I want reply properties accepted as either objects or JSON strings, so that transport-shape compatibility does not leak into the agent pipeline.
+11. As a maintainer, I want relation disagreements and source-fetch failures handled conservatively, so that a preview or unrelated message is never promoted as complete source context.
+12. As a maintainer, I want edit, inbound-reply, and outbound-reply E2E verdicts to be independent, so that success in one transport operation cannot conceal failure in another.
+13. As a security reviewer, I want fixtures, logs, and test output to retain only redacted identities, structural aliases, lengths, and hashes, so that protocol evidence does not leak organization identifiers or credentials.
+14. As a release reviewer, I want final acceptance to include real human-inbound behavior, canonical service read-back, controlled cleanup, and the repository test wrapper, so that method existence or a successful HTTP status cannot masquerade as parity.
+
+### Implementation Decisions
+
+- The SDK normalizer preserves the raw message identity, content, properties, explicit version, and edit-time candidate without discarding their value types. Raw properties remain compatible with object and JSON-string representations.
+- Revision state is bounded and conversation-scoped. Its logical key is the conversation plus message identity; its value records an explicit normalized revision candidate when available and a deterministic hash of canonical content.
+- The observed edit contract uses a stable message identity. An edited version and edit-time value matched after type normalization in the controlled fixture, but deterministic content hashing remains mandatory because private tenant envelopes are not a stable public API.
+- An unseen identity is a normal new message. A seen identity with the same revision and content hash is an old duplicate. A seen identity with a changed explicit revision or changed canonical content hash is one revision event. State is updated before overlapping poll and WebSocket paths can dispatch the same revision again.
+- Revision handling remains behind the existing authorization, ownership, mention, blocked-keyword, and other inbound policy boundaries. The fact that the sender property disappeared after edit means ownership must use the existing conversation-scoped outbound registry or authoritative sender metadata rather than requiring that property to survive.
+- Reply source resolution prefers the raw `replyChainMessageId`. It corroborates that identity against `qtdMsgs` message relations and the blockquote relation when present. A disagreement is recorded in sanitized diagnostics and does not authorize an arbitrary source selection.
+- The exact source is retrieved through the existing authenticated Skype message transport by conversation and message identity. Complete canonical source content populates the existing message-event reply fields. A display quote remains presentation-only and is never promoted as complete context.
+- If exact source retrieval fails, the event may retain the relation identity, but full reply text remains unavailable or explicitly partial. The adapter must not represent the truncated preview as the complete source.
+- Outbound delivery with a reply target delegates to the SDK's native reply operation. A successful result participates in the existing conversation-scoped ownership registry and message-ID recovery contract.
+- Flat-send degradation is allowed only when native reply is unavailable or explicitly unsupported before a remote operation begins. The result and sanitized log identify the loss of native relation. If delivery becomes indeterminate after the native operation starts, the adapter fails without a second flat send to avoid duplication.
+- No new agent loop, core model tool, credential path, or inbound transport is introduced. Prompt caching and existing allowlist boundaries remain unchanged.
+
+### Testing Decisions
+
+- The primary seam is the controlled real-Teams gateway boundary: a human-originated operation enters the running adapter, Hermes produces the user-visible effect, the canonical Skype service representation is read back, and every test artifact is cleaned in `finally`.
+- A supporting deterministic seam covers SDK normalization and the adapter's revision/relation state transitions. Tests assert public normalized output and dispatch behavior rather than private helper calls, source text, or method existence.
+- `inbound-edit-revision-reopens-query` creates a human-originated query, waits for its first completed turn, edits the same remote identity, and proves exactly one revised turn contains the new complete body while the original is not replayed.
+- `quoted-reply-full-context-revises-query` replies to a source longer than the quote preview, proves the relation identity and direct source fetch, and verifies the agent receives the complete source plus the new reply body.
+- `reply-to-native-thread-roundtrip` sends through Hermes with a reply target and proves the canonical read-back contains the native relation. A flat result passes only in an explicitly forced pre-send-unavailable case with a matching degradation signal.
+- The three named verdicts remain independent. Every remote side effect uses exact returned identities or unique markers for cleanup, and cleanup failure fails that item.
+- Targeted tests are development evidence only. Final acceptance runs the complete named real-gateway suite and the canonical repository test wrapper on the final tree.
+- The de-identified protocol probe establishes the input contract only; it does not count as evidence that the gateway dispatch, normalized event, or outbound reply implementation is complete.
+
+### Out of Scope
+
+- Migrating to Bot Framework, deploying a public callback endpoint, or adding Graph change notifications as a second inbound source.
+- Claiming the private Skype message envelope is stable across tenants or guaranteed by Microsoft.
+- Using a bot-tagged SDK send as proof of human inbound processing.
+- Native audio/video parity, capability-command dispatch, forwarding authorization, WebSocket soak policy, and other existing backlog items.
+- Persisting raw conversation identities, message identities, user identities, tenant hosts, names, emails, or credentials in repository artifacts.
+
+### Further Notes
+
+The final de-identified protocol probe observed stable message identity across create and edit; changed version and edit-time values that matched after type normalization; removal of the sender property after edit; native reply relations in reply-chain, quoted-message, and blockquote fields; truncation of the display quote; and successful exact source retrieval. Teams desktop relation rendering remained unknown. Change-local research records the sanitized fixture location and separates these observations from the gateway behaviors that still require implementation E2E.

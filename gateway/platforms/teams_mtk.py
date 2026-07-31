@@ -27,7 +27,10 @@ import stat
 import sys
 import time
 import threading
+import unicodedata
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -81,6 +84,8 @@ except ImportError:
         "angry": "😡",
     }
 
+_SDK_MESSAGES_BASE_CLASS = _SDKMessages
+
 logger = logging.getLogger(__name__)
 
 # OAuth tenant and client IDs are derived from the authenticated user's cached
@@ -99,6 +104,13 @@ _ATTACHMENT_BEARER_HOSTS = (
     "onedrive.live.com",
     "1drv.ms",
 )
+_REVISION_STATE_MAX_ENTRIES = 4096
+
+
+@dataclass(frozen=True)
+class _MessageRevisionState:
+    explicit_candidate: Optional[tuple[Optional[str], Optional[str]]]
+    content_hash: str
 
 
 def _host_matches_suffix(hostname: str, suffix: str) -> bool:
@@ -126,6 +138,61 @@ def _message_id_key(value: Any) -> tuple:
     return 0, text
 
 
+def _normalized_revision_value(value: Any) -> Optional[str]:
+    """Normalize transport scalar types without trusting tenant-specific shapes."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _message_revision_state(message: dict) -> _MessageRevisionState:
+    """Build the deterministic revision candidate for one normalized message."""
+    version = (
+        message.get("_raw_version")
+        if "_raw_version" in message
+        else message.get("version")
+    )
+    edit_time = (
+        message.get("_raw_edit_time")
+        if "_raw_edit_time" in message
+        else message.get("edittime")
+        if "edittime" in message
+        else message.get("editTime")
+    )
+    if edit_time is None:
+        edit_time = _property_value(
+            message.get("_raw_properties")
+            if "_raw_properties" in message
+            else message.get("properties"),
+            "edittime",
+            "editTime",
+            "lastModifiedDateTime",
+        )
+    normalized_version = _normalized_revision_value(version)
+    normalized_edit_time = _normalized_revision_value(edit_time)
+    explicit_candidate = (
+        (normalized_version, normalized_edit_time)
+        if normalized_version is not None or normalized_edit_time is not None
+        else None
+    )
+
+    content = message.get("content")
+    if content is None:
+        content = message.get("_raw_content")
+    canonical_text, _ = _clean_message_content(str(content or ""))
+    canonical_text = unicodedata.normalize("NFC", canonical_text)
+    canonical_text = (
+        canonical_text.replace(chr(13) + chr(10), "\n")
+        .replace(chr(13), "\n")
+        .strip()
+    )
+    content_hash = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+    return _MessageRevisionState(explicit_candidate, content_hash)
+
+
 def _log_ref(value: Any) -> str:
     """Return a non-reversible identifier suitable for log correlation."""
     if value in (None, ""):
@@ -142,6 +209,71 @@ def _log_error(exc: BaseException) -> str:
         status = getattr(response, "status", None) or getattr(response, "status_code", None)
     suffix = f" status={status}" if isinstance(status, int) else ""
     return f"{type(exc).__name__}{suffix}"
+
+
+def _property_value(properties: Any, *names: str) -> Any:
+    """Read one raw message property without changing its value type."""
+    parsed = properties
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    for name in names:
+        if name in parsed:
+            return parsed[name]
+    return None
+
+
+def normalize_teams_sdk_message(raw_message: dict, normalized_message: dict) -> dict:
+    """Preserve revision-bearing MSG fields on the SDK-normalized output."""
+    message = dict(normalized_message)
+    raw_properties = raw_message.get("properties")
+    message["_raw_id"] = raw_message.get("id")
+    message["_raw_content"] = raw_message.get("content")
+    message["_raw_properties"] = raw_properties
+    message["_raw_version"] = raw_message.get("version")
+    message["_raw_edit_time"] = (
+        raw_message.get("edittime")
+        if "edittime" in raw_message
+        else raw_message.get("editTime")
+        if "editTime" in raw_message
+        else _property_value(
+            raw_properties,
+            "edittime",
+            "editTime",
+            "lastModifiedDateTime",
+        )
+    )
+    return message
+
+
+if _SDK_MESSAGES_BASE_CLASS is not None:
+    class _RevisionAwareSDKMessages(_SDK_MESSAGES_BASE_CLASS):
+        """SDK service variant that retains fields needed for edit detection."""
+
+        def _normalize_raw(self, msg: dict, conversation_id: str):
+            normalized = super()._normalize_raw(msg, conversation_id)
+            if normalized is None:
+                return None
+            return normalize_teams_sdk_message(msg, normalized)
+else:
+    _RevisionAwareSDKMessages = None
+
+
+def _new_sdk_messages_service(http_layer):
+    """Use revision-aware normalization without defeating test/plugin patches."""
+    service_class = _SDKMessages
+    if (
+        service_class is _SDK_MESSAGES_BASE_CLASS
+        and _RevisionAwareSDKMessages is not None
+    ):
+        service_class = _RevisionAwareSDKMessages
+    if service_class is None:
+        raise RuntimeError("Teams SDK MessagesService is unavailable")
+    return service_class(http_layer)
 
 
 def _redact_oid(oid: Optional[str], visible: int = 8) -> str:
@@ -1565,6 +1697,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         # Per-conversation last-seen message id (avoids replay on startup).
         self._last_message_ids: Dict[str, str] = {cid: None for cid in self._conv_ids}
+        # Bounded LRU revision state keyed by the exact conversation/message
+        # identity pair. The per-conversation process lock makes compare →
+        # record → dispatch atomic across overlapping poll and WebSocket fetches.
+        self._message_revisions: OrderedDict[
+            tuple[str, str], _MessageRevisionState
+        ] = OrderedDict()
         # WS and poll can fetch the same conversation concurrently. Serialize
         # cursor read → dispatch → advance per conversation to prevent duplicates.
         self._message_process_locks: Dict[str, asyncio.Lock] = {}
@@ -1664,6 +1802,45 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         if not msg_id:
             return False
         return self._sent_dedup.contains(self._sent_message_key(chat_id, str(msg_id)))
+
+    @staticmethod
+    def _message_revision_key(conv_id: str, msg_id: Any) -> tuple[str, str]:
+        return conv_id, str(msg_id)
+
+    def _remember_message_revision(
+        self,
+        conv_id: str,
+        msg_id: Any,
+        state: _MessageRevisionState,
+    ) -> None:
+        key = self._message_revision_key(conv_id, msg_id)
+        self._message_revisions[key] = state
+        self._message_revisions.move_to_end(key)
+        while len(self._message_revisions) > _REVISION_STATE_MAX_ENTRIES:
+            self._message_revisions.popitem(last=False)
+
+    def _advance_message_cursor(self, conv_id: str, msg_id: Any) -> None:
+        """Advance monotonically; processing an older edit must not rewind."""
+        current = self._last_message_ids.get(conv_id)
+        if current is None or _message_id_key(msg_id) > _message_id_key(current):
+            self._last_message_ids[conv_id] = str(msg_id)
+
+    def _seed_message_revisions_through(
+        self,
+        conv_id: str,
+        messages: List[dict],
+        cursor_id: Any,
+    ) -> None:
+        """Seed cold history without suppressing the unanswered catch-up turn."""
+        cursor_key = _message_id_key(cursor_id)
+        for message in messages:
+            msg_id = message.get("id")
+            if msg_id and _message_id_key(msg_id) <= cursor_key:
+                self._remember_message_revision(
+                    conv_id,
+                    msg_id,
+                    _message_revision_state(message),
+                )
 
     # ---- Per-group config (gateway.teams_mtk.groups in config.yaml) ----
 
@@ -1817,6 +1994,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     )["id"])
                     _seed_id = self._cold_start_seed_id(_conv_id, msgs)
                     self._last_message_ids[_conv_id] = _seed_id
+                    self._seed_message_revisions_through(
+                        _conv_id,
+                        msgs,
+                        _seed_id,
+                    )
                     if _seed_id != _max_id:
                         logger.info(
                             "TeamsMTK: cold-start catchup armed after msg=%s for conv=%s",
@@ -4058,7 +4240,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         fetch_error = None
         with lock:
             http_layer = self._get_sdk_http_layer_locked()
-            svc = _SDKMessages(http_layer)
+            svc = _new_sdk_messages_service(http_layer)
             try:
                 if limit is None:
                     # Full-history fetch via backwardLink pagination (S1-1).
@@ -4463,33 +4645,68 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         _last_id = self._last_message_ids.get(conv_id)
         _last_key = _message_id_key(_last_id) if _last_id is not None else None
-        new_by_id = {}
+        messages_by_id = {}
         for msg in messages:
             msg_id = msg.get("id")
             if not msg_id:
                 continue
-            if _last_key is None or _message_id_key(msg_id) > _last_key:
-                new_by_id.setdefault(str(msg_id), msg)
-            else:
+            # The canonical service normally returns one representation per ID.
+            # If a source provides more, keep its final representation.
+            messages_by_id[str(msg_id)] = msg
+
+        pending_messages = []
+        for msg in sorted(
+            messages_by_id.values(),
+            key=lambda candidate: _message_id_key(candidate["id"]),
+        ):
+            msg_id = msg["id"]
+            state = _message_revision_state(msg)
+            key = self._message_revision_key(conv_id, msg_id)
+            previous = self._message_revisions.get(key)
+            is_new_id = _last_key is None or _message_id_key(msg_id) > _last_key
+            if previous is None:
+                if is_new_id:
+                    pending_messages.append((msg, state, False))
+                    continue
+                # Bounded state cannot retain every historical cursor item.
+                # Establish a silent baseline instead of replaying old history.
+                self._remember_message_revision(conv_id, msg_id, state)
                 logger.debug(
-                    "TeamsMTK: skipping old msg id=%s (<= last=%s)",
+                    "TeamsMTK: seeding old msg revision id=%s (<= last=%s)",
                     _log_ref(msg_id),
                     _log_ref(_last_id),
                 )
+            elif previous == state:
+                self._message_revisions.move_to_end(key)
+                logger.debug(
+                    "TeamsMTK: skipping unchanged msg id=%s (last=%s)",
+                    _log_ref(msg_id),
+                    _log_ref(_last_id),
+                )
+            else:
+                pending_messages.append((msg, state, True))
 
-        new_messages = sorted(
-            new_by_id.values(),
-            key=lambda msg: _message_id_key(msg["id"]),
-        )
+        if pending_messages:
+            logger.info("TeamsMTK: %d new/revised messages to process", len(pending_messages))
 
-        if new_messages:
-            logger.info("TeamsMTK: %d new messages to process", len(new_messages))
-
-        for msg in new_messages:
+        for msg, revision_state, is_revision in pending_messages:
             msg_id = msg.get("id", "")
             msg_type = msg.get("messagetype", "")
             content = msg.get("content", "")
             sender = msg.get("imdisplayname") or msg.get("fromDisplayNameInToken") or "Teams User"
+
+            # Commit before asynchronous dispatch while the conversation lock is
+            # held. Overlapping poll/WS fetches then see this exact revision.
+            self._remember_message_revision(conv_id, msg_id, revision_state)
+            self._advance_message_cursor(conv_id, msg_id)
+            logger.info(
+                "TeamsMTK: recorded %s candidate id=%s conv=%s chars=%d hash=%s",
+                "revision" if is_revision else "message",
+                _log_ref(msg_id),
+                _log_ref(conv_id),
+                len(str(content or "")),
+                revision_state.content_hash[:12],
+            )
 
             logger.info(
                 "TeamsMTK: inspecting msg id=%s type=%s conv=%s last_sent=%s content_present=%s",
@@ -4517,7 +4734,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     self._vip_buffers[conv_id] = _vip_buf
                 if _vip_buf.is_vip(_sender_oid):
                     _action = _vip_buf.add(msg)
-                    self._last_message_ids[conv_id] = msg_id
+                    self._advance_message_cursor(conv_id, msg_id)
                     logger.info(
                         "TeamsMTK: VIP msg id=%s from oid=%s → %s (buf=%d)",
                         _log_ref(msg_id), _redact_oid(_sender_oid), _action, len(_vip_buf._messages),
@@ -4528,12 +4745,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
             # Skip system messages
             if msg_type in ("ThreadActivity/MemberJoined", "ThreadActivity/TopicUpdate"):
-                self._last_message_ids[conv_id] = msg_id
+                self._advance_message_cursor(conv_id, msg_id)
                 continue
 
             # Skip empty messages
             if not content:
-                self._last_message_ids[conv_id] = msg_id
+                self._advance_message_cursor(conv_id, msg_id)
                 continue
 
             # Echo-loop guard: in a self-chat (48:notes), every message can
@@ -4564,7 +4781,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 is_own = True
             if is_own:
                 logger.info("TeamsMTK: skipping own sent message id=%s", _log_ref(msg_id))
-                self._last_message_ids[conv_id] = msg_id
+                self._advance_message_cursor(conv_id, msg_id)
                 continue
 
             # ---- Attachment extraction (before HTML stripping) ----
@@ -4645,7 +4862,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             elif text and _att_urls and not re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text).strip():
                 text = "[attachment]"
             if not text:
-                self._last_message_ids[conv_id] = msg_id
+                self._advance_message_cursor(conv_id, msg_id)
                 continue
 
             # Control commands (/stop, /new, /reset, /approve, /deny, /status, etc.)
@@ -4680,7 +4897,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "TeamsMTK: ignoring group message id=%s (require_mention=true, no %s)",
                         _log_ref(msg_id), self._MENTION_TAG,
                     )
-                    self._last_message_ids[conv_id] = msg_id
+                    self._advance_message_cursor(conv_id, msg_id)
                     continue
                 # Strip the @hermes mention so the agent doesn't misinterpret it
                 text = re.sub(
@@ -4700,7 +4917,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "TeamsMTK: blocked inbound message id=%s in conv=%s (pattern ref=%s)",
                         _log_ref(msg_id), _log_ref(conv_id), _log_ref(_hit),
                     )
-                    self._last_message_ids[conv_id] = msg_id
+                    self._advance_message_cursor(conv_id, msg_id)
                     try:
                         await self.send(conv_id, self._BLOCKED_KEYWORD_NOTICE)
                     except Exception as e:
@@ -4727,7 +4944,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             "TeamsMTK: ignoring short message id=%s (%d chars, no ?/!/mention)",
                             _log_ref(msg_id), len(text.strip()),
                         )
-                        self._last_message_ids[conv_id] = msg_id
+                        self._advance_message_cursor(conv_id, msg_id)
                         continue
 
             # Resolve the immutable sender id before any adapter-local action.
@@ -4774,7 +4991,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                 logger.error(
                                     "TeamsMTK: model sub-picker send error: %s", _log_error(e)
                                 )
-                            self._last_message_ids[conv_id] = msg_id
+                            self._advance_message_cursor(conv_id, msg_id)
                             continue
 
                     elif step == "model":
@@ -4801,7 +5018,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                 except Exception as e:
                                     logger.error("TeamsMTK: model picker callback error: %s", _log_error(e))
                                     await self.send(conv_id, f"⚠ Model switch failed: {e}")
-                            self._last_message_ids[conv_id] = msg_id
+                            self._advance_message_cursor(conv_id, msg_id)
                             continue
 
             try:
@@ -4861,7 +5078,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     _log_error(e),
                 )
             finally:
-                self._last_message_ids[conv_id] = msg_id
+                self._advance_message_cursor(conv_id, msg_id)
 
 
 # ---------------------------------------------------------------------------

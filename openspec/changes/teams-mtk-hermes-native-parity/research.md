@@ -2,7 +2,7 @@
 
 > **研究日期：2026-07-30**
 > **性質：change-local ephemeral research；實作前必須重新驗證 live upstream、tenant 權限與真實 Teams 行為。**
-> 本文只做研究與整合排序，不修改 OpenSpec、程式碼或 credentials。
+> 原始研究階段只做研究與整合排序，不修改程式碼或 credentials；其後完成的去識別協定 probe 已在下方 addendum 對 OpenSpec 的 P0 契約作證據收斂。
 
 ## Executive summary
 
@@ -13,6 +13,21 @@
 5. **官方Teams plugin不能整包搬進MTK。** 官方路徑使用Azure Bot Framework／`microsoft-teams-apps`、public webhook與bot credentials；MTK路徑使用使用者身分的Skype MSG/ChatSvc、Trouter WebSocket＋HTTP poll及部分Graph delegated API。應選擇性移植behavior contract，不應混用credential或並存兩個inbound source造成duplicate dispatch。
 6. **AIDE與OpenAI Codex是provider層，與Teams transport解耦。** Teams訊息仍進同一個`AIAgent`路徑。AIDE host／model／quota／fallback錯誤，或Codex OAuth錯誤，應獨立診斷；不能標成Skype／Graph regression。
 7. **安全整合順序應是：Query revision correctness → fail-closed authorization → chat-native dispatch → WS observability/policy → native media → optional Bot Framework UX → docs/checklist。** 在任何一步刪除舊SDK/raw fallback前，都要有命名真實Teams E2E等價證據。
+
+## 0. 2026-07-30 Edit/Reply Protocol-Probe Reconciliation
+
+Final de-identified evidence lives under `%LOCALAPPDATA%/Temp/hermes-prototype-teams-mtk-edit-reply-20260730-224913/`. The authoritative entry point is `comparison.md`; supporting fixtures are `create.redacted.json`, `edit.redacted.json`, `reply.redacted.json`, and `cleanup.txt`. Earlier redaction-gate failures are superseded and must not be used.
+
+The accepted run reported `PROTOTYPE_RESULT=PASS probes=2/2 cleanup=PASS redaction=PASS production_unchanged=PASS`. It establishes the following transport inputs, not gateway completion:
+
+- Create and edit used the same message identity. The edited object replaced the original body and appeared once on repeated canonical polling.
+- The edited representation changed `version` and added `properties.edittime`; those values matched after type normalization in this fixture. Sequence, client-message identity, composition time, and original-arrival time did not change.
+- `properties.hermes_sender` was present on create and absent after edit. Echo ownership therefore cannot require this property to survive a revision.
+- The native reply identified its source through `properties.replyChainMessageId`, a `qtdMsgs` message relation, and the blockquote relation. No `replyToId` was observed.
+- The display quote was shorter than the complete source. Direct authenticated retrieval of the exact source by relation identity returned HTTP 200 and matched the complete source hash and visible text.
+- Teams desktop relation rendering remained `unknown`; service storage and direct relation retrieval were observed. Cross-tenant envelope stability also remains unknown because Skype MSG/ChatSvc is a private transport.
+
+The resulting minimum contract is: bounded chat-scoped revision state; explicit version/edit-time use when available and self-consistent; deterministic canonical-content hash as the mandatory fallback and duplicate suppressor; exact reply-source retrieval by relation identity; existing `MessageEvent` reply fields for full context; and SDK-native outbound reply with explicit duplicate-safe flat degradation.
 
 ## 1. Scope and method
 
@@ -144,8 +159,8 @@ Teams edit通常保留原message ID，因此即使poll或Trouter再次看到已�
 <thead><tr><th>能力</th><th>Skype MSG／ChatSvc現況</th><th>Microsoft Graph官方能力</th><th>整合判定</th></tr></thead>
 <tbody>
 <tr><td>send/edit/delete/reply/forward</td><td>SDK已有對應低階方法；MTK已用send/edit/delete/forward，但reply尚未接。</td><td>Graph亦有send/update/reply；application send主要限migration。</td><td>優先補Skype adapter接線，沒有理由為reply改成Graph。</td></tr>
-<tr><td>辨識edit</td><td>private contract可能含時間／properties，但目前normalizer未保留；需先抓真實raw envelope。</td><td><code>chatMessage</code>正式欄位有<code>lastEditedDateTime</code>、<code>lastModifiedDateTime</code>；change notification可收create/update/delete。</td><td>先做Skype content hash/version state；Graph只作可選enrichment，不要求高權限才能正確。</td></tr>
-<tr><td>Structured reply</td><td>SDK reply會寫<code>replyChainMessageId</code>與<code>qtdMsgs</code>，表示Skype raw properties已有可解析資訊；目前inbound normalizer沒升格。</td><td>Graph <code>chatMessage</code>有<code>replyToId</code>，可GET原訊息。</td><td>先從<code>_raw_properties</code>解析並按ID抓完整原文；Graph只在Skype資料不足時補充。</td></tr>
+<tr><td>辨識edit</td><td>受控fixture已觀察同ID edit、變更的<code>version</code>與<code>properties.edittime</code>；目前normalizer與cursor尚未利用。</td><td><code>chatMessage</code>正式欄位有<code>lastEditedDateTime</code>、<code>lastModifiedDateTime</code>；change notification可收create/update/delete。</td><td>先做Skype content hash/version state；Graph只作可選enrichment，不要求高權限才能正確。</td></tr>
+<tr><td>Structured reply</td><td>受控fixture已觀察<code>replyChainMessageId</code>、<code>qtdMsgs</code>與blockquote relation，且relation-driven exact GET可取得完整原文；目前inbound normalizer沒升格。</td><td>Graph <code>chatMessage</code>有<code>replyToId</code>，可GET原訊息。</td><td>先從<code>_raw_properties</code>解析並按ID抓完整原文；Graph只在Skype資料不足時補充。</td></tr>
 <tr><td>Reactions</td><td>SDK/adapter已接；歷史E2E記載成功。</td><td>[Graph <code>setReaction</code>](https://learn.microsoft.com/en-us/graph/api/chatmessage-setreaction?view=graph-rest-1.0)為正式API。</td><td>保留現有Graph transport與ownership/allowlist。</td></tr>
 <tr><td>文件</td><td>AMS適合image；SharePoint raw URL曾401。</td><td>Graph <code>/shares/{id}/driveItem/content</code>可用Graph-audience token。</td><td>現有混合方案合理；Skype與Graph token不可互換。</td></tr>
 <tr><td>建立chat</td><td>現有SDK直接POST Skype threads，已解除原先「一定要Chat.Create」假設。</td><td>[Graph create chat](https://learn.microsoft.com/en-us/graph/api/chat-post?view=graph-rest-1.0)需相應delegated權限。</td><td>Skype可做就不擴Graph scope。</td></tr>
@@ -269,7 +284,7 @@ AIDE是custom provider route，不是官方Teams transport。Hermes的custom pro
 - **沒有完成`339d968..live main`的全repo逐commit升級分析。** Git fetch被EPM阻擋，GitHub Atom也不支援本文需要的可靠完整pagination；本文固定source archive做的是能力面比較。正式upstream upgrade仍應另走`docs/mtk-upstream-upgrade-runbook.md`。
 - **本輪沒有重跑真實Teams E2E。** `tasks.md`中24/24、reaction/delete/media等是歷史記錄，不是本輪current evidence；本文只重驗source與targeted unit tests。
 - **Graph tenant實際delegated scopes為Unknown。** 未讀token／credentials；任何Graph方案都需在不洩密前提下用live endpoint驗scope。
-- **Skype MSG/ChatSvc edit envelope的完整欄位為Unknown。** 下一步應先保存一組redacted raw create→edit→quoted reply fixture，再定schema。
+- **Skype MSG/ChatSvc edit/reply envelope只在一個受控DM fixture中觀察。** 同ID edit、`version`／`edittime`、reply-chain／quoted-message／blockquote relations與exact source GET已觀察；跨tenant shape stability仍為Unknown，因此content hash與相容解析不可省略。
 - **官方Teams plugin本身也未填inbound reply metadata。** 因此不能把此缺口描述成單純「MTK落後官方Teams」；它是Hermes cross-platform contract尚未在Teams兩條transport實現。
 
 ## 11. Primary sources

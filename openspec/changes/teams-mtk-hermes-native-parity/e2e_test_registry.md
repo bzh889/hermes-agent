@@ -206,6 +206,20 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **驗證證據**: ✅ 2026-07-13 PASS（`e2e_teams_mtk.py` garbage-detector-no-false-positive）
 **結論**: AIDE 高 context 偶發 Cyrillic/Arabic 退化是真警報（score ~8.0 vs threshold 3.0），非誤判；但 fallback chain 包含無權限模型是 bug（已修，見 E12）
 
+#### E15: inbound-edit-revision-reopens-query（Tier 2）
+**對應 bug**: 已處理的真人查詢原地編輯後保留相同 remote identity，舊 cursor 僅依 message ID 判斷而不會再開 revised turn
+**觸發方式**: Graph API 建立真人訊息；等待原始 turn 完成後，以 canonical MSG API 對讀回的同一 identity 原地編輯
+**操作步驟**:
+  1. 記錄 baseline，送出 `/new` 並確認新 acknowledgement
+  2. 送出唯一原始查詢，等待一個 exact bot reply
+  3. canonical read-back 取得真人查詢 identity，以 MSG `PUT` 編輯該 identity
+  4. 等待 poll/WebSocket overlap settle window，再做第二次 canonical read-back
+  5. 分別計數 revised exact reply、duplicate、original replay 與 cleanup residue
+**Gateway log 驗證**: 僅保留 `recorded revision candidate` 的 message/conversation hash、字元長度與 content hash，不記錄 raw identity/body
+**回覆內容驗證**: `revised_dispatch=1`、`duplicate_dispatch=0`、完整 edited body match、`original_replay=0`
+**DONE 定義**: 同一 remote identity 只產生一個完整 revised turn，finally 清理後 marker residue 為 0；任何 cleanup 錯誤使測項 FAIL
+**驗證證據**: ✅ 2026-07-31 targeted real-gateway PASS（`--only inbound-edit-revision-reopens-query`）；最終驗收仍需不帶 `--only` 的完整 NAMED_TESTS
+
 ---
 
 ## 🟡 待實作驗收項目
@@ -295,3 +309,43 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: 觀察 `gateway.log` 確認出現 `cronjob executed: daily-e2e-skill-verify`
 **回覆內容驗證**: Teams 對話收到 cron job 預期內容
 **DONE 定義**: 自動排程訊息成功送達且內容與手動執行一致
+
+### 4. Query revision 與 native reply（P0）
+
+> 這三個 verdict 必須獨立。Transport probe 只證明 raw envelope 可支援契約，不能取代真實 gateway dispatch、MessageEvent context、native outbound relation 或 cleanup 驗收。
+
+#### inbound-edit-revision-reopens-query（Tier 2）
+**觸發方式**: 由真實 human inbound 路徑建立一則唯一 query，等待首輪完成後直接編輯同一 remote message identity
+**操作步驟**:
+  1. 記錄控制對話 baseline 與唯一 marker
+  2. 發送原始 query，等待 canonical read-back 與首輪 model reply
+  3. 對同一 message identity 寫入修訂後完整 query
+  4. 等待 poll/WS 重疊窗口結束並再次 canonical read-back
+  5. 在 `finally` 依精確 IDs／marker 清除原始、修訂與所有 bot artifacts
+**Gateway log 驗證**: 同一 chat/message identity 只出現一次 revision dispatch；重複 poll 不新增 turn
+**回覆內容驗證**: 新回覆只根據修訂後完整 query；舊 body 未重播，revision 只產生一個新回答
+**DONE 定義**: revision dispatch=1、duplicate=0、canonical edited body match、cleanup residue=0
+
+#### quoted-reply-full-context-revises-query（Tier 2）
+**觸發方式**: 由 human inbound 路徑對一則長於 quote preview 的來源訊息做 native reply，reply body 明確修訂需求
+**操作步驟**:
+  1. 建立含 terminal sentinel 的長來源訊息並 canonical read-back
+  2. 以 native reply 提交修訂 body
+  3. 驗證 reply relation identity，並用該 identity 直接取得完整 source
+  4. 驗證 gateway event／model reply使用完整 source＋修訂 body，而非 preview
+  5. 在 `finally` 清除 source、reply與所有 bot artifacts並 read-back residue
+**Gateway log 驗證**: reply source identity 與 full-context fetch 成功；不把 preview 標成 full context
+**回覆內容驗證**: 回覆必須反映 terminal sentinel 後的完整 source 資訊與修訂 body
+**DONE 定義**: exact relation match、full source hash match、preview-only=false、cleanup residue=0
+
+#### reply-to-native-thread-roundtrip（Tier 2）
+**觸發方式**: 讓 Hermes 透過正式 delivery path 帶 `reply_to` 回覆受控來源訊息
+**操作步驟**:
+  1. 建立受控 target message 並取得 canonical identity
+  2. 呼叫 Hermes delivery path 產生回覆
+  3. canonical read-back 驗證 reply-chain／quoted-message／blockquote relation 指向 target
+  4. 額外用 forced pre-send-unavailable fixture 驗證 flat fallback 只送一次且有 degradation signal
+  5. 在 `finally` 清除 target、native reply、fallback fixture與所有相關 artifacts
+**Gateway log 驗證**: 正常路徑明確走 native SDK reply；只有 pre-send unavailable 可出現 flat degradation；indeterminate send 不得二次 flat send
+**回覆內容驗證**: 正常路徑保留 native relation；fallback 路徑內容只出現一次
+**DONE 定義**: native relation read-back PASS、duplicate=0、forced fallback observable、cleanup residue=0

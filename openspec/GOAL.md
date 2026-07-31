@@ -1,7 +1,7 @@
-Fix the v19 Gateway restart false failure while preserving the MTK integration and user data.
+Make `.\hermes desktop` install and launch reliably on the MTK Windows network.
 
-- Current state: fixed and live-verified. `bash .\hermes.sh gateway restart` cleanly stopped and started PID 60808; Teams MTK and API are connected, and the supplied Teams 1-to-1 chat completed a real receive/reply round trip.
-- Verified surfaces: TUI Node + Python gateway stayed ready without timeout; dashboard and desktop `serve` returned v0.19.0 health; TUI, Web, and Desktop builds passed.
-- Next: present the exact commit scope and wait for one closing authorization before commit/push/archive.
-- Guardrails: preserve all memories, sessions, improved skills, the 44 Junctions into .claude/skills, provider config, and pre-existing user worktree changes.
-- Deferred: pre-existing Teams MTK and other user worktree changes remain intentionally uncommitted unless separately authorized.
+- Current state: the real command still fails while Electron's postinstall downloads its binary with `read ECONNRESET`; npm removes the staged Electron package before Hermes can recover.
+- Completion proof: run the unmodified `.\hermes desktop` path through dependency installation and confirm the Desktop process starts.
+- Next: move Electron's binary fetch after npm installation, use the Windows certificate store, then run focused tests and the real command.
+- Guardrails: never disable TLS verification; preserve all pre-existing worktree changes.
+- Deferred: npm dependency deprecation notices are separate maintenance work unless they cause this install failure.

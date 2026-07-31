@@ -34,6 +34,337 @@ def _load_e2e_module():
     return module
 
 
+def test_model_picker_parser_accepts_sdk_normalized_text():
+    e2e = _load_e2e_module()
+    provider_card = (
+        "⚙️ Select ProviderCurrent: **model-5.6** via Provider B"
+        "1Provider A (4)2Provider B ← (9)3Provider C (2)"
+    )
+    model_card = (
+        "⚙️ Select ModelCurrent: **model-5.6** via Provider B"
+        "1model-5.5 (old)2model-5.6 ✓3model-6.0"
+    )
+
+    assert e2e._picker_current_model(provider_card) == "model-5.6"
+    assert e2e._picker_numbered_choice(provider_card, "←") == 2
+    assert e2e._picker_numbered_choice(model_card, "model-5.6") == 2
+
+
+def test_model_picker_parser_keeps_raw_html_compatibility():
+    e2e = _load_e2e_module()
+    provider_card = (
+        'Current: <b>model-x</b> via Provider B'
+        '<div style="margin:1px 0"><span>2</span>Provider B ←</div>'
+    )
+
+    assert e2e._picker_current_model(provider_card) == "model-x"
+    assert e2e._picker_numbered_choice(provider_card, "←") == 2
+
+
+def test_inbound_edit_revision_e2e_uses_ticket_registry_name():
+    e2e = _load_e2e_module()
+
+    assert (
+        e2e.NAMED_TESTS["inbound-edit-revision-reopens-query"]
+        is e2e.test_same_id_edit_reopens_exactly_one_revised_query
+    )
+
+
+def test_dm_echo_guard_uses_active_sdk_auth_and_exact_cleanup(monkeypatch):
+    e2e = _load_e2e_module()
+    marker = "E2EECHOABCDEF123456"
+    reply = {
+        "id": "reply",
+        "content": marker,
+        "_raw_content": _branded_bot_html(marker),
+    }
+    readbacks = iter([[], [reply], [reply], []])
+    sent = []
+    deleted_graph = []
+    deleted_msg = []
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+    monkeypatch.setattr(e2e, "send_chat_message", lambda *args: sent.append(args) or "query")
+    monkeypatch.setattr(e2e, "wait_and_check_log", lambda *args, **kwargs: (True, "ok"))
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda chat_id, message_id: deleted_graph.append((chat_id, message_id)),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda chat_id, message_id: deleted_msg.append((chat_id, message_id)),
+    )
+
+    ok, evidence = e2e.test_dm_echo_guard("unused.log", 0)
+
+    assert ok is True
+    assert evidence == "ok"
+    assert sent == [(e2e.DM_CHAT_ID, f"/new {marker}")]
+    assert deleted_graph == [(e2e.DM_CHAT_ID, "query")]
+    assert deleted_msg == [(e2e.DM_CHAT_ID, "reply")]
+
+
+def test_mention_gate_process_uses_exact_readback_and_cleanup(monkeypatch):
+    e2e = _load_e2e_module()
+    monkeypatch.setattr(
+        e2e,
+        "_busy_burst_group_idle_preflight",
+        lambda: (True, "control group idle", set()),
+    )
+    marker = "E2EMENTIONABCDEF123456"
+    reply = {
+        "id": "reply",
+        "content": marker,
+        "_raw_content": _branded_bot_html(marker),
+    }
+    readbacks = iter([[], [reply], [reply], []])
+    sent = []
+    deleted_graph = []
+    deleted_msg = []
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda chat_id, content: sent.append((chat_id, content)) or "graph-message",
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda chat_id, message_id: deleted_graph.append((chat_id, message_id)),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda chat_id, message_id: deleted_msg.append((chat_id, message_id)),
+    )
+
+    ok, evidence = e2e.test_mention_gating_process("unused.log", 0)
+
+    assert ok is True
+    assert evidence == "mention_dispatch=1; duplicate_dispatch=0"
+    assert marker in sent[0][1]
+    assert deleted_graph == [(e2e.GROUP_CHAT_ID, "graph-message")]
+    assert deleted_msg == [(e2e.GROUP_CHAT_ID, "reply")]
+
+
+def test_mention_gate_ignore_uses_unique_marker_and_exact_cleanup(monkeypatch):
+    e2e = _load_e2e_module()
+    monkeypatch.setattr(
+        e2e,
+        "_busy_burst_group_idle_preflight",
+        lambda: (True, "control group idle", set()),
+    )
+    marker = "E2EIGNOREABCDEF123456"
+    readbacks = iter([[], [], []])
+    sent = []
+    deleted_graph = []
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda chat_id, content: sent.append((chat_id, content)) or "graph-message",
+    )
+    monkeypatch.setattr(e2e, "wait_and_check_log", lambda *args, **kwargs: (True, "ok"))
+    monkeypatch.setattr(e2e, "tail_log", lambda *args, **kwargs: "")
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda chat_id, message_id: deleted_graph.append((chat_id, message_id)),
+    )
+
+    ok, evidence = e2e.test_mention_gating_ignore("unused.log", 0)
+
+    assert ok is True
+    assert evidence == "mention_ignored=True; dispatch_count=0; reply_count=0"
+    assert marker in sent[0][1]
+    assert deleted_graph == [(e2e.GROUP_CHAT_ID, "graph-message")]
+
+
+@pytest.mark.parametrize("duplicate", [False, True], ids=["one-reply", "duplicate"])
+def test_same_id_revision_e2e_counts_revised_dispatches_and_cleans_up(
+    monkeypatch,
+    duplicate,
+):
+    e2e = _load_e2e_module()
+    e2e.DM_CHAT_ID = "test-chat"
+    prefix = "E2EEDITABCDEF123456"
+    reset_marker = f"{prefix}RESET"
+    original_marker = f"{prefix}ORIGINAL"
+    revised_body = f"{prefix}REVISEDA|{prefix}REVISEDB"
+    old = {"id": "old", "content": "old"}
+    reset_ack = {
+        "id": "ack",
+        "content": f"session {reset_marker}",
+        "_raw_content": _branded_bot_html(f"session {reset_marker}"),
+    }
+    query = {
+        "id": "query",
+        "content": (
+            f"Reply with exactly {original_marker}. Do not add other text or use tools."
+        ),
+    }
+    edited_query = {
+        "id": "query",
+        "content": (
+            f"Reply with exactly {revised_body}. Do not add other text or use tools."
+        ),
+    }
+    original_reply = {
+        "id": "original-reply",
+        "content": original_marker,
+        "_raw_content": _branded_bot_html(original_marker),
+    }
+    revised_reply = {
+        "id": "revised-reply",
+        "content": revised_body,
+        "_raw_content": _branded_bot_html(revised_body),
+    }
+    revised_replies = [revised_reply]
+    if duplicate:
+        revised_replies.append(
+            {
+                "id": "revised-reply-duplicate",
+                "content": revised_body,
+                "_raw_content": _branded_bot_html(revised_body),
+            }
+        )
+    before_edit = [original_reply, query, reset_ack, old]
+    after_edit = [*revised_replies, original_reply, edited_query, reset_ack, old]
+    readbacks = iter(
+        [
+            [old],
+            [reset_ack, old],
+            [reset_ack, old],
+            before_edit,
+            before_edit,
+            after_edit,
+            after_edit,
+            after_edit,
+            [],
+        ]
+    )
+    sent_ids = iter(["graph-reset", "graph-query"])
+    sent_contents = []
+    edited = []
+    deleted_graph = []
+    deleted_msg = []
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda _chat, content: sent_contents.append(content) or next(sent_ids),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "edit_msg_message",
+        lambda _chat, message_id, content: edited.append((message_id, content))
+        or message_id,
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda _chat, message_id: deleted_graph.append(message_id),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda _chat, message_id: deleted_msg.append(message_id),
+    )
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+
+    ok, evidence = e2e.test_same_id_edit_reopens_exactly_one_revised_query(
+        "unused.log",
+        0,
+        reply_timeout=0,
+        settle_seconds=0,
+    )
+
+    assert ok is not duplicate
+    assert f"revised_dispatch={2 if duplicate else 1}" in evidence
+    assert f"duplicate_dispatch={1 if duplicate else 0}" in evidence
+    assert "original_replay=0" in evidence
+    assert sent_contents == [
+        f"/new {reset_marker}",
+        f"Reply with exactly {original_marker}. Do not add other text or use tools.",
+    ]
+    assert edited == [
+        (
+            "query",
+            f"Reply with exactly {revised_body}. Do not add other text or use tools.",
+        )
+    ]
+    assert deleted_graph == ["graph-reset", "graph-query"]
+    expected_deleted = {"ack", "query", "original-reply", "revised-reply"}
+    if duplicate:
+        expected_deleted.add("revised-reply-duplicate")
+    assert set(deleted_msg) == expected_deleted
+
+
+def test_same_id_revision_e2e_cleans_artifact_after_malformed_send_response(
+    monkeypatch,
+):
+    e2e = _load_e2e_module()
+    e2e.DM_CHAT_ID = "test-chat"
+    prefix = "E2EEDITABCDEF123456"
+    remote_reset = {"id": "remote-reset", "content": f"/new {prefix}RESET"}
+    readbacks = iter([[{"id": "old", "content": "old"}], [remote_reset], []])
+    deleted_msg = []
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+
+    def malformed_send(_chat, _content):
+        raise KeyError("missing response id")
+
+    monkeypatch.setattr(e2e, "send_chat_message", malformed_send)
+    monkeypatch.setattr(e2e, "delete_graph_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda _chat, message_id: deleted_msg.append(message_id),
+    )
+
+    with pytest.raises(KeyError, match="missing response id"):
+        e2e.test_same_id_edit_reopens_exactly_one_revised_query("unused.log", 0)
+
+    assert deleted_msg == ["remote-reset"]
+
+
+def test_same_id_revision_e2e_cleanup_failure_fails_the_item(monkeypatch):
+    e2e = _load_e2e_module()
+    e2e.DM_CHAT_ID = "test-chat"
+    prefix = "E2EEDITABCDEF123456"
+    remote_reset = {"id": "remote-reset", "content": f"/new {prefix}RESET"}
+    readbacks = iter([[{"id": "old", "content": "old"}], [remote_reset], []])
+
+    monkeypatch.setattr(e2e.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef1234567890"))
+    monkeypatch.setattr(e2e, "get_messages_raw", lambda *args, **kwargs: next(readbacks))
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("missing response id")),
+    )
+    monkeypatch.setattr(e2e, "delete_graph_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("delete failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        e2e.test_same_id_edit_reopens_exactly_one_revised_query("unused.log", 0)
+
+
 def test_streaming_e2e_rejects_new_session_ack_without_marker_reply(monkeypatch):
     """A /new acknowledgment is not evidence that the model turn completed."""
     e2e = _load_e2e_module()
@@ -912,10 +1243,12 @@ def test_e2e_readback_uses_gateway_atomic_auth(monkeypatch):
     assert e2e.get_skype_token() == "skype-token"
 
 
-def test_e2e_sdk_send_uses_gateway_auth_adapter(monkeypatch):
+def test_e2e_sdk_send_uses_gateway_auth_and_shared_transport(monkeypatch):
     e2e = _load_e2e_module()
-    gateway_auth = object()
-    adapter = object()
+    truststore_injections = []
+    gateway_auth = SimpleNamespace(
+        _inject_truststore=lambda: truststore_injections.append(True),
+    )
     http = object()
     observed = {}
 
@@ -931,14 +1264,14 @@ def test_e2e_sdk_send_uses_gateway_auth_adapter(monkeypatch):
 
     monkeypatch.setattr(messages_module, "MessagesService", FakeMessagesService)
     monkeypatch.setattr(
-        e2e, "_SDKAuthAdapter", lambda actual_auth: adapter if actual_auth is gateway_auth else None
-    )
-    monkeypatch.setattr(
-        e2e, "_SDKHTTPLayer", lambda actual_adapter: http if actual_adapter is adapter else None
+        e2e,
+        "_get_readback_http_layer",
+        lambda actual_auth: http if actual_auth is gateway_auth else None,
     )
     setattr(e2e, "_gateway_auth", gateway_auth)
 
     result = e2e.send_via_sdk("chat-id", "marker")
 
     assert result == "12345"
+    assert truststore_injections == [True]
     assert observed == {"http": http, "send": ("chat-id", "marker")}
