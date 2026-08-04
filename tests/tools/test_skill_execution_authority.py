@@ -224,6 +224,39 @@ def test_owner_authority_can_modify_a_directory_symlink_target(
     assert "NEW_MARKER" in (target / "SKILL.md").read_text(encoding="utf-8")
 
 
+def test_tui_owner_can_patch_exact_plugin_provided_skill(skill_root, tmp_path):
+    plugin_skill = tmp_path / "plugin-bundle" / "skills" / "plugin-skill"
+    plugin_skill.mkdir(parents=True)
+    (plugin_skill / "SKILL.md").write_text(
+        VALID_SKILL.replace("authority-skill", "plugin-skill"),
+        encoding="utf-8",
+    )
+
+    class PluginManagerStub:
+        def find_plugin_skill(self, qualified_name):
+            assert qualified_name == "sample-plugin:plugin-skill"
+            return plugin_skill / "SKILL.md"
+
+    tokens = _bind(source="tui")
+    try:
+        with patch("hermes_cli.plugins.discover_plugins"), patch(
+            "hermes_cli.plugins.get_plugin_manager", return_value=PluginManagerStub()
+        ):
+            result = json.loads(
+                skill_manage(
+                    action="patch",
+                    name="sample-plugin:plugin-skill",
+                    old_string="OLD_MARKER",
+                    new_string="NEW_MARKER",
+                )
+            )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result["success"] is True, result
+    assert "NEW_MARKER" in (plugin_skill / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_concurrent_turns_do_not_share_owner_authority(skill_root):
     for name in ("owner-skill", "other-skill"):
         path = skill_root / name

@@ -645,14 +645,20 @@ def _resolve_skill_dir(name: str, category: str = None) -> Path:
 
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
-    """
-    Find a skill by name across all skill directories.
+    """Find a skill through the same visible sources as ``skill_view``."""
+    if ":" in name:
+        from agent.skill_utils import is_valid_namespace, parse_qualified_name
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
 
-    Searches the local skills dir (~/.hermes/skills/) first, then any
-    external dirs configured via skills.external_dirs.  Returns
-    {"path": Path} or None.
-    """
+        namespace, bare = parse_qualified_name(name)
+        if is_valid_namespace(namespace) and _validate_name(bare) is None:
+            discover_plugins()  # idempotent; same resolver used by skill_view
+            skill_md = get_plugin_manager().find_plugin_skill(name)
+            if skill_md is not None and skill_md.is_file():
+                return {"path": skill_md.parent}
+
     from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
+
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
