@@ -180,3 +180,33 @@ async def test_reply_snippet_truncated_to_500_chars():
     assert result is not None
     assert result.startswith('[Replying to: "' + "x" * 500 + '"]')
     assert "x" * 501 not in result
+
+
+@pytest.mark.asyncio
+async def test_verified_complete_reply_context_keeps_late_requirement_visible():
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.TEAMS_MTK,
+        chat_id="conversation-alias",
+        chat_type="private",
+        user_name="Reply Author",
+    )
+    late_reversal = "FINAL REQUIREMENT: use the revised blue deployment."
+    full_source = "OLD REQUIREMENT: use red. " + ("padding " * 90) + late_reversal
+    event = MessageEvent(
+        text="apply the revised request",
+        source=source,
+        reply_to_message_id="source-message",
+        reply_to_text=full_source,
+        reply_to_text_complete=True,
+    )
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is not None
+    assert late_reversal in result
+    assert result.endswith("apply the revised request")

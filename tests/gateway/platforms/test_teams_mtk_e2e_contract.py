@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,6 +71,244 @@ def test_inbound_edit_revision_e2e_uses_ticket_registry_name():
     )
 
 
+def test_quoted_reply_e2e_uses_ticket_registry_name():
+    e2e = _load_e2e_module()
+
+    assert (
+        e2e.NAMED_TESTS["quoted-reply-full-context-revises-query"]
+        is e2e.test_quoted_reply_full_context_revises_query
+    )
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"emotions": [{"key": "like", "users": ["user-a", "user-b"]}]},
+        json.dumps(
+            {"emotions": [{"key": "like", "users": ["user-a", "user-b"]}]}
+        ),
+    ],
+)
+def test_reaction_verifier_reads_exact_raw_properties_without_returning_identities(
+    monkeypatch,
+    properties,
+):
+    e2e = _load_e2e_module()
+    calls = []
+
+    def _exact(chat_id, message_id):
+        calls.append((chat_id, message_id))
+        return {"properties": properties}
+
+    monkeypatch.setattr(e2e, "get_message_raw_exact", _exact)
+
+    assert e2e._reaction_user_count("conversation-alias", "message-alias", "like") == 2
+    assert calls == [("conversation-alias", "message-alias")]
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"deletetime": "123"},
+        json.dumps({"deletetime": "123"}),
+    ],
+)
+def test_tombstone_verifier_reads_exact_raw_state_without_returning_content(
+    monkeypatch,
+    properties,
+):
+    e2e = _load_e2e_module()
+
+    monkeypatch.setattr(
+        e2e,
+        "get_message_raw_exact",
+        lambda _chat_id, _message_id: {
+            "content": "",
+            "properties": properties,
+        },
+    )
+
+    assert e2e._exact_tombstone_state("conversation-alias", "message-alias") == (
+        True,
+        0,
+        True,
+    )
+
+
+def test_html_tag_verifier_reads_exact_raw_message(monkeypatch):
+    e2e = _load_e2e_module()
+    calls = []
+
+    def _exact(chat_id, message_id):
+        calls.append((chat_id, message_id))
+        return {"content": '<p>caption</p><img src="redacted">'}
+
+    monkeypatch.setattr(e2e, "get_message_raw_exact", _exact)
+
+    assert e2e._exact_message_has_html_tag(
+        "conversation-alias",
+        "message-alias",
+        "img",
+    ) is True
+    assert calls == [("conversation-alias", "message-alias")]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"content": '<p>caption</p><a href="https://redacted.invalid/share">file</a>'},
+        {
+            "content": "caption",
+            "properties": {
+                "files": json.dumps(
+                    [{"fileInfo": {"shareUrl": "https://redacted.invalid/share"}}]
+                )
+            },
+        },
+    ],
+)
+def test_document_verifier_reads_exact_share_contract(monkeypatch, message):
+    e2e = _load_e2e_module()
+    monkeypatch.setattr(e2e, "get_message_raw_exact", lambda *_args: message)
+
+    assert e2e._exact_document_has_share_link(
+        "conversation-alias",
+        "message-alias",
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("message", "property_key"),
+    [
+        ({"content": "E2E_MARKER"}, None),
+        (
+            {
+                "content": "",
+                "properties": {
+                    "cards": json.dumps([{"content": {"text": "E2E_MARKER"}}])
+                },
+            },
+            "cards",
+        ),
+    ],
+)
+def test_exact_marker_verifier_reads_content_or_named_property(
+    monkeypatch,
+    message,
+    property_key,
+):
+    e2e = _load_e2e_module()
+    monkeypatch.setattr(e2e, "get_message_raw_exact", lambda *_args: message)
+
+    assert e2e._exact_message_contains_marker(
+        "conversation-alias",
+        "message-alias",
+        "E2E_MARKER",
+        property_key=property_key,
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "raw_html, expected",
+    [
+        (
+            "<p><strong>Conclusion</strong></p><table><tr><td>ok</td></tr></table>",
+            [],
+        ),
+        ("<p>**bold** `code` [link](https://example.invalid)</p>", [
+            "**bold**",
+            "`code`",
+            "[text](url)",
+        ]),
+        ("- leaked bullet", ["- bullet"]),
+        ("| name | state |", ["| pipe table |"]),
+    ],
+)
+def test_residual_markdown_classifier_checks_raw_rendered_html(raw_html, expected):
+    e2e = _load_e2e_module()
+
+    assert e2e._residual_markdown_labels(raw_html) == expected
+
+
+def test_busy_burst_addressing_respects_group_mention_policy():
+    e2e = _load_e2e_module()
+
+    assert e2e._address_busy_burst_prompt("correction", require_mention=False) == (
+        "correction"
+    )
+    assert e2e._address_busy_burst_prompt("correction", require_mention=True) == (
+        '<at id="0">Hermes</at>&nbsp;correction'
+    )
+
+
+def test_native_user_reply_uses_exact_source_relation_without_bot_marker(
+    monkeypatch,
+):
+    e2e = _load_e2e_module()
+    calls = []
+
+    class _Auth:
+        msg_base = "https://msg.example/v1/users/ME"
+
+        @staticmethod
+        def _inject_truststore():
+            return None
+
+    class _Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _HTTP:
+        @staticmethod
+        def _extract_mri_from_url(value):
+            return str(value).rsplit("/", 1)[-1]
+
+        def _request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if method == "GET":
+                return _Response(
+                    {
+                        "id": "100",
+                        "from": "https://sender.example/8:orgid:source-author",
+                        "imdisplayname": "Source Author",
+                        "content": "<p>early rule " + ("padding " * 50) + "late rule</p>",
+                    }
+                )
+            return _Response({"OriginalArrivalTime": 200})
+
+    http = _HTTP()
+    monkeypatch.setattr(e2e, "_get_gateway_auth", lambda: _Auth())
+    monkeypatch.setattr(e2e, "_get_readback_http_layer", lambda _auth: http)
+
+    result = e2e.send_native_user_reply(
+        "conversation/alias",
+        "100",
+        "apply the final rule",
+    )
+
+    assert result == "200"
+    assert calls[0] == (
+        "GET",
+        "https://msg.example/v1/users/ME/conversations/conversation%2Falias/messages/100",
+        {},
+    )
+    method, url, kwargs = calls[1]
+    assert method == "POST"
+    assert url.endswith("/conversations/conversation%2Falias/messages")
+    properties = kwargs["json"]["properties"]
+    assert properties["replyChainMessageId"] == "100"
+    assert json.loads(properties["qtdMsgs"])[0]["messageId"] == "100"
+    assert "hermes_sender" not in properties
+    rendered = kwargs["json"]["content"]
+    assert 'itemtype="http://schema.skype.com/Reply"' in rendered
+    assert 'itemid="100"' in rendered
+    assert "late rule" not in rendered
+    assert "apply the final rule" in rendered
+
+
 def test_dm_echo_guard_uses_active_sdk_auth_and_exact_cleanup(monkeypatch):
     e2e = _load_e2e_module()
     marker = "E2EECHOABCDEF123456"
@@ -120,7 +359,13 @@ def test_mention_gate_process_uses_exact_readback_and_cleanup(monkeypatch):
         "content": marker,
         "_raw_content": _branded_bot_html(marker),
     }
-    readbacks = iter([[], [reply], [reply], []])
+    reply_revision = {
+        "id": "reply",
+        "content": marker,
+        "_raw_content": _branded_bot_html(marker),
+        "version": "2",
+    }
+    readbacks = iter([[], [reply, reply_revision], [reply, reply_revision], []])
     sent = []
     deleted_graph = []
     deleted_msg = []

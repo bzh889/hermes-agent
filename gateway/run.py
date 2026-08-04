@@ -11599,6 +11599,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         reply_to_author_id=event.reply_to_author_id,
                         reply_to_author_name=event.reply_to_author_name,
                         reply_to_is_own_message=event.reply_to_is_own_message,
+                        reply_to_text_complete=event.reply_to_text_complete,
                         auto_skill=event.auto_skill,
                         channel_prompt=event.channel_prompt,
                         channel_context=event.channel_context,
@@ -13015,7 +13016,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
+            reply_snippet = (
+                event.reply_to_text
+                if event.reply_to_text_complete
+                else event.reply_to_text[:500]
+            )
             if getattr(event, "reply_to_is_own_message", False):
                 message_text = (
                     f'[Replying to your previous message: "{reply_snippet}"]\n\n'

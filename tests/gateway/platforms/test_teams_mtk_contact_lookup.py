@@ -195,6 +195,7 @@ def test_send_message_contact_target_not_found_returns_error():
 
     fake_adapter = MagicMock()
     fake_adapter._find_conv_by_display_name.return_value = None
+    fake_adapter._search_users.return_value = []
 
     def _get_adapter(platform):
         from gateway.config import Platform
@@ -242,12 +243,18 @@ def test_send_message_contact_target_no_live_gateway_returns_error():
 # ── G13-B.2/B.3: people.py fallback + directory-enriched error ─────────
 
 def test_send_message_contact_fallback_calls_people_and_enriches_error(monkeypatch):
-    """When display-name match fails, people.py is consulted; if found in
-    directory the error message includes the canonical name."""
+    """When display-name match fails, adapter Graph search enriches the error."""
     from tools import send_message_tool
 
     fake_adapter = MagicMock()
     fake_adapter._find_conv_by_display_name.return_value = None
+    fake_adapter._search_users.return_value = [
+        {
+            "display_name": "Sample User (測試使用者)",
+            "email": "sample@example.invalid",
+            "oid": "oid-123",
+        }
+    ]
 
     def _get_adapter(platform):
         from gateway.config import Platform
@@ -260,30 +267,26 @@ def test_send_message_contact_fallback_calls_people_and_enriches_error(monkeypat
     fake_runner = MagicMock()
     fake_runner.adapters = fake_adapters
 
-    _people_json = json.dumps({
-        "people": [{"id": "oid-123", "displayName": "Sample User (測試使用者)"}]
-    })
-
     with patch("gateway.run._gateway_runner_ref", return_value=fake_runner), \
-         patch("subprocess.run") as mock_sub, \
-         patch("os.path.expanduser", return_value="/home/u/.hermes/skills/m365/scripts/people.py"):
-        mock_sub.return_value = MagicMock(returncode=0, stdout=_people_json, stderr="")
+         patch("subprocess.run", side_effect=AssertionError("must use adapter Graph auth")):
         result = send_message_tool.send_message_tool(
             {"action": "send", "target": "teams_mtk:contact:Sample", "message": "hi"}
         )
 
     parsed = json.loads(result)
+    fake_adapter._search_users.assert_called_once_with("Sample")
     assert "error" in parsed
     # Directory name should appear in the enriched error
     assert "Sample User" in parsed["error"] or "測試使用者" in parsed["error"]
 
 
-def test_send_message_contact_fallback_people_failure_still_errors(monkeypatch):
-    """If people.py subprocess fails, the normal error is returned."""
+def test_send_message_contact_fallback_graph_failure_still_errors(monkeypatch):
+    """If adapter Graph search fails closed, the normal error is returned."""
     from tools import send_message_tool
 
     fake_adapter = MagicMock()
     fake_adapter._find_conv_by_display_name.return_value = None
+    fake_adapter._search_users.return_value = []
 
     def _get_adapter(platform):
         from gateway.config import Platform
@@ -297,11 +300,12 @@ def test_send_message_contact_fallback_people_failure_still_errors(monkeypatch):
     fake_runner.adapters = fake_adapters
 
     with patch("gateway.run._gateway_runner_ref", return_value=fake_runner), \
-         patch("subprocess.run", side_effect=RuntimeError("boom")):
+         patch("subprocess.run", side_effect=AssertionError("must use adapter Graph auth")):
         result = send_message_tool.send_message_tool(
             {"action": "send", "target": "teams_mtk:contact:Unknown", "message": "hi"}
         )
 
+    fake_adapter._search_users.assert_called_once_with("Unknown")
     parsed = json.loads(result)
     assert "error" in parsed
     assert "Unknown" in parsed["error"]
@@ -327,8 +331,7 @@ def test_send_message_contact_found_directly_skips_people():
 
     with patch("gateway.run._gateway_runner_ref", return_value=fake_runner), \
          patch("gateway.config.load_gateway_config") as mock_load_cfg, \
-         patch("tools.send_message_tool._send_via_adapter") as mock_send, \
-         patch("subprocess.run") as mock_sub:
+         patch("tools.send_message_tool._send_via_adapter") as mock_send:
         from gateway.config import Platform, PlatformConfig
 
         mock_cfg = MagicMock()
@@ -343,7 +346,7 @@ def test_send_message_contact_found_directly_skips_people():
             {"action": "send", "target": "teams_mtk:contact:Example User", "message": "hi"}
         )
 
-    mock_sub.assert_not_called()
+    fake_adapter._search_users.assert_not_called()
     parsed = json.loads(result)
     assert parsed.get("success") is True
 

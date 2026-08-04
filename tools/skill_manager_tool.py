@@ -652,13 +652,14 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
     """
-    from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
+    from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
-        for skill_md in skills_dir.rglob("SKILL.md"):
-            if is_excluded_skill_path(skill_md):
-                continue
+        # Use the same followlinks-aware index walk as the skill loader. A
+        # skill Hermes can resolve and load through an exact directory symlink
+        # must not become mysteriously read-only in skill_manage.
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
             if skill_md.parent.name == name:
                 return {"path": skill_md.parent}
     return None
@@ -1411,6 +1412,22 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    if action in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        from agent.execution_authority import (
+            TurnCapability,
+            current_execution_authority,
+        )
+
+        authority = current_execution_authority()
+        if not authority.allows(TurnCapability.SKILL_WRITE):
+            return tool_error(
+                "Execution Authority denied this skill mutation. Skill writes "
+                "are allowed only from a local TUI/CLI owner session or an "
+                "exact configured Teams MTK owner control conversation. "
+                f"Reason: {authority.reason}.",
+                success=False,
+            )
+
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)

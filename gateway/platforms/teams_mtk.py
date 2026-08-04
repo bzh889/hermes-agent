@@ -138,6 +138,11 @@ def _message_id_key(value: Any) -> tuple:
     return 0, text
 
 
+def _sent_message_id(response_data: dict) -> Any:
+    """Extract the canonical MSG identity from either response shape."""
+    return response_data.get("id") or response_data.get("OriginalArrivalTime")
+
+
 def _normalized_revision_value(value: Any) -> Optional[str]:
     """Normalize transport scalar types without trusting tenant-specific shapes."""
     if value is None:
@@ -227,8 +232,73 @@ def _property_value(properties: Any, *names: str) -> Any:
     return None
 
 
+def _parse_quoted_messages(value: Any) -> List[dict]:
+    """Normalize qtdMsgs list/string transport shapes without mutating entries."""
+    parsed = value
+    for _ in range(2):
+        if not isinstance(parsed, str):
+            break
+        try:
+            parsed = json.loads(parsed)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _reply_blockquote_message_id(content: Any) -> Optional[str]:
+    """Read the source identity from a native Teams Reply blockquote."""
+    blocks = re.finditer(
+        r"(<blockquote\b[^>]*>)(.*?)</blockquote>",
+        str(content or ""),
+        re.IGNORECASE | re.DOTALL,
+    )
+    for block in blocks:
+        opening_tag, body = block.groups()
+        if not re.search(
+            r"itemtype\s*=\s*(['\"])http://schema\.skype\.com/Reply\1",
+            opening_tag,
+            re.IGNORECASE,
+        ):
+            continue
+        match = re.search(r"itemid\s*=\s*(['\"])(.*?)\1", opening_tag, re.IGNORECASE)
+        if match and match.group(2).strip():
+            return match.group(2).strip()
+        for nested_tag in re.findall(r"<[^>]+>", body):
+            if not re.search(
+                r"itemprop\s*=\s*(['\"])time\1",
+                nested_tag,
+                re.IGNORECASE,
+            ):
+                continue
+            match = re.search(
+                r"itemid\s*=\s*(['\"])(.*?)\1",
+                nested_tag,
+                re.IGNORECASE,
+            )
+            if match and match.group(2).strip():
+                return match.group(2).strip()
+    return None
+
+
+def _reply_relation_id(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _teams_sender_id(value: Any, fallback: Any = None) -> Optional[str]:
+    """Normalize a raw Teams sender URL/MRI to its stable org identity."""
+    normalized = _reply_relation_id(value)
+    if normalized and "8:orgid:" in normalized:
+        return normalized.rsplit("8:orgid:", 1)[-1].rstrip("/") or None
+    return normalized or _reply_relation_id(fallback)
+
+
 def normalize_teams_sdk_message(raw_message: dict, normalized_message: dict) -> dict:
-    """Preserve revision-bearing MSG fields on the SDK-normalized output."""
+    """Preserve revision and native-reply fields on SDK-normalized output."""
     message = dict(normalized_message)
     raw_properties = raw_message.get("properties")
     message["_raw_id"] = raw_message.get("id")
@@ -247,6 +317,57 @@ def normalize_teams_sdk_message(raw_message: dict, normalized_message: dict) -> 
             "lastModifiedDateTime",
         )
     )
+    reply_chain_id = _reply_relation_id(
+        _property_value(raw_properties, "replyChainMessageId")
+    )
+    quoted_messages = _parse_quoted_messages(
+        _property_value(raw_properties, "qtdMsgs")
+    )
+    quoted_ids = [
+        relation_id
+        for relation_id in (
+            _reply_relation_id(
+                item.get("messageId") or item.get("messageid") or item.get("id")
+            )
+            for item in quoted_messages
+        )
+        if relation_id is not None
+    ]
+    blockquote_id = _reply_blockquote_message_id(raw_message.get("content"))
+    message["_reply_chain_message_id"] = reply_chain_id
+    message["_quoted_messages"] = quoted_messages
+    message["_blockquote_message_id"] = blockquote_id
+
+    observed_ids = quoted_ids + ([blockquote_id] if blockquote_id is not None else [])
+    selected_id = reply_chain_id
+    if reply_chain_id is not None:
+        disagreement = any(candidate != reply_chain_id for candidate in observed_ids)
+        status = "disagreed" if disagreement else "corroborated" if observed_ids else "single"
+    else:
+        distinct_ids = set(observed_ids)
+        disagreement = len(distinct_ids) > 1
+        selected_id = next(iter(distinct_ids)) if len(distinct_ids) == 1 else None
+        status = (
+            "disagreed"
+            if disagreement
+            else "corroborated"
+            if len(observed_ids) > 1
+            else "single"
+            if selected_id is not None
+            else "none"
+        )
+
+    message.pop("reply_to_message_id", None)
+    if selected_id is not None:
+        message["reply_to_message_id"] = selected_id
+    message["_reply_relation_status"] = status
+    if disagreement:
+        logger.warning(
+            "TeamsMTK: reply relation disagreement chain=%s quoted=%s blockquote=%s",
+            _log_ref(reply_chain_id),
+            ",".join(_log_ref(candidate) for candidate in quoted_ids) or "<none>",
+            _log_ref(blockquote_id),
+        )
     return message
 
 
@@ -976,9 +1097,15 @@ class _TeamsAuth:
         import requests
 
         with self._lock:
+            self._inject_truststore()
+            if not self.TOKEN_CACHE.exists():
+                # Graph-only callers do not need a Skype token.  Loading the
+                # missing legacy cache would first perform a full Teams authz
+                # exchange, adding an unrelated network round trip.
+                return self._get_wam_auth().exchange_for_scope(scope)
+
             tok = self._load()
             if tok.get("_auth_method") == "wam":
-                self._inject_truststore()
                 return self._get_wam_auth().exchange_for_scope(scope)
 
             refresh_token = tok.get("refresh_token", "")
@@ -2237,7 +2364,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # MSG API returns the message ID as "OriginalArrivalTime"
             # (not under "id").  This IS the real message ID usable for
             # edit/delete, not a timestamp.
-            msg_id = data.get("id") or data.get("OriginalArrivalTime")
+            msg_id = _sent_message_id(data)
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
                 if html_content:
@@ -2690,7 +2817,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 timeout=15,
             )
             msg_resp.raise_for_status()
-            msg_id = msg_resp.json().get("id")
+            msg_id = _sent_message_id(msg_resp.json())
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
@@ -2745,7 +2872,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     timeout=15,
                 )
                 resp.raise_for_status()
-                msg_id = resp.json().get("id")
+                msg_id = _sent_message_id(resp.json())
                 if msg_id:
                     self._remember_sent_message(chat_id, msg_id)
                 return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
@@ -2875,7 +3002,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 timeout=15,
             )
             msg_resp.raise_for_status()
-            msg_id = msg_resp.json().get("id")
+            msg_id = _sent_message_id(msg_resp.json())
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
@@ -2946,7 +3073,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 timeout=15,
             )
             resp.raise_for_status()
-            msg_id = resp.json().get("id")
+            msg_id = _sent_message_id(resp.json())
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
@@ -3067,9 +3194,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             import requests as _req
             self._auth._inject_truststore()
             graph_token = self._auth.graph_token()
+            escaped_query = query.replace("'", "''")
             filter_str = (
-                f"startswith(displayName,'{query}') or "
-                f"startswith(mail,'{query}')"
+                f"startswith(displayName,'{escaped_query}') or "
+                f"startswith(mail,'{escaped_query}')"
             )
             resp = _req.get(
                 "https://graph.microsoft.com/v1.0/users",
@@ -3905,7 +4033,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 finally:
                     sess.close()
 
-            msg_id = data.get("id") or data.get("OriginalArrivalTime")
+            msg_id = _sent_message_id(data)
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
             logger.info(
@@ -4216,6 +4344,115 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             except Exception:
                 self._close_sdk_http_layer_locked()
                 raise
+
+    def _fetch_exact_reply_source(
+        self,
+        conversation_id: str,
+        message_id: str,
+    ) -> Optional[dict]:
+        """Fetch one native-reply source through the shared SDK transport."""
+        self._auth._inject_truststore()
+        raw_source = None
+        if _SDK_AVAILABLE:
+            try:
+                import urllib.parse
+
+                encoded_conversation = urllib.parse.quote(conversation_id, safe="")
+                encoded_message = urllib.parse.quote(str(message_id), safe="")
+                response = self._call_sdk_http(
+                    "GET",
+                    f"{self._auth.msg_base}/conversations/{encoded_conversation}"
+                    f"/messages/{encoded_message}",
+                )
+                raw_source = response.json()
+            except Exception as exc:
+                logger.warning(
+                    "TeamsMTK: SDK reply source fetch failed; using raw fallback "
+                    "conv=%s source=%s error=%s",
+                    _log_ref(conversation_id),
+                    _log_ref(message_id),
+                    _log_error(exc),
+                )
+        if raw_source is None:
+            try:
+                raw_source = self._fetch_exact_reply_source_raw(
+                    conversation_id,
+                    message_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TeamsMTK: reply source fetch failed conv=%s source=%s error=%s",
+                    _log_ref(conversation_id),
+                    _log_ref(message_id),
+                    _log_error(exc),
+                )
+                return None
+        if not isinstance(raw_source, dict) or str(raw_source.get("id") or "") != str(message_id):
+            logger.warning(
+                "TeamsMTK: reply source fetch mismatch conv=%s source=%s",
+                _log_ref(conversation_id),
+                _log_ref(message_id),
+            )
+            return None
+        source_text, _forwarded_context = _clean_message_content(
+            raw_source.get("content") or ""
+        )
+        source = {
+            "id": str(raw_source.get("id")),
+            "content": source_text,
+            "from": raw_source.get("from"),
+            "sender": raw_source.get("imdisplayname") or raw_source.get("sender"),
+            "properties": raw_source.get("properties"),
+        }
+        logger.info(
+            "TeamsMTK: reply source fetch succeeded conv=%s source=%s chars=%d hash=%s",
+            _log_ref(conversation_id),
+            _log_ref(message_id),
+            len(source_text),
+            hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:12],
+        )
+        return source
+
+    def _fetch_exact_reply_source_raw(
+        self,
+        conversation_id: str,
+        message_id: str,
+    ) -> dict:
+        """Fetch one exact reply source when the SDK transport is unavailable."""
+        import urllib.parse
+
+        import requests
+        from requests.adapters import HTTPAdapter
+
+        encoded_conversation = urllib.parse.quote(conversation_id, safe="")
+        encoded_message = urllib.parse.quote(str(message_id), safe="")
+        url = (
+            f"{self._auth.msg_base}/conversations/{encoded_conversation}"
+            f"/messages/{encoded_message}"
+        )
+        session = requests.Session()
+        session.mount(
+            "https://",
+            HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0),
+        )
+        try:
+            for attempt in range(2):
+                response = session.get(
+                    url,
+                    headers={
+                        "Authentication": f"skypetoken={self._auth.skype_token()}"
+                    },
+                    verify=True,
+                    timeout=15,
+                )
+                if response.status_code == 401 and attempt == 0:
+                    self._auth._force_refresh()
+                    continue
+                response.raise_for_status()
+                return response.json()
+        finally:
+            session.close()
+        raise RuntimeError("reply source raw fallback exhausted")
 
     def _call_sdk_http(self, method: str, url: str, **kwargs):
         """Run one low-level MSG request through the shared TLS pool."""
@@ -4951,10 +5188,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # Model-picker replies never reach GatewayRunner authorization, so
             # they must remain bound to the user whose authorized /model command
             # created the picker.
-            _from_url = msg.get("from", "")
-            user_id = sender  # fallback to display name
-            if "8:orgid:" in _from_url:
-                user_id = _from_url.rsplit("8:orgid:", 1)[-1].rstrip("/")
+            user_id = _teams_sender_id(msg.get("from"), sender)
 
             # ---- Model picker interception (two-step) ----
             # Per-conversation picker state so multiple conversations
@@ -5059,6 +5293,43 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     else:
                         logger.warning("TeamsMTK: skipping failed attachment %d/%d", _i + 1, len(_att_urls))
 
+                _reply_to_message_id = _reply_relation_id(
+                    msg.get("reply_to_message_id")
+                )
+                _reply_source = None
+                if _reply_to_message_id is not None:
+                    _reply_source = await asyncio.to_thread(
+                        self._fetch_exact_reply_source,
+                        conv_id,
+                        _reply_to_message_id,
+                    )
+                _reply_to_text = None
+                _reply_to_author_id = None
+                _reply_to_author_name = None
+                _reply_to_is_own = False
+                if _reply_source is not None:
+                    _reply_to_text = str(_reply_source.get("content") or "") or None
+                    _reply_to_author_id = _teams_sender_id(
+                        _reply_source.get("from")
+                    )
+                    _reply_to_author_name = _reply_relation_id(
+                        _reply_source.get("sender")
+                        or _reply_source.get("imdisplayname")
+                    )
+                    _reply_source_properties = (
+                        _reply_source.get("_raw_properties")
+                        if "_raw_properties" in _reply_source
+                        else _reply_source.get("properties")
+                    )
+                    _reply_sender = _property_value(
+                        _reply_source_properties,
+                        "hermes_sender",
+                    )
+                    _reply_to_is_own = (
+                        _reply_sender in ("agent", "bot")
+                        or self._is_sent_message(conv_id, _reply_to_message_id)
+                    )
+
                 event = MessageEvent(
                     text=text,
                     message_type=_dominant_type,
@@ -5066,6 +5337,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                     message_id=msg_id,
                     media_urls=_media_urls or None,
                     media_types=_media_types or None,
+                    reply_to_message_id=_reply_to_message_id,
+                    reply_to_text=_reply_to_text,
+                    reply_to_author_id=_reply_to_author_id,
+                    reply_to_author_name=_reply_to_author_name,
+                    reply_to_is_own_message=_reply_to_is_own,
+                    reply_to_text_complete=_reply_to_text is not None,
                 )
                 # Use handle_message() (not _message_handler directly) so the
                 # full base-class pipeline runs: session guard, typing indicator,

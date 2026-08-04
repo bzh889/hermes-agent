@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 ## Source of truth
 
@@ -20,19 +20,25 @@ Do not create or reinterpret a second specification in this ticket.
 
 ## Acceptance criteria
 
-- [ ] SDK normalization retains native reply relation metadata and safely accepts raw properties represented as either an object or a JSON string, plus quoted-message relations represented as either a list or an encoded list.
-- [ ] Normalization and relation parsing do not rewrite or discard the user-visible reply body.
-- [ ] Source selection prefers `replyChainMessageId` and corroborates it against `qtdMsgs` message relations and the blockquote relation when present.
-- [ ] Relation disagreements produce sanitized diagnostics and never authorize selecting an unrelated source message.
-- [ ] A known source identity is retrieved through the existing authenticated conversation-message transport using the exact conversation and source-message identity.
-- [ ] On successful exact retrieval, the existing normalized MessageEvent reply context contains the source identity and complete canonical source text while preserving the new reply body as the current user request.
-- [ ] A shorter display quote remains presentation-only and is never promoted as complete reply context.
-- [ ] If exact retrieval fails, the relation identity may remain available, but complete reply text stays unavailable or explicitly partial; the adapter does not fabricate full context from the preview.
-- [ ] Deterministic tests cover compatible metadata shapes, relation corroboration/disagreement, exact-fetch success/failure, and the resulting public MessageEvent context.
-- [ ] The named real-gateway E2E `quoted-reply-full-context-revises-query` creates and canonically reads back a human-originated source longer than the display preview, with a terminal sentinel outside that preview, then submits a native human reply containing the revised request.
-- [ ] That E2E independently proves an exact relation match, direct-fetch full-source hash match, use of both the terminal sentinel and revised reply body by the gateway/agent result, `preview-only = false`, and cleanup residue `= 0`.
-- [ ] Every remote side effect is cleaned in `finally` by exact returned identity or a unique marker; malformed send results trigger discovery cleanup, and cleanup failure fails this E2E item.
-- [ ] Logs and retained test evidence contain only sanitized status, structural aliases, lengths, and hashes—never organization identities, message bodies, tenant hosts, or credentials.
+- [x] SDK normalization retains native reply relation metadata and safely accepts raw properties represented as either an object or a JSON string, plus quoted-message relations represented as either a list or an encoded list.
+- [x] Normalization and relation parsing do not rewrite or discard the user-visible reply body.
+- [x] Source selection prefers `replyChainMessageId` and corroborates it against `qtdMsgs` message relations and the blockquote relation when present.
+- [x] Relation disagreements produce sanitized diagnostics and never authorize selecting an unrelated source message.
+- [x] A known source identity is retrieved through the existing authenticated conversation-message transport using the exact conversation and source-message identity.
+- [x] On successful exact retrieval, the existing normalized MessageEvent reply context contains the source identity and complete canonical source text while preserving the new reply body as the current user request.
+- [x] A shorter display quote remains presentation-only and is never promoted as complete reply context.
+- [x] If exact retrieval fails, the relation identity may remain available, but complete reply text stays unavailable or explicitly partial; the adapter does not fabricate full context from the preview.
+- [x] Deterministic tests cover compatible metadata shapes, relation corroboration/disagreement, exact-fetch success/failure, and the resulting public MessageEvent context.
+- [x] The named real-gateway E2E `quoted-reply-full-context-revises-query` creates and canonically reads back a human-originated source longer than the display preview, with a terminal sentinel outside that preview, then submits a native human reply containing the revised request.
+- [x] That E2E independently proves an exact relation match, direct-fetch full-source hash match, use of both the terminal sentinel and revised reply body by the gateway/agent result, `preview-only = false`, and cleanup residue `= 0`.
+- [x] Every remote side effect is cleaned in `finally` by exact returned identity or a unique marker; malformed send results trigger discovery cleanup, and cleanup failure fails this E2E item.
+- [x] Logs and retained test evidence contain only sanitized status, structural aliases, lengths, and hashes—never organization identities, message bodies, tenant hosts, or credentials.
+
+## Verification evidence
+
+- 2026-08-04: deterministic reply-context, queue-preservation, gateway-injection, and E2E-contract tests passed on the final implementation.
+- 2026-08-04: targeted real-gateway `quoted-reply-full-context-revises-query` passed with exact relation, full-source hash, terminal-rule model response, `preview-only=false`, and zero cleanup residue.
+- 2026-08-04: the complete sequential named real-gateway suite passed `28/28` without `--only`.
 
 ## Out of scope
 

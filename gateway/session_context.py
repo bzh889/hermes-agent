@@ -331,6 +331,23 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def get_bound_session_env(name: str) -> tuple[bool, str]:
+    """Return whether *name* is bound in this Context and its raw value.
+
+    Unlike :func:`get_session_env`, this never falls back to ``os.environ``.
+    Security-sensitive consumers use it to distinguish a real local process
+    from a hosted process between turns (where an empty/unbound origin must
+    fail closed rather than inherit a stale process-wide identity).
+    """
+    var = _VAR_MAP.get(name)
+    if var is None:
+        return False, ""
+    value = var.get()
+    if value is _UNSET:
+        return False, ""
+    return True, str(value or "")
+
+
 def declare_stateless_channel() -> None:
     """Declare that this session cannot receive an async background completion.
 

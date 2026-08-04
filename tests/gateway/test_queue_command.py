@@ -164,6 +164,7 @@ async def test_queue_preserves_reply_context():
         reply_to_text="the original message",
         reply_to_author_id="a1",
         reply_to_author_name="alice",
+        reply_to_text_complete=True,
     )
     result = await runner._handle_message(event)
 
@@ -173,6 +174,7 @@ async def test_queue_preserves_reply_context():
     assert queued.reply_to_text == "the original message"
     assert queued.reply_to_author_id == "a1"
     assert queued.reply_to_author_name == "alice"
+    assert queued.reply_to_text_complete is True
 
 
 @pytest.mark.asyncio

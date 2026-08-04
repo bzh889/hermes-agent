@@ -400,7 +400,7 @@ class TestSendAdaptiveCard:
         """
         mock_resp = MagicMock()
         mock_resp.status_code = 201
-        mock_resp.json.return_value = {"id": "msg-ac-1"}
+        mock_resp.json.return_value = {"OriginalArrivalTime": "msg-ac-1"}
         mock_resp.raise_for_status = MagicMock()
         mock_post = MagicMock(return_value=mock_resp)
 
@@ -412,6 +412,7 @@ class TestSendAdaptiveCard:
             result = asyncio.run(adapter.send_adaptive_card("conv1", card, "fallback"))
 
             assert result.success is True
+            assert result.message_id == "msg-ac-1"
             payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
             assert payload["messagetype"] == "RichText/Html"
             cards = json.loads(payload["properties"]["cards"])

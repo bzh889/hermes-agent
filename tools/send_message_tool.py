@@ -395,29 +395,20 @@ def _handle_send(args):
         # B.2 step 1: substring match on title / member display names
         resolved_chat_id = adapter._find_conv_by_display_name(contact_name)
 
-        # B.2 step 2: people.py OID fallback
+        # B.2 step 2: authenticated Graph directory fallback.
         # NOTE: Skype /conversations does not return member OIDs, and
         # Graph Chat.Read scope is unavailable, so OID-based conv
-        # matching is not possible.  Keep people.py to enrich the error
-        # message with the contact's display name from directory.
+        # matching is not possible. Reuse the live Teams adapter's existing
+        # Graph transport to enrich the error with the canonical directory
+        # name; do not require a second token cache or create a new chat.
         if not resolved_chat_id:
             _found_in_directory = False
             try:
-                import subprocess, os as _os
-                _people_script = _os.path.expanduser("~/.hermes/skills/m365/scripts/people.py")
-                _r = subprocess.run(
-                    ["python", _people_script, "search", "--query", contact_name],
-                    capture_output=True, text=True, timeout=15,
-                    env={**_os.environ, "PYTHONPATH": ""},
-                )
-                if _r.returncode == 0 and _r.stdout.strip():
-                    import json as _json
-                    _data = _json.loads(_r.stdout)
-                    _people = _data.get("people") or []
-                    if _people:
-                        _found_in_directory = True
-                        # Use canonical name from directory for clearer error
-                        contact_name = _people[0].get("displayName", contact_name)
+                _people = adapter._search_users(contact_name)
+                if _people:
+                    _found_in_directory = True
+                    # Use canonical name from directory for clearer error.
+                    contact_name = _people[0].get("display_name", contact_name)
             except Exception:
                 pass
 

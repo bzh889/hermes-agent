@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
+import hashlib
 import html
 import json
 import os
@@ -37,6 +38,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+import urllib.parse
 import uuid
 
 import requests
@@ -60,6 +62,7 @@ from gateway.platforms.teams_mtk import (
     _SDKAuthAdapter,
     _SDKHTTPLayer,
     _TeamsAuth,
+    _clean_message_content,
     _log_ref,
 )
 
@@ -251,6 +254,195 @@ def get_messages_raw(chat_id: str, page_size: int = 15) -> list[dict]:
     raise RuntimeError(
         f"get_messages_raw failed after {attempts} attempts ({last_error})"
     )
+
+
+def get_message_raw_exact(chat_id: str, message_id: str) -> dict:
+    """Read one exact raw MSG resource without logging private identities."""
+    auth = _get_gateway_auth()
+    auth._inject_truststore()
+    encoded_chat = urllib.parse.quote(chat_id, safe="")
+    encoded_message = urllib.parse.quote(str(message_id), safe="")
+    url = (
+        f"{auth.msg_base}/conversations/{encoded_chat}"
+        f"/messages/{encoded_message}"
+    )
+    last_error = "unknown"
+    for attempt in range(4):
+        http_layer = None
+        try:
+            http_layer = _get_readback_http_layer(auth)
+            raw_message = http_layer._request("GET", url).json()
+            if (
+                isinstance(raw_message, dict)
+                and str(raw_message.get("id") or "") == str(message_id)
+            ):
+                return raw_message
+            last_error = "identity-mismatch"
+        except Exception as exc:
+            last_error = type(exc).__name__
+            _discard_readback_http_layer(http_layer)
+        if attempt + 1 < 4:
+            time.sleep(min(2**attempt, 4))
+    raise RuntimeError(
+        f"get_message_raw_exact failed after 4 attempts ({last_error})"
+    )
+
+
+def _reaction_user_count(chat_id: str, message_id: str, reaction: str) -> int:
+    """Return only the count from exact raw reaction state, never identities."""
+    message = get_message_raw_exact(chat_id, message_id)
+    properties = _raw_message_properties(message)
+    for emotion in properties.get("emotions") or []:
+        if isinstance(emotion, dict) and emotion.get("key") == reaction:
+            users = emotion.get("users") or []
+            return len(users) if isinstance(users, list) else 0
+    return 0
+
+
+def _exact_tombstone_state(
+    chat_id: str,
+    message_id: str,
+) -> tuple[bool, int, bool]:
+    """Read exact delete state without returning source content or identity."""
+    try:
+        message = get_message_raw_exact(chat_id, message_id)
+    except RuntimeError:
+        return False, 0, False
+    properties = _raw_message_properties(message)
+    return (
+        True,
+        len(str(message.get("content") or "")),
+        bool(properties.get("deletetime")),
+    )
+
+
+def _exact_message_has_html_tag(
+    chat_id: str,
+    message_id: str,
+    tag: str,
+) -> bool:
+    """Verify one structural HTML tag from exact raw content."""
+    message = get_message_raw_exact(chat_id, message_id)
+    content = str(message.get("content") or "")
+    return BeautifulSoup(content, "html.parser").find(tag.lower()) is not None
+
+
+def _raw_message_properties(message: dict) -> dict:
+    properties = message.get("properties") or {}
+    if isinstance(properties, str):
+        properties = json.loads(properties)
+    return properties if isinstance(properties, dict) else {}
+
+
+def _exact_document_has_share_link(chat_id: str, message_id: str) -> bool:
+    """Verify a raw HTML link or the SDK files share schema."""
+    message = get_message_raw_exact(chat_id, message_id)
+    content = str(message.get("content") or "")
+    anchor = BeautifulSoup(content, "html.parser").find("a", href=True)
+    if anchor is not None:
+        return True
+
+    files = _raw_message_properties(message).get("files") or []
+    if isinstance(files, str):
+        files = json.loads(files)
+    if not isinstance(files, list):
+        return False
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        file_info = file_entry.get("fileInfo") or {}
+        if isinstance(file_info, dict) and any(
+            file_info.get(key) for key in ("shareUrl", "fileUrl")
+        ):
+            return True
+        if file_entry.get("objectUrl"):
+            return True
+    return False
+
+
+def _exact_message_contains_marker(
+    chat_id: str,
+    message_id: str,
+    marker: str,
+    *,
+    property_key: Optional[str] = None,
+) -> bool:
+    """Check one controlled marker in exact content or a named property."""
+    message = get_message_raw_exact(chat_id, message_id)
+    if property_key is None:
+        return marker in str(message.get("content") or "")
+    value = _raw_message_properties(message).get(property_key)
+    return marker in json.dumps(value, ensure_ascii=False)
+
+
+def send_native_user_reply(
+    chat_id: str,
+    source_message_id: str,
+    content: str,
+) -> str:
+    """Create one service-user native reply without a Hermes ownership marker."""
+    auth = _get_gateway_auth()
+    auth._inject_truststore()
+    source = get_message_raw_exact(chat_id, source_message_id)
+    source_html = str(source.get("content") or "")
+    source_text, _ = strip_teams_html(source_html)
+    preview = html.escape(source_text[:160], quote=True)
+    http_layer = _get_readback_http_layer(auth)
+    sender_mri = http_layer._extract_mri_from_url(
+        str(source.get("from") or "")
+    )
+    sender_name = html.escape(
+        str(source.get("imdisplayname") or "Service User"),
+        quote=True,
+    )
+    escaped_source_id = html.escape(str(source_message_id), quote=True)
+    reply_html = (
+        '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" '
+        f'itemid="{escaped_source_id}">'
+        f'<strong itemprop="mri" itemid="{html.escape(sender_mri, quote=True)}">'
+        f"{sender_name}</strong>"
+        f'<span itemprop="time" itemid="{escaped_source_id}"></span>'
+        f'<p itemprop="preview">{preview}</p>'
+        "</blockquote>"
+        f"<p>{html.escape(content)}</p>"
+    )
+    quoted_messages = json.dumps(
+        [
+            {
+                "messageId": str(source_message_id),
+                "sender": sender_mri,
+                "time": (
+                    int(source_message_id)
+                    if str(source_message_id).isdigit()
+                    else 0
+                ),
+            }
+        ]
+    )
+    payload = {
+        "content": reply_html,
+        "messagetype": "RichText/Html",
+        "contenttype": "text",
+        "properties": {
+            "replyChainMessageId": str(source_message_id),
+            "qtdMsgs": quoted_messages,
+        },
+    }
+    encoded_chat = urllib.parse.quote(chat_id, safe="")
+    url = f"{auth.msg_base}/conversations/{encoded_chat}/messages"
+    try:
+        result = http_layer._request("POST", url, json=payload).json()
+    except Exception as exc:
+        _discard_readback_http_layer(http_layer)
+        raise RuntimeError(
+            f"send_native_user_reply failed ({type(exc).__name__})"
+        ) from None
+    message_id = str(
+        result.get("id") or result.get("OriginalArrivalTime") or ""
+    )
+    if not message_id:
+        raise RuntimeError("send_native_user_reply returned no canonical identity")
+    return message_id
 
 
 def _visible_model_body(message: dict) -> str:
@@ -864,7 +1056,30 @@ def test_streaming_no_echo_duplication(
             )
 
 
-def test_no_residual_markdown_in_reply(log_path: str, baseline: int) -> tuple[bool, str]:
+def _residual_markdown_labels(raw_html: str) -> list[str]:
+    """Return literal markdown constructs left in rendered Teams HTML."""
+    rendered_text = BeautifulSoup(str(raw_html or ""), "html.parser").get_text("\n")
+    residuals = []
+    if re.search(r"\*\*[^*]+\*\*", rendered_text):
+        residuals.append("**bold**")
+    if re.search(r"`[^`\n]+`", rendered_text):
+        residuals.append("`code`")
+    if re.search(r"\[[^\]]+\]\(https?://[^\s)]+\)", rendered_text):
+        residuals.append("[text](url)")
+    if re.search(r"^\s*[-*]\s+", rendered_text, re.MULTILINE):
+        residuals.append("- bullet")
+    if re.search(r"^\s*\|.+\|\s*$", rendered_text, re.MULTILINE):
+        residuals.append("| pipe table |")
+    return residuals
+
+
+def test_no_residual_markdown_in_reply(
+    log_path: str,
+    baseline: int,
+    *,
+    reply_timeout: float = 300,
+    poll_interval: float = 3,
+) -> tuple[bool, str]:
     """CONTENT TIER: read back the actual rendered reply and assert no
     literal markdown syntax (**bold**, `code`, [text](url), leading '- ')
     leaked through to the Teams HTML the user sees.
@@ -873,40 +1088,93 @@ def test_no_residual_markdown_in_reply(log_path: str, baseline: int) -> tuple[bo
     'Turn ended: success' says nothing about whether the model's markdown
     output was actually converted to HTML before being sent.
     """
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
+    del log_path, baseline
+    token = uuid.uuid4().hex[:12].upper()
+    marker = f"E2ERENDER{token}"
+    prompt = (
+        "用一個 table 列出 3 個測試項目的狀態，並用粗體標註結論。"
+        f"回覆中必須原樣包含 {marker}。"
+    )
+    graph_message_ids: list[str] = []
+    cleanup_message_ids: set[str] = set()
+    baseline_ids: set[str] = set()
+    functional_passed = False
+    try:
+        baseline_messages = get_messages_raw(DM_CHAT_ID, page_size=50)
+        baseline_ids = {
+            str(message.get("id") or "")
+            for message in baseline_messages
+            if message.get("id")
+        }
+        graph_message_ids.append(send_chat_message(DM_CHAT_ID, "/new"))
+        time.sleep(3)
+        graph_message_ids.append(send_chat_message(DM_CHAT_ID, prompt))
 
-    send_chat_message(DM_CHAT_ID, "/new")
-    time.sleep(3)
-    send_chat_message(DM_CHAT_ID, "用一個 table 列出 3 個測試項目的狀態，並用粗體標註結論")
-    time.sleep(45)
+        raw_html = ""
+        deadline = time.monotonic() + reply_timeout
+        while time.monotonic() < deadline:
+            messages = get_messages_raw(DM_CHAT_ID, page_size=50)
+            candidates = [
+                message
+                for message in messages
+                if str(message.get("id") or "") not in baseline_ids
+                and _is_hermes_bot_message(message)
+                and marker in _visible_model_body(message)
+            ]
+            cleanup_message_ids.update(
+                str(message.get("id") or "")
+                for message in messages
+                if str(message.get("id") or "") not in baseline_ids
+                and message.get("id")
+                and _is_hermes_bot_message(message)
+            )
+            if candidates:
+                raw_html = str(
+                    candidates[0].get("_raw_content")
+                    or candidates[0].get("content")
+                    or ""
+                )
+                break
+            time.sleep(poll_interval)
 
-    msgs = get_messages_raw(DM_CHAT_ID, page_size=20)
-    bot_replies = [
-        m for m in msgs
-        if m.get("id") not in baseline_ids
-        and ("🤖" in (m.get("content") or "") or "border-left" in (m.get("content") or ""))
-        and len(m.get("content") or "") > 300
-    ]
-    if not bot_replies:
-        return False, "No substantial bot reply found within wait window"
-
-    raw = bot_replies[0].get("content", "")
-    residuals = []
-    if re.search(r"\*\*[^*]+\*\*", raw):
-        residuals.append("**bold**")
-    if re.search(r"(?<!href=\")`[^`\n]+`", raw):
-        residuals.append("`code`")
-    if re.search(r"\[[^\]]+\]\(https?://[^\s)]+\)", raw):
-        residuals.append("[text](url)")
-    if re.search(r"(?:^|<br>)\s*[-*]\s+(?!\|)", raw, re.MULTILINE):
-        residuals.append("- bullet")
-    if re.search(r"^\s*\|.+\|\s*$", raw, re.MULTILINE):
-        residuals.append("| pipe table |")
-
-    if residuals:
-        return False, f"Residual markdown found: {residuals} in reply id={bot_replies[0].get('id')}"
-    return True, f"No residual markdown in reply id={bot_replies[0].get('id')} (len={len(raw)})"
+        if not raw_html:
+            return False, "No marker-correlated bot reply found within wait window"
+        residuals = _residual_markdown_labels(raw_html)
+        if residuals:
+            return False, f"Residual markdown found: {residuals}"
+        functional_passed = True
+        return True, f"No residual markdown in marker-correlated reply (len={len(raw_html)})"
+    finally:
+        cleanup_errors = []
+        try:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=60):
+                message_id = str(message.get("id") or "")
+                if (
+                    message_id
+                    and message_id not in baseline_ids
+                    and _is_hermes_bot_message(message)
+                ):
+                    cleanup_message_ids.add(message_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-read:{type(exc).__name__}")
+        for message_id in dict.fromkeys(graph_message_ids):
+            if not message_id:
+                continue
+            try:
+                delete_graph_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+        for message_id in sorted(cleanup_message_ids):
+            try:
+                delete_msg_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        if cleanup_errors and functional_passed:
+            raise RuntimeError(
+                "residual markdown E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + ")"
+            )
 
 
 def test_no_disallowed_fallback_models(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -954,10 +1222,8 @@ def test_attachment_domain_routing_covers_asm(log_path: str, baseline: int) -> t
     still PASS even if the real function's routing logic were deleted.)
     """
     from teams_skype_sdk.api._http import download_with_auth_url
-    from teams_skype_sdk.auth import TeamsAuth
 
-    auth = TeamsAuth()
-    skype_token = auth.get_skype_token()
+    skype_token = _get_gateway_auth().skype_token()
 
     # Use a real asm.skype.com attachment URL — if the token is valid
     # and the router picks the correct auth header, we get a 200 (or
@@ -1274,21 +1540,23 @@ def test_mention_gating_process(log_path: str, baseline: int) -> tuple[bool, str
         deadline = time.monotonic() + 240
         while True:
             messages = get_messages_raw(GROUP_CHAT_ID, page_size=50)
-            replies = [
-                message
+            reply_ids = {
+                str(message.get("id") or "")
                 for message in messages
-                if str(message.get("id") or "") not in baseline_ids
+                if message.get("id")
+                and str(message.get("id")) not in baseline_ids
                 and _is_hermes_bot_message(message)
                 and _has_exact_visible_marker(message, marker)
-            ]
-            if len(replies) == 1:
-                cleanup_message_ids.add(str(replies[0].get("id") or ""))
+            }
+            if len(reply_ids) == 1:
+                cleanup_message_ids.update(reply_ids)
                 return True, "mention_dispatch=1; duplicate_dispatch=0"
-            if len(replies) > 1:
-                cleanup_message_ids.update(
-                    str(message.get("id") or "") for message in replies
+            if len(reply_ids) > 1:
+                cleanup_message_ids.update(reply_ids)
+                return False, (
+                    f"mention_dispatch={len(reply_ids)}; "
+                    f"duplicate_dispatch={len(reply_ids) - 1}"
                 )
-                return False, f"mention_dispatch={len(replies)}; duplicate_dispatch={len(replies) - 1}"
             if time.monotonic() >= deadline:
                 return False, "mention_dispatch=0; duplicate_dispatch=0"
             time.sleep(3)
@@ -1571,7 +1839,7 @@ def test_send_image_file(log_path: str, baseline: int) -> tuple[bool, str]:
     the method exists.  Then reads back the conversation to confirm a
     new message landed.
     """
-    import base64, tempfile, os, asyncio
+    import tempfile, os, asyncio
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
     png_data = bytes([
@@ -1585,16 +1853,13 @@ def test_send_image_file(log_path: str, baseline: int) -> tuple[bool, str]:
         0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
         0x60, 0x82,
     ])
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
-
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         f.write(png_data)
         temp_path = f.name
 
+    adapter = TeamsMTKAdapter(None)
+    sent_message_id = ""
     try:
-        adapter = TeamsMTKAdapter(None)
-
         async def _call():
             return await adapter.send_image_file(DM_CHAT_ID, temp_path, caption="E2E_AUTO image test")
 
@@ -1604,19 +1869,39 @@ def test_send_image_file(log_path: str, baseline: int) -> tuple[bool, str]:
             return False, f"send_image_file returned success=False error={result.error!r}"
         if not result.message_id:
             return False, f"send_image_file succeeded but returned no message_id: {result!r}"
+        sent_message_id = str(result.message_id)
 
-        # Read back the conversation to confirm the image actually landed.
-        time.sleep(3)
-        msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
-        new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
-        has_image = any("<img" in (m.get("content") or "") for m in new_msgs)
+        # Verify the returned canonical identity against exact raw HTML. The
+        # SDK-normalized page content converts <img> to Markdown and cannot
+        # prove the wire-level inline image contract.
+        deadline = time.time() + 20
+        has_image = False
+        while time.time() < deadline:
+            try:
+                has_image = _exact_message_has_html_tag(
+                    DM_CHAT_ID,
+                    sent_message_id,
+                    "img",
+                )
+            except RuntimeError:
+                has_image = False
+            if has_image:
+                break
+            time.sleep(1)
         if not has_image:
             return False, (
-                f"send_image_file returned success=True message_id={result.message_id} "
-                f"but read-back found no new <img> message (new_msgs={len(new_msgs)})"
+                "send_image_file returned success=True but exact read-back "
+                "found no <img> message"
             )
-        return True, f"send_image_file succeeded, message_id={result.message_id}, verified via read-back"
+        return True, "send_image_file succeeded and exact <img> read-back verified"
     finally:
+        if sent_message_id:
+            cleanup = asyncio.run(adapter.delete_message(DM_CHAT_ID, sent_message_id))
+            if cleanup.get("status") != "deleted":
+                raise RuntimeError(
+                    "send-image E2E cleanup failed: "
+                    f"status={cleanup.get('status')}"
+                )
         os.unlink(temp_path)
 
 
@@ -1630,16 +1915,13 @@ def test_send_document(log_path: str, baseline: int) -> tuple[bool, str]:
     import tempfile, os, asyncio
     from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
-
     with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False, encoding="utf-8") as f:
         f.write("E2E_AUTO send_document test content\n")
         temp_path = f.name
 
+    adapter = TeamsMTKAdapter(None)
+    sent_message_id = ""
     try:
-        adapter = TeamsMTKAdapter(None)
-
         async def _call():
             return await adapter.send_document(DM_CHAT_ID, temp_path, caption="E2E_AUTO doc test")
 
@@ -1649,31 +1931,35 @@ def test_send_document(log_path: str, baseline: int) -> tuple[bool, str]:
             return False, f"send_document returned success=False error={result.error!r}"
         if not result.message_id:
             return False, f"send_document succeeded but returned no message_id: {result!r}"
+        sent_message_id = str(result.message_id)
 
-        time.sleep(3)
-        msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
-        new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
-        # The SDK path encodes the share link in properties.files (a
-        # JSON-stringified file schema with fileUrl/shareUrl), NOT in the
-        # message content itself (content stays as the plain caption).
-        # Check both the content (legacy/raw-HTTP <a href> path) and
-        # properties (SDK path) so this test works regardless of which
-        # code path handled the send.
-        has_link = any(
-            ("sharepoint.com" in (m.get("content") or "") or "1drv.ms" in (m.get("content") or "")
-             or "<a " in (m.get("content") or "")
-             or "sharepoint.com" in json.dumps(m.get("properties", {}) or {})
-             or "1drv.ms" in json.dumps(m.get("properties", {}) or {}))
-            for m in new_msgs
-        )
+        deadline = time.time() + 20
+        has_link = False
+        while time.time() < deadline:
+            try:
+                has_link = _exact_document_has_share_link(
+                    DM_CHAT_ID,
+                    sent_message_id,
+                )
+            except (RuntimeError, json.JSONDecodeError):
+                has_link = False
+            if has_link:
+                break
+            time.sleep(1)
         if not has_link:
             return False, (
-                f"send_document returned success=True message_id={result.message_id} "
-                f"but read-back found no share link in content or properties.files "
-                f"(new_msgs={len(new_msgs)})"
+                "send_document returned success=True but exact read-back "
+                "found neither an HTML link nor a files share schema"
             )
-        return True, f"send_document succeeded, message_id={result.message_id}, verified via read-back"
+        return True, "send_document succeeded and exact share contract verified"
     finally:
+        if sent_message_id:
+            cleanup = asyncio.run(adapter.delete_message(DM_CHAT_ID, sent_message_id))
+            if cleanup.get("status") != "deleted":
+                raise RuntimeError(
+                    "send-document E2E cleanup failed: "
+                    f"status={cleanup.get('status')}"
+                )
         os.unlink(temp_path)
 
 
@@ -1701,12 +1987,10 @@ def test_send_adaptive_card(log_path: str, baseline: int) -> tuple[bool, str]:
         (cfg.get("gateway", {}) or {}).get("teams_mtk", {}).get("adaptive_cards", {}).get("enabled", False)
     )
 
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
-
     fallback_marker = f"E2E_AUTO adaptive-card-fallback {int(time.time())}"
     card_marker = f"E2E_AUTO_CARD_{int(time.time())}"
     adapter = TeamsMTKAdapter(None)
+    sent_message_id = ""
 
     async def _call():
         return await adapter.send_adaptive_card(
@@ -1715,34 +1999,52 @@ def test_send_adaptive_card(log_path: str, baseline: int) -> tuple[bool, str]:
             fallback_text=fallback_marker,
         )
 
-    result = asyncio.run(_call())
+    try:
+        result = asyncio.run(_call())
 
-    if not result.success:
-        return False, f"send_adaptive_card (adaptive_cards.enabled={enabled}) returned success=False error={result.error!r}"
-
-    time.sleep(3)
-    msgs = get_messages_raw(DM_CHAT_ID, page_size=10)
-    new_msgs = [m for m in msgs if m.get("id") not in baseline_ids]
-
-    if not enabled:
-        has_fallback = any(fallback_marker in (m.get("content") or "") for m in new_msgs)
-        if not has_fallback:
+        if not result.success:
             return False, (
-                f"adaptive_cards disabled: expected fallback_text delivered as plain "
-                f"message, found none (new_msgs={len(new_msgs)})"
+                "send_adaptive_card returned success=False: "
+                f"enabled={enabled}, error_type={type(result.error).__name__}"
             )
-        return True, "Disabled path verified: fallback_text delivered as plain message"
-    else:
-        has_card = any(
-            card_marker in json.dumps(m.get("properties", {}) or {})
-            for m in new_msgs
-        )
-        if not has_card:
+        if not result.message_id:
+            return False, "send_adaptive_card succeeded but returned no message ID"
+        sent_message_id = str(result.message_id)
+
+        marker = card_marker if enabled else fallback_marker
+        property_key = "cards" if enabled else None
+        deadline = time.time() + 20
+        marker_found = False
+        while time.time() < deadline:
+            try:
+                marker_found = _exact_message_contains_marker(
+                    DM_CHAT_ID,
+                    sent_message_id,
+                    marker,
+                    property_key=property_key,
+                )
+            except (RuntimeError, json.JSONDecodeError):
+                marker_found = False
+            if marker_found:
+                break
+            time.sleep(1)
+        if not marker_found:
+            expected = "properties.cards" if enabled else "fallback content"
             return False, (
-                f"adaptive_cards enabled: expected card marker in properties.cards, "
-                f"found none (new_msgs={len(new_msgs)})"
+                "send_adaptive_card exact read-back missing expected "
+                f"{expected}; enabled={enabled}"
             )
-        return True, f"Enabled path verified: card payload landed in properties.cards, message_id={result.message_id}"
+        if enabled:
+            return True, "Enabled path verified via exact properties.cards"
+        return True, "Disabled path verified via exact fallback content"
+    finally:
+        if sent_message_id:
+            cleanup = asyncio.run(adapter.delete_message(DM_CHAT_ID, sent_message_id))
+            if cleanup.get("status") != "deleted":
+                raise RuntimeError(
+                    "adaptive-card E2E cleanup failed: "
+                    f"status={cleanup.get('status')}"
+                )
 
 
 def test_send_text(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -1774,55 +2076,39 @@ def test_reaction_roundtrip(log_path: str, baseline: int) -> tuple[bool, str]:
 
     adapter = TeamsMTKAdapter(None)
 
-    def _emotion_users() -> Optional[list]:
-        message = next(
-            (
-                item
-                for item in get_messages_raw(DM_CHAT_ID, page_size=30)
-                if str(item.get("id")) == str(message_id)
-            ),
-            None,
-        )
-        if not message:
-            return None
-        properties = message.get("properties") or {}
-        if isinstance(properties, str):
-            properties = json.loads(properties)
-        for emotion in properties.get("emotions") or []:
-            if emotion.get("key") == "like":
-                return emotion.get("users") or []
-        return []
-
     try:
         sent = asyncio.run(adapter.send_reaction(DM_CHAT_ID, message_id, "like"))
         if sent.get("status") != "reacted":
             return False, f"send_reaction failed: {sent!r}"
 
         deadline = time.time() + 20
-        added_users = None
+        added_count = 0
         while time.time() < deadline:
-            added_users = _emotion_users()
-            if added_users:
+            added_count = _reaction_user_count(DM_CHAT_ID, message_id, "like")
+            if added_count > 0:
                 break
             time.sleep(1)
-        if not added_users:
-            return False, f"Reaction was not visible in MSG read-back: users={added_users!r}"
+        if added_count <= 0:
+            return False, "Reaction was not visible in exact MSG read-back: user_count=0"
 
         removed = asyncio.run(adapter.remove_reaction(DM_CHAT_ID, message_id, "like"))
         if removed.get("status") != "removed":
             return False, f"remove_reaction failed: {removed!r}"
 
         deadline = time.time() + 20
-        remaining_users = added_users
+        remaining_count = added_count
         while time.time() < deadline:
-            remaining_users = _emotion_users()
-            if remaining_users == []:
+            remaining_count = _reaction_user_count(DM_CHAT_ID, message_id, "like")
+            if remaining_count == 0:
                 break
             time.sleep(1)
-        if remaining_users != []:
-            return False, f"Reaction remained after remove: users={remaining_users!r}"
+        if remaining_count != 0:
+            return False, (
+                "Reaction remained after remove: "
+                f"user_count={remaining_count}"
+            )
 
-        return True, f"Reaction add/remove read-back verified for message_id={message_id}"
+        return True, "Reaction add/remove exact read-back verified"
     finally:
         asyncio.run(adapter.delete_message(DM_CHAT_ID, message_id))
 
@@ -1851,32 +2137,30 @@ def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]
         own_deleted = True
 
         deadline = time.time() + 20
-        tombstone = None
-        tombstone_properties = {}
+        tombstone_found = False
+        tombstone_content_length = 0
+        tombstone_has_deletetime = False
         while time.time() < deadline:
-            tombstone = next(
-                (
-                    item
-                    for item in get_messages_raw(DM_CHAT_ID, page_size=30)
-                    if str(item.get("id")) == own_id
-                ),
-                None,
+            (
+                tombstone_found,
+                tombstone_content_length,
+                tombstone_has_deletetime,
+            ) = _exact_tombstone_state(
+                DM_CHAT_ID,
+                own_id,
             )
-            tombstone_properties = (tombstone or {}).get("properties") or {}
-            if isinstance(tombstone_properties, str):
-                tombstone_properties = json.loads(tombstone_properties)
             if (
-                tombstone
-                and not (tombstone.get("content") or "")
-                and tombstone_properties.get("deletetime")
+                tombstone_found
+                and tombstone_content_length == 0
+                and tombstone_has_deletetime
             ):
                 break
             time.sleep(1)
         else:
             return False, (
-                f"Own tombstone missing: found={bool(tombstone)}, "
-                f"content_length={len((tombstone or {}).get('content') or '')}, "
-                f"has_deletetime={bool(tombstone_properties.get('deletetime'))}"
+                f"Own tombstone missing: found={tombstone_found}, "
+                f"content_length={tombstone_content_length}, "
+                f"has_deletetime={tombstone_has_deletetime}"
             )
 
         foreign_marker = f"E2E_AUTO foreign delete guard {time.time_ns()}"
@@ -1892,14 +2176,16 @@ def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]
                 ),
                 None,
             )
-            if foreign and foreign_marker in str(foreign.get("content") or ""):
+            foreign_raw = str((foreign or {}).get("_raw_content") or "")
+            if foreign and foreign_marker in foreign_raw:
                 break
             time.sleep(1)
         foreign_content = str((foreign or {}).get("content") or "")
-        if not foreign or foreign_marker not in foreign_content:
+        foreign_raw = str((foreign or {}).get("_raw_content") or "")
+        if not foreign or foreign_marker not in foreign_raw:
             return False, (
                 "Controlled foreign message was not ready from MSG API: "
-                f"found={bool(foreign)}, content_length={len(foreign_content)}"
+                f"found={bool(foreign)}, raw_length={len(foreign_raw)}"
             )
 
         # Reproduce the live-adapter state: process this exact inbound message
@@ -2236,18 +2522,22 @@ def test_contact_routing(log_path: str, baseline: int) -> tuple[bool, str]:
 
         deadline = time.time() + 20
         while time.time() < deadline:
-            target = next(
-                (m for m in get_messages_raw(DM_CHAT_ID, 30) if str(m.get("id")) == message_id),
-                None,
-            )
-            if target is not None and marker in str(target.get("content") or ""):
+            try:
+                marker_visible = _exact_message_contains_marker(
+                    DM_CHAT_ID,
+                    message_id,
+                    marker,
+                )
+            except RuntimeError:
+                marker_visible = False
+            if marker_visible:
                 title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()[:10]
                 return True, (
                     f"contact title hash={title_hash} resolved to control DM; "
-                    f"message_id={message_id!r} read back"
+                    "exact sent identity and marker read back"
                 )
             time.sleep(2)
-        return False, f"contact route message {message_id!r} not found in MSG read-back"
+        return False, "contact route exact identity/marker not found in MSG read-back"
     finally:
         message_id = str((result or {}).get("message_id") or "")
         if message_id:
@@ -2269,8 +2559,6 @@ def test_contact_directory_fallback(log_path: str, baseline: int) -> tuple[bool,
     del log_path, baseline
     import hashlib
     import json as _json
-    import os as _os
-    import subprocess
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -2283,37 +2571,21 @@ def test_contact_directory_fallback(log_path: str, baseline: int) -> tuple[bool,
     if not conversations:
         return False, "list_conversations returned [] — cannot prove directory fallback boundary"
 
-    people_script = _os.path.expanduser("~/.hermes/skills/m365/scripts/people.py")
-    if not _os.path.isfile(people_script):
-        return False, "M365 people.py is unavailable at the configured Hermes skill path"
-
-    directory_env = {**_os.environ, "PYTHONPATH": ""}
-
-    def _run_people(*args: str) -> tuple[list[dict], str]:
-        try:
-            completed = subprocess.run(
-                ["python", people_script, *args],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=directory_env,
-            )
-        except Exception as exc:
-            return [], type(exc).__name__
-        if completed.returncode != 0 or not completed.stdout.strip():
-            return [], f"exit={completed.returncode}"
-        try:
-            payload = _json.loads(completed.stdout)
-        except (TypeError, ValueError):
-            return [], "invalid JSON"
-        people = payload.get("people") or []
-        return [person for person in people if isinstance(person, dict)], ""
-
-    relevant_people, relevant_error = _run_people("relevant", "--limit", "50")
-    if relevant_error:
-        return False, f"live M365 People relevant lookup failed ({relevant_error})"
-    if not relevant_people:
-        return False, "live M365 People relevant lookup returned no candidates"
+    directory_people = []
+    seen_people = set()
+    for prefix in ("A", "M", "L", "C", "S", "J", "W", "H"):
+        for person in adapter._search_users(prefix):
+            if not isinstance(person, dict):
+                continue
+            stable_ref = str(person.get("oid") or person.get("email") or "").strip()
+            if not stable_ref or stable_ref in seen_people:
+                continue
+            seen_people.add(stable_ref)
+            directory_people.append(person)
+        if len(directory_people) >= 40:
+            break
+    if not directory_people:
+        return False, "live Teams Graph directory search returned no candidates"
 
     def _matches_existing_conversation(name: str) -> bool:
         needle = name.lower()
@@ -2325,16 +2597,14 @@ def test_contact_directory_fallback(log_path: str, baseline: int) -> tuple[bool,
 
     candidate = ""
     canonical_name = ""
-    for person in relevant_people:
-        name = str(person.get("displayName") or "").strip()
+    for person in directory_people:
+        name = str(person.get("display_name") or "").strip()
         if len(name) < 4 or _matches_existing_conversation(name):
             continue
-        matches, search_error = _run_people(
-            "search", "--query", name, "--limit", "10"
-        )
-        if search_error or not matches:
+        matches = adapter._search_users(name)
+        if not matches:
             continue
-        canonical = str(matches[0].get("displayName") or "").strip()
+        canonical = str(matches[0].get("display_name") or "").strip()
         if canonical:
             candidate = name
             canonical_name = canonical
@@ -2343,7 +2613,7 @@ def test_contact_directory_fallback(log_path: str, baseline: int) -> tuple[bool,
     if not candidate:
         return False, (
             "no dynamic directory contact outside existing conversations; "
-            f"conversations={len(conversations)} candidates={len(relevant_people)}"
+            f"conversations={len(conversations)} candidates={len(directory_people)}"
         )
 
     runner = SimpleNamespace(adapters={Platform.TEAMS_MTK: adapter})
@@ -2505,19 +2775,26 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
                 f"standalone sender returned failure: type={type(result).__name__}, "
                 f"success={result.get('success') if isinstance(result, dict) else None}"
             )
+        if not message_id:
+            return False, "standalone sender returned success without a canonical message ID"
 
         deadline = time.time() + 20
         while time.time() < deadline:
-            messages = get_messages_raw(DM_CHAT_ID, page_size=30)
-            for msg in messages:
-                if marker in str(msg.get("content") or msg.get("body") or ""):
-                    message_id = str(msg.get("id") or message_id)
-                    import hashlib
-                    id_hash = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:10]
-                    return True, (
-                        f"standalone sender delivered and read back marker; "
-                        f"message_hash={id_hash}; {checks}"
-                    )
+            try:
+                marker_present = _exact_message_contains_marker(
+                    DM_CHAT_ID,
+                    message_id,
+                    marker,
+                )
+            except RuntimeError:
+                marker_present = False
+            if marker_present:
+                import hashlib
+                id_hash = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:10]
+                return True, (
+                    f"standalone sender delivered and read back marker; "
+                    f"message_hash={id_hash}; {checks}"
+                )
             time.sleep(2)
         return False, (
             "standalone sender returned success but marker was not present in "
@@ -2536,7 +2813,12 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
                 marker_msg = next(
                     (
                         msg for msg in messages
-                        if marker in str(msg.get("content") or msg.get("body") or "")
+                        if marker in str(
+                            msg.get("_raw_content")
+                            or msg.get("content")
+                            or msg.get("body")
+                            or ""
+                        )
                     ),
                     None,
                 )
@@ -2552,6 +2834,26 @@ def test_standalone_sender_fn(log_path: str, baseline: int) -> tuple[bool, str]:
                 )
 
 
+def _busy_burst_requires_mention() -> bool:
+    """Return the effective mention policy for the live control group."""
+    from hermes_cli.config import load_config
+
+    config = load_config()
+    teams_config = config.get("gateway", {}).get("teams_mtk", {})
+    groups = teams_config.get("groups", {})
+    group_config = groups.get(GROUP_CHAT_ID, {}) if isinstance(groups, dict) else {}
+    return bool(
+        group_config.get("require_mention", teams_config.get("require_mention", True))
+    )
+
+
+def _address_busy_burst_prompt(content: str, *, require_mention: bool) -> str:
+    """Address a control-group prompt when the live policy requires it."""
+    if not require_mention:
+        return content
+    return f'<at id="0">Hermes</at>&nbsp;{content}'
+
+
 def _busy_burst_preconditions() -> tuple[bool, str]:
     """Verify this runner and the live gateway use the intended checkout/config."""
     import psutil
@@ -2561,15 +2863,9 @@ def _busy_burst_preconditions() -> tuple[bool, str]:
 
     config = load_config()
     busy_mode = str(config.get("display", {}).get("busy_input_mode") or "")
-    teams_config = config.get("gateway", {}).get("teams_mtk", {})
-    group_config = teams_config.get("groups", {}).get(GROUP_CHAT_ID, {})
-    require_mention = bool(
-        group_config.get("require_mention", teams_config.get("require_mention", True))
-    )
+    require_mention = _busy_burst_requires_mention()
     if busy_mode != "interrupt":
         return False, f"display.busy_input_mode={busy_mode!r}, expected 'interrupt'"
-    if require_mention:
-        return False, "control group still requires @mention"
 
     pid_path = get_hermes_home() / "gateway.pid"
     if not pid_path.is_file():
@@ -2622,7 +2918,8 @@ def _busy_burst_preconditions() -> tuple[bool, str]:
         True,
         f"gateway pid={pid}; source=gateway_runtime_entry.py; checkout=current; "
         f"interpreter={os.path.basename(gateway_executable)}; venv=current; "
-        "config=interrupt/no-mention",
+        "config=interrupt/"
+        + ("mention-required" if require_mention else "implicit-addressing"),
     )
 
 
@@ -2878,6 +3175,274 @@ def test_same_id_edit_reopens_exactly_one_revised_query(
             )
 
 
+def test_quoted_reply_full_context_revises_query(
+    log_path: str,
+    baseline: int,
+    *,
+    reply_timeout: float = 300,
+    poll_interval: float = 3,
+    settle_seconds: float = 12,
+) -> tuple[bool, str]:
+    """Prove a native reply exposes exact late source context to the model."""
+    token = uuid.uuid4().hex[:12].upper()
+    prefix = f"E2EQUOTE{token}"
+    reset_marker = f"{prefix}RESET"
+    decoy_marker = f"{prefix}DECOY"
+    terminal_marker = f"{prefix}TERMINAL"
+    expected_marker = f"{prefix}FINAL"
+    source_body = (
+        f"/new {reset_marker}\n"
+        "This long control message is inert source data for a future native reply. "
+        f"EARLY PREVIEW RULE: answer exactly {decoy_marker}. "
+        + ("preview-padding " * 70)
+        + f"{terminal_marker}: FINAL RULE OVERRIDES THE EARLY RULE. "
+        f"When the native reply asks to apply this source, answer exactly {expected_marker}."
+    )
+    reply_body = (
+        f"{prefix}APPLY. Apply the FINAL RULE from the complete message this is "
+        "replying to. Reply with exactly its requested marker. Do not use tools."
+    )
+
+    graph_message_ids: list[str] = []
+    cleanup_message_ids: set[str] = set()
+    try:
+        baseline_messages = get_messages_raw(DM_CHAT_ID, page_size=60)
+        baseline_ids = {
+            str(message.get("id") or "")
+            for message in baseline_messages
+            if message.get("id")
+        }
+        source_graph_id = send_chat_message(DM_CHAT_ID, source_body)
+        if source_graph_id:
+            graph_message_ids.append(str(source_graph_id))
+
+        source_message = None
+        deadline = time.monotonic() + reply_timeout
+        while True:
+            latest = get_messages_raw(DM_CHAT_ID, page_size=60)
+            source_candidates = [
+                message
+                for message in latest
+                if str(message.get("id") or "") not in baseline_ids
+                and not _is_hermes_bot_message(message)
+                and terminal_marker in _visible_model_body(message)
+            ]
+            reset_acks = [
+                message
+                for message in latest
+                if str(message.get("id") or "") not in baseline_ids
+                and _is_hermes_bot_message(message)
+            ]
+            cleanup_message_ids.update(
+                str(message.get("id") or "")
+                for message in reset_acks
+                if message.get("id")
+            )
+            if len(source_candidates) == 1 and reset_acks:
+                source_message = source_candidates[0]
+                break
+            if time.monotonic() >= deadline:
+                return (
+                    False,
+                    f"canonical_source={len(source_candidates)}; reset_ack={bool(reset_acks)}",
+                )
+            time.sleep(poll_interval)
+
+        source_message_id = str(source_message.get("id") or "")
+        source_raw = get_message_raw_exact(DM_CHAT_ID, source_message_id)
+        canonical_source, _ = _clean_message_content(
+            str(source_raw.get("content") or "")
+        )
+        source_hash = hashlib.sha256(
+            canonical_source.encode("utf-8")
+        ).hexdigest()[:12]
+        if terminal_marker not in canonical_source or expected_marker not in canonical_source:
+            return False, "exact_source_missing_terminal=True"
+
+        pre_reply_messages = get_messages_raw(DM_CHAT_ID, page_size=60)
+        pre_reply_ids = {
+            str(message.get("id") or "")
+            for message in pre_reply_messages
+            if message.get("id")
+        }
+        native_reply_id = send_native_user_reply(
+            DM_CHAT_ID,
+            source_message_id,
+            reply_body,
+        )
+        cleanup_message_ids.add(native_reply_id)
+
+        deadline = time.monotonic() + reply_timeout
+        while True:
+            latest = get_messages_raw(DM_CHAT_ID, page_size=60)
+            final_replies = [
+                message
+                for message in latest
+                if str(message.get("id") or "") not in pre_reply_ids
+                and _is_hermes_bot_message(message)
+                and _has_exact_visible_marker(message, expected_marker)
+            ]
+            cleanup_message_ids.update(
+                str(message.get("id") or "")
+                for message in final_replies
+                if message.get("id")
+            )
+            if final_replies:
+                break
+            if time.monotonic() >= deadline:
+                decoy_replies = [
+                    message
+                    for message in latest
+                    if str(message.get("id") or "") not in pre_reply_ids
+                    and _is_hermes_bot_message(message)
+                    and decoy_marker in _visible_model_body(message)
+                ]
+                return (
+                    False,
+                    f"terminal_reply=0; preview_decoy_reply={len(decoy_replies)}",
+                )
+            time.sleep(poll_interval)
+
+        time.sleep(settle_seconds)
+        final_messages = get_messages_raw(DM_CHAT_ID, page_size=60)
+        new_bot_messages = [
+            message
+            for message in final_messages
+            if str(message.get("id") or "") not in pre_reply_ids
+            and _is_hermes_bot_message(message)
+        ]
+        terminal_replies = [
+            message
+            for message in new_bot_messages
+            if _has_exact_visible_marker(message, expected_marker)
+        ]
+        decoy_replies = [
+            message
+            for message in new_bot_messages
+            if decoy_marker in _visible_model_body(message)
+        ]
+        cleanup_message_ids.update(
+            str(message.get("id") or "")
+            for message in new_bot_messages
+            if message.get("id")
+        )
+
+        reply_raw = get_message_raw_exact(DM_CHAT_ID, native_reply_id)
+        raw_properties = reply_raw.get("properties") or {}
+        if isinstance(raw_properties, str):
+            try:
+                raw_properties = json.loads(raw_properties)
+            except (json.JSONDecodeError, TypeError):
+                raw_properties = {}
+        quoted_messages = raw_properties.get("qtdMsgs") or []
+        if isinstance(quoted_messages, str):
+            try:
+                quoted_messages = json.loads(quoted_messages)
+            except (json.JSONDecodeError, TypeError):
+                quoted_messages = []
+        quoted_ids = {
+            str(item.get("messageId") or item.get("id") or "")
+            for item in quoted_messages
+            if isinstance(item, dict)
+        }
+        reply_soup = BeautifulSoup(
+            str(reply_raw.get("content") or ""),
+            "html.parser",
+        )
+        reply_quote = reply_soup.find(
+            "blockquote",
+            attrs={"itemtype": "http://schema.skype.com/Reply"},
+        )
+        blockquote_id = str(reply_quote.get("itemid") or "") if reply_quote else ""
+        preview_node = (
+            reply_quote.find(True, attrs={"itemprop": "preview"})
+            if reply_quote is not None
+            else None
+        )
+        preview_text = preview_node.get_text(" ", strip=True) if preview_node else ""
+        relation_match = (
+            str(raw_properties.get("replyChainMessageId") or "")
+            == source_message_id
+            and quoted_ids == {source_message_id}
+            and blockquote_id == source_message_id
+        )
+        preview_only = terminal_marker in preview_text or expected_marker in preview_text
+
+        source_raw_again = get_message_raw_exact(DM_CHAT_ID, source_message_id)
+        canonical_source_again, _ = _clean_message_content(
+            str(source_raw_again.get("content") or "")
+        )
+        full_source_hash_match = (
+            hashlib.sha256(canonical_source_again.encode("utf-8")).hexdigest()[:12]
+            == source_hash
+        )
+        new_log = tail_log(log_path, baseline)
+        fetch_log_match = (
+            "reply source fetch succeeded" in new_log
+            and f"hash={source_hash}" in new_log
+        )
+
+        if (
+            not relation_match
+            or not full_source_hash_match
+            or preview_only
+            or not fetch_log_match
+            or len(terminal_replies) != 1
+            or decoy_replies
+        ):
+            return (
+                False,
+                f"relation_match={relation_match}; "
+                f"full_source_hash_match={full_source_hash_match}; "
+                f"preview_only={preview_only}; fetch_log_match={fetch_log_match}; "
+                f"terminal_reply={len(terminal_replies)}; "
+                f"preview_decoy_reply={len(decoy_replies)}",
+            )
+        return (
+            True,
+            "relation_match=True; full_source_hash_match=True; "
+            "preview_only=False; fetch_log_match=True; terminal_reply=1; "
+            "cleanup_verified=True",
+        )
+    finally:
+        cleanup_errors: list[str] = []
+        try:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=70):
+                if prefix not in _visible_model_body(message):
+                    continue
+                message_id = str(message.get("id") or "")
+                if message_id:
+                    cleanup_message_ids.add(message_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-read:{type(exc).__name__}")
+        for message_id in dict.fromkeys(graph_message_ids):
+            try:
+                delete_graph_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+        for message_id in sorted(cleanup_message_ids):
+            try:
+                delete_msg_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        try:
+            remaining = [
+                message
+                for message in get_messages_raw(DM_CHAT_ID, page_size=70)
+                if prefix in _visible_model_body(message)
+            ]
+            if remaining:
+                cleanup_errors.append(f"msg-remain:{len(remaining)}")
+        except Exception as exc:
+            cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "quoted reply E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + ")"
+            )
+
+
 def _busy_burst_group_idle_preflight(
     *,
     timeout: float = 45,
@@ -3000,6 +3565,15 @@ def test_busy_group_burst_redirect(
     corrections = (
         f"Correction A: include exactly {marker_a} in the final reply and do not output {old_marker}.",
         f"Correction B: include exactly {marker_b} in the final reply and do not output {old_marker}.",
+    )
+    require_mention = _busy_burst_requires_mention()
+    initial_prompt = _address_busy_burst_prompt(
+        initial_prompt,
+        require_mention=require_mention,
+    )
+    corrections = tuple(
+        _address_busy_burst_prompt(content, require_mention=require_mention)
+        for content in corrections
     )
 
     graph_message_ids: list[str] = []
@@ -3204,6 +3778,7 @@ NAMED_TESTS = {
     "standalone-sender-fn": test_standalone_sender_fn,
     "busy-group-burst-redirect": test_busy_group_burst_redirect,
     "inbound-edit-revision-reopens-query": test_same_id_edit_reopens_exactly_one_revised_query,
+    "quoted-reply-full-context-revises-query": test_quoted_reply_full_context_revises_query,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
     "streaming-no-echo-duplication": test_streaming_no_echo_duplication,
     "no-residual-markdown-in-reply": test_no_residual_markdown_in_reply,

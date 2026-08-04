@@ -337,6 +337,7 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: reply source identity 與 full-context fetch 成功；不把 preview 標成 full context
 **回覆內容驗證**: 回覆必須反映 terminal sentinel 後的完整 source 資訊與修訂 body
 **DONE 定義**: exact relation match、full source hash match、preview-only=false、cleanup residue=0
+**驗證證據**: ✅ 2026-08-04 targeted real-gateway PASS（`--only quoted-reply-full-context-revises-query`）；exact relation、full-source hash、terminal-rule model reply、preview-only=false 與 cleanup residue=0 均由同一 run 驗證。✅ 同日不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `28/28`。
 
 #### reply-to-native-thread-roundtrip（Tier 2）
 **觸發方式**: 讓 Hermes 透過正式 delivery path 帶 `reply_to` 回覆受控來源訊息

@@ -3254,6 +3254,16 @@ DEFAULT_CONFIG = {
             #                              per-sender toolset restrictions,
             #                              unioned with the group-level list.
             "groups": {},
+            # Owner-only control conversations for sensitive agent execution.
+            # This is deliberately separate from `groups` and `home_channel`:
+            # those settings authorize routing/access, while this map grants
+            # per-turn owner Execution Authority only when BOTH the exact
+            # conversation ID and immutable sender ID match.
+            #
+            #   control_conversations:
+            #     "19:xxx@thread.v2":
+            #       owner_user_ids: ["immutable-owner-oid"]
+            "control_conversations": {},
             # Minimum seconds between consecutive replies to the same
             # conversation. Prevents flooding when the agent fires
             # multiple rapid sends within one turn. 0 = disabled.

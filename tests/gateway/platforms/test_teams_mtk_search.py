@@ -172,6 +172,20 @@ class TestSearchUsers:
         assert "startswith(displayName,'sample')" in params["$filter"]
         assert "startswith(mail,'sample')" in params["$filter"]
 
+    def test_escapes_apostrophe_in_odata_filter(self):
+        adapter = _make_adapter()
+        adapter._auth.graph_token.return_value = "tok"
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"value": []}
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            adapter._search_users("O'Reilly")
+
+        params = mock_get.call_args.kwargs["params"]
+        assert "startswith(displayName,'O''Reilly')" in params["$filter"]
+        assert "startswith(mail,'O''Reilly')" in params["$filter"]
+
 
 # ---------------------------------------------------------------------------
 # S3-2/S3-3: Calendar operations

@@ -309,3 +309,30 @@ def test_legacy_valid_cache_discovers_and_persists_region(tmp_path, monkeypatch)
     assert tokens["skype_token"] == "discovered-skype"
     assert auth.msg_base == expected
     assert json.loads(cache.read_text(encoding="utf-8"))["msg_base"] == expected
+
+
+def test_scope_exchange_without_legacy_cache_skips_skype_token_acquisition(
+    tmp_path, monkeypatch
+):
+    """Graph-only callers must not pay for an unrelated Skype auth exchange."""
+    cache = tmp_path / ".teams-tokens" / "missing-token-cache.json"
+    monkeypatch.setattr(_TeamsAuth, "TOKEN_CACHE", cache)
+    auth = _TeamsAuth()
+    wam = MagicMock()
+    wam.exchange_for_scope.return_value = {
+        "access_token": "graph-access",
+        "expires_in": 3600,
+    }
+    wam.ensure_valid_tokens.side_effect = AssertionError(
+        "Graph scope exchange must not acquire Skype credentials"
+    )
+    monkeypatch.setattr(auth, "_get_wam_auth", lambda: wam)
+    monkeypatch.setattr(auth, "_inject_truststore", lambda: None)
+
+    result = auth.exchange_for_scope(
+        "https://graph.microsoft.com/.default offline_access"
+    )
+
+    assert result["access_token"] == "graph-access"
+    wam.exchange_for_scope.assert_called_once()
+    wam.ensure_valid_tokens.assert_not_called()

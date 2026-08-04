@@ -2,7 +2,9 @@
 
 import json
 from contextlib import contextmanager
+import os
 from pathlib import Path
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -1505,7 +1507,16 @@ class TestDeleteSkillRmtreeGuard:
         skills = tmp_path / "skills"
         skills.mkdir()
         evil = skills / "evil-skill"
-        evil.symlink_to(victim, target_is_directory=True)
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(evil), str(victim)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert completed.returncode == 0, completed.stderr or completed.stdout
+        else:
+            evil.symlink_to(victim, target_is_directory=True)
         try:
             with patch("tools.skill_manager_tool.SKILLS_DIR", skills), \
                  patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills]), \

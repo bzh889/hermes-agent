@@ -1807,6 +1807,10 @@ class MessageEvent:
     reply_to_author_id: Optional[str] = None
     reply_to_author_name: Optional[str] = None
     reply_to_is_own_message: bool = False  # True when the user replied to this bot/assistant's message
+    # True only when ``reply_to_text`` came from an exact source-message fetch.
+    # Consumers may then preserve the complete text instead of treating it as
+    # a presentation snippet. Defaults false for existing adapters.
+    reply_to_text_complete: bool = False
 
     # Structured interactive-prompt reply (relay Phase 3). Present when this
     # event is the user answering a native interactive prompt rendered by the
