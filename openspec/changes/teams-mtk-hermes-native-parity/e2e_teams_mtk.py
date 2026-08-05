@@ -334,6 +334,40 @@ def _raw_message_properties(message: dict) -> dict:
     return properties if isinstance(properties, dict) else {}
 
 
+def _native_reply_relation_ids(message: dict) -> set[str]:
+    """Extract only structural reply-target identities from canonical read-back."""
+    properties = _raw_message_properties(message)
+    relation_ids = {
+        str(properties.get("replyChainMessageId") or ""),
+    }
+
+    quoted_messages = properties.get("qtdMsgs") or []
+    if isinstance(quoted_messages, str):
+        try:
+            quoted_messages = json.loads(quoted_messages)
+        except (json.JSONDecodeError, TypeError):
+            quoted_messages = []
+    if isinstance(quoted_messages, list):
+        relation_ids.update(
+            str(item.get("messageId") or item.get("id") or "")
+            for item in quoted_messages
+            if isinstance(item, dict)
+        )
+
+    soup = BeautifulSoup(str(message.get("content") or ""), "html.parser")
+    reply_quote = soup.find(
+        "blockquote",
+        attrs={"itemtype": "http://schema.skype.com/Reply"},
+    )
+    if reply_quote is not None:
+        relation_ids.add(str(reply_quote.get("itemid") or ""))
+        relation_ids.update(
+            str(node.get("itemid") or "")
+            for node in reply_quote.find_all(True, attrs={"itemprop": "time"})
+        )
+    return {relation_id for relation_id in relation_ids if relation_id}
+
+
 def _exact_document_has_share_link(chat_id: str, message_id: str) -> bool:
     """Verify a raw HTML link or the SDK files share schema."""
     message = get_message_raw_exact(chat_id, message_id)
@@ -713,6 +747,7 @@ def delete_msg_message(chat_id: str, message_id: str) -> None:
 
 def send_via_sdk(chat_id: str, content: str) -> str:
     """Send through the bot-token SDK path and return its canonical identity."""
+    from teams_skype_sdk.api import _messages as messages_module  # type: ignore
     from teams_skype_sdk.api._messages import MessagesService
 
     auth = _get_gateway_auth()
@@ -723,10 +758,15 @@ def send_via_sdk(chat_id: str, content: str) -> str:
         http_layer = None
         try:
             http_layer = _get_readback_http_layer(auth)
-            result = MessagesService(http_layer).send(
-                conversation_id=chat_id,
-                content=content,
-            )
+            previous_msg_base = messages_module.MSG_BASE
+            try:
+                messages_module.MSG_BASE = auth.msg_base
+                result = MessagesService(http_layer).send(
+                    conversation_id=chat_id,
+                    content=content,
+                )
+            finally:
+                messages_module.MSG_BASE = previous_msg_base
             message_id = (
                 str(result.get("id") or result.get("OriginalArrivalTime") or "")
                 if isinstance(result, dict)
@@ -3752,6 +3792,423 @@ def test_busy_group_burst_redirect(
             )
 
 
+def test_reply_to_native_thread_roundtrip(
+    log_path: str,
+    baseline: int,
+    *,
+    reply_timeout: float = 90,
+    poll_interval: float = 2,
+    settle_seconds: float = 5,
+) -> tuple[bool, str]:
+    """Prove outbound reply relation, permitted flat degradation, and no duplicate."""
+    del log_path, baseline
+    import io
+    import logging
+    from unittest.mock import patch
+
+    import gateway.platforms.teams_mtk as teams_mtk_module
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    token = uuid.uuid4().hex[:12].upper()
+    prefix = f"E2EOUTREPLY{token}"
+    target_marker = f"{prefix}TARGET"
+    native_marker = f"{prefix}NATIVE"
+    flat_marker = f"{prefix}FLAT"
+    uncertain_marker = f"{prefix}UNCERTAIN"
+    target_body = (
+        f"{target_marker} Controlled source message with enough visible text "
+        "to verify the native quoted-message relation."
+    )
+    native_body = (
+        f"{native_marker} Controlled Hermes reply that must preserve the "
+        "native relation."
+    )
+    adapter = TeamsMTKAdapter(None)
+    adapter._auth = _get_gateway_auth()
+    cleanup_message_ids: set[str] = set()
+    log_stream = io.StringIO()
+    log_handler = logging.StreamHandler(log_stream)
+    teams_mtk_module.logger.addHandler(log_handler)
+
+    def message_id(message: dict) -> str:
+        return str(
+            message.get("id")
+            or message.get("OriginalArrivalTime")
+            or message.get("originalarrivaltime")
+            or ""
+        )
+
+    def rendered(message: dict) -> str:
+        return str(message.get("_raw_content") or message.get("content") or "")
+
+    def marker_messages(
+        messages: list[dict],
+        marker: str,
+        *,
+        exclude_ids: set[str],
+    ) -> list[dict]:
+        return [
+            message
+            for message in messages
+            if message_id(message)
+            and message_id(message) not in exclude_ids
+            and marker in rendered(message)
+        ]
+
+    def wait_for_marker(marker: str, exclude_ids: set[str]) -> list[dict]:
+        deadline = time.monotonic() + reply_timeout
+        latest: list[dict] = []
+        while True:
+            latest = marker_messages(
+                get_messages_raw(DM_CHAT_ID, page_size=70),
+                marker,
+                exclude_ids=exclude_ids,
+            )
+            if latest or time.monotonic() >= deadline:
+                return latest
+            time.sleep(poll_interval)
+
+    def run_scenarios() -> tuple[bool, str]:
+        baseline_messages = get_messages_raw(DM_CHAT_ID, page_size=70)
+        baseline_ids = {message_id(message) for message in baseline_messages}
+
+        target_result_id = send_via_sdk(DM_CHAT_ID, target_body)
+        if target_result_id:
+            cleanup_message_ids.add(target_result_id)
+        target_messages = wait_for_marker(target_marker, baseline_ids)
+        if len(target_messages) != 1:
+            return False, f"controlled_target={len(target_messages)}"
+        target_message_id = message_id(target_messages[0])
+        cleanup_message_ids.add(target_message_id)
+        if target_result_id and target_result_id != target_message_id:
+            return False, "controlled_target_identity_match=False"
+
+        before_native = {
+            message_id(message)
+            for message in get_messages_raw(DM_CHAT_ID, page_size=70)
+        }
+        native_transport: dict[str, object] = {}
+        original_sdk_request = teams_mtk_module._SDKHTTPLayer._request
+        original_proxy_init = teams_mtk_module._PinnedReplySourceHTTP.__init__
+
+        def recording_proxy_init(proxy, delegate, page_url, source):
+            source_content = str(source.get("content") or "")
+            source_soup = BeautifulSoup(source_content, "html.parser")
+            native_transport.update(
+                {
+                    "source_content_chars": len(source_content),
+                    "source_contains_marker": target_marker in source_content,
+                    "source_tag_names": sorted(
+                        {tag.name for tag in source_soup.find_all()}
+                    ),
+                    "source_visible_chars": len(
+                        source_soup.get_text(" ", strip=True)
+                    ),
+                    "source_sdk_text_chars": len(
+                        delegate._extract_text_content(source_content)
+                    ),
+                }
+            )
+            original_proxy_init(proxy, delegate, page_url, source)
+
+        def recording_sdk_request(http_layer, method: str, url: str, **kwargs):
+            payload = kwargs.get("json")
+            is_native_post = (
+                method.upper() == "POST"
+                and isinstance(payload, dict)
+                and native_marker in str(payload.get("content") or "")
+            )
+            if is_native_post:
+                payload_dict = payload if isinstance(payload, dict) else {}
+                properties = payload_dict.get("properties") or {}
+                quoted_messages = properties.get("qtdMsgs") or []
+                if isinstance(quoted_messages, str):
+                    try:
+                        quoted_messages = json.loads(quoted_messages)
+                    except (json.JSONDecodeError, TypeError):
+                        quoted_messages = []
+                quoted = (
+                    quoted_messages[0]
+                    if isinstance(quoted_messages, list)
+                    and quoted_messages
+                    and isinstance(quoted_messages[0], dict)
+                    else {}
+                )
+                transport_content = str(payload_dict.get("content") or "")
+                reply_body = transport_content.rsplit("</blockquote>", 1)[-1].strip()
+                native_transport.update(
+                    {
+                        "payload_property_keys": sorted(properties),
+                        "chain_matches_target": isinstance(properties, dict)
+                        and str(properties.get("replyChainMessageId") or "")
+                        == target_message_id,
+                        "qtd_has_target": target_message_id
+                        in str(properties.get("qtdMsgs") or ""),
+                        "content_has_reply_blockquote": (
+                            "schema.skype.com/Reply"
+                            in transport_content
+                        ),
+                        "qtd_sender_nonempty": bool(quoted.get("sender")),
+                        "qtd_message_nonempty": bool(quoted.get("message")),
+                        "reply_body_is_paragraph": reply_body.startswith("<p>"),
+                        "regional_post": str(url).startswith(
+                            adapter._auth.msg_base.rstrip("/") + "/"
+                        ),
+                    }
+                )
+            response = original_sdk_request(http_layer, method, url, **kwargs)
+            if is_native_post:
+                try:
+                    response_keys = (
+                        sorted(str(key) for key in response.json())
+                        if response is not None
+                        else []
+                    )
+                except Exception:
+                    response_keys = []
+                native_transport.update(
+                    {
+                        "response_status": getattr(response, "status_code", None),
+                        "response_keys": response_keys,
+                    }
+                )
+            return response
+
+        with (
+            patch.object(
+                teams_mtk_module._PinnedReplySourceHTTP,
+                "__init__",
+                recording_proxy_init,
+            ),
+            patch.object(
+                teams_mtk_module._SDKHTTPLayer,
+                "_request",
+                recording_sdk_request,
+            ),
+        ):
+            native_result = asyncio.run(
+                adapter.send(DM_CHAT_ID, native_body, reply_to=target_message_id)
+            )
+        if native_result.message_id:
+            cleanup_message_ids.add(str(native_result.message_id))
+        native_messages = wait_for_marker(native_marker, before_native)
+        cleanup_message_ids.update(
+            message_id(message) for message in native_messages if message_id(message)
+        )
+        if not native_result.success or len(native_messages) != 1:
+            return (
+                False,
+                f"native_success={native_result.success}; native_count={len(native_messages)}",
+            )
+        native_reply = native_messages[0]
+        if str(native_result.message_id or "") != message_id(native_reply):
+            return False, "native_identity_match=False"
+        exact_native_reply = get_message_raw_exact(
+            DM_CHAT_ID,
+            str(native_result.message_id),
+        )
+        relation_deadline = time.time() + 30
+        while (
+            target_message_id not in _native_reply_relation_ids(exact_native_reply)
+            and time.time() < relation_deadline
+        ):
+            time.sleep(2)
+            exact_native_reply = get_message_raw_exact(
+                DM_CHAT_ID,
+                str(native_result.message_id),
+            )
+        native_meta = (
+            native_result.raw_response.get("native_reply", {})
+            if isinstance(native_result.raw_response, dict)
+            else {}
+        )
+        if (
+            target_message_id not in _native_reply_relation_ids(exact_native_reply)
+            or native_meta.get("status") != "preserved"
+            or native_meta.get("relation_preserved") is not True
+        ):
+            properties = _raw_message_properties(exact_native_reply)
+            property_shapes = {
+                str(key): type(value).__name__
+                for key, value in properties.items()
+                if any(
+                    token in str(key).lower()
+                    for token in ("reply", "quote", "qtd")
+                )
+            }
+            return (
+                False,
+                "native_relation=False; "
+                f"relation_candidates={len(_native_reply_relation_ids(exact_native_reply))}; "
+                f"relation_property_shapes={property_shapes}; "
+                f"transport={native_transport}",
+            )
+
+        before_flat = {
+            message_id(message)
+            for message in get_messages_raw(DM_CHAT_ID, page_size=70)
+        }
+        with patch.object(teams_mtk_module, "_SDK_AVAILABLE", False):
+            flat_result = asyncio.run(
+                adapter.send(DM_CHAT_ID, flat_marker, reply_to=target_message_id)
+            )
+        if flat_result.message_id:
+            cleanup_message_ids.add(str(flat_result.message_id))
+        flat_messages = wait_for_marker(flat_marker, before_flat)
+        cleanup_message_ids.update(
+            message_id(message) for message in flat_messages if message_id(message)
+        )
+        flat_meta = (
+            flat_result.raw_response.get("native_reply", {})
+            if isinstance(flat_result.raw_response, dict)
+            else {}
+        )
+        sanitized_log = log_stream.getvalue()
+        leaked_values = (
+            DM_CHAT_ID,
+            target_message_id,
+            target_marker,
+            native_marker,
+            flat_marker,
+        )
+        if (
+            not flat_result.success
+            or len(flat_messages) != 1
+            or flat_meta.get("status") != "degraded"
+            or flat_meta.get("relation_preserved") is not False
+            or target_message_id in _native_reply_relation_ids(flat_messages[0])
+            or "native reply unavailable before send" not in sanitized_log
+            or any(value and value in sanitized_log for value in leaked_values)
+        ):
+            return False, f"flat_count={len(flat_messages)}; degraded=False"
+
+        before_uncertain = {
+            message_id(message)
+            for message in get_messages_raw(DM_CHAT_ID, page_size=70)
+        }
+        with (
+            patch.object(
+                adapter,
+                "_call_sdk_messages",
+                side_effect=TimeoutError("simulated response loss"),
+            ) as native_call,
+            patch.object(
+                requests.Session,
+                "post",
+                autospec=True,
+            ) as flat_post,
+        ):
+            uncertain_result = asyncio.run(
+                adapter.send(
+                    DM_CHAT_ID,
+                    uncertain_marker,
+                    reply_to=target_message_id,
+                )
+            )
+        time.sleep(settle_seconds)
+        uncertain_messages = marker_messages(
+            get_messages_raw(DM_CHAT_ID, page_size=70),
+            uncertain_marker,
+            exclude_ids=before_uncertain,
+        )
+        cleanup_message_ids.update(
+            message_id(message)
+            for message in uncertain_messages
+            if message_id(message)
+        )
+        uncertain_meta = (
+            uncertain_result.raw_response.get("native_reply", {})
+            if isinstance(uncertain_result.raw_response, dict)
+            else {}
+        )
+        if (
+            uncertain_result.success
+            or uncertain_result.retryable
+            or native_call.call_count != 1
+            or flat_post.call_count != 0
+            or uncertain_messages
+            or uncertain_meta.get("status") != "uncertain"
+            or uncertain_meta.get("relation_preserved", "missing") is not None
+        ):
+            return (
+                False,
+                "uncertain_signal=False; "
+                f"duplicate={len(uncertain_messages)}; flat_attempts={flat_post.call_count}",
+            )
+        return (
+            True,
+            "native_relation=1; flat_count=1; degraded=True; "
+            "uncertain=True; duplicate=0",
+        )
+
+    functional_result = (False, "scenario_not_started=True")
+    cleanup_errors: list[str] = []
+    try:
+        functional_result = run_scenarios()
+    finally:
+        teams_mtk_module.logger.removeHandler(log_handler)
+        log_handler.close()
+        try:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=90):
+                current_id = message_id(message)
+                if (
+                    current_id
+                    and prefix in rendered(message)
+                    and _is_hermes_bot_message(message)
+                ):
+                    cleanup_message_ids.add(current_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-discovery:{type(exc).__name__}")
+        try:
+            asyncio.run(adapter.disconnect())
+        except Exception as exc:
+            cleanup_errors.append(f"adapter:{type(exc).__name__}")
+        for current_id in sorted(cleanup_message_ids):
+            try:
+                delete_msg_message(DM_CHAT_ID, current_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+
+        remaining: list[dict] = []
+        # MSG DELETE can return before the read replica stops exposing the
+        # bot-owned target/reply. Retry that eventual-consistency window while
+        # retaining residue=0 as the only passing cleanup verdict.
+        for attempt in range(25):
+            try:
+                remaining = [
+                    message
+                    for message in get_messages_raw(DM_CHAT_ID, page_size=90)
+                    if prefix in rendered(message)
+                ]
+            except Exception as exc:
+                cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+                break
+            if not remaining:
+                break
+            if attempt < 24:
+                time.sleep(min(2**attempt, 4))
+        if remaining:
+            bot_remaining = sum(
+                1 for message in remaining if _is_hermes_bot_message(message)
+            )
+            cleanup_errors.append(
+                f"msg-remain:{len(remaining)}"
+                f"/bot:{bot_remaining}/human:{len(remaining) - bot_remaining}"
+            )
+        if cleanup_errors:
+            raise RuntimeError(
+                "outbound native reply E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + f"); functional={functional_result[0]}:"
+                + functional_result[1]
+            )
+
+    return (
+        functional_result[0],
+        functional_result[1] + "; cleanup_residue=0",
+    )
+
+
 # ── Runner ────────────────────────────────────────────────────────
 
 NAMED_TESTS = {
@@ -3779,6 +4236,7 @@ NAMED_TESTS = {
     "busy-group-burst-redirect": test_busy_group_burst_redirect,
     "inbound-edit-revision-reopens-query": test_same_id_edit_reopens_exactly_one_revised_query,
     "quoted-reply-full-context-revises-query": test_quoted_reply_full_context_revises_query,
+    "reply-to-native-thread-roundtrip": test_reply_to_native_thread_roundtrip,
     # ── 新增測項（2026-07-13 CONTENT TIER — 補真實輸出品質驗收）───
     "streaming-no-echo-duplication": test_streaming_no_echo_duplication,
     "no-residual-markdown-in-reply": test_no_residual_markdown_in_reply,

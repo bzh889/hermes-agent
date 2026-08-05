@@ -397,6 +397,46 @@ def _new_sdk_messages_service(http_layer):
     return service_class(http_layer)
 
 
+class _SDKStaticJSONResponse:
+    """Minimal response shape for one SDK-internal source lookup."""
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _PinnedReplySourceHTTP:
+    """Serve one exact source to the SDK reply builder, then delegate."""
+
+    def __init__(self, delegate: Any, page_url: str, source: dict):
+        self._delegate = delegate
+        self._page_url = page_url.rstrip("/")
+        self._source = source
+
+    def _request(self, method: str, url: str, **kwargs):
+        from urllib.parse import urlsplit
+
+        params = kwargs.get("params") or {}
+        same_page_path = (
+            urlsplit(str(url)).path.rstrip("/")
+            == urlsplit(self._page_url).path.rstrip("/")
+        )
+        if (
+            method.upper() == "GET"
+            and same_page_path
+            and params.get("pageSize") == 5
+        ):
+            return _SDKStaticJSONResponse({"messages": [self._source]})
+        if method.upper() == "POST" and same_page_path:
+            url = self._page_url
+        return self._delegate._request(method, url, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
 def _redact_oid(oid: Optional[str], visible: int = 8) -> str:
     """Return a non-reversible AAD Object ID reference for logging."""
     del visible  # Retained for compatibility with older callers.
@@ -2245,24 +2285,56 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         logger.debug("TeamsMTK: footer edit failed, falling back to send: %s", _log_error(_ee))
                 html_content, _ = self._build_html(runtime_footer, _skip_footer_extract=True)
 
-            # SDK-3b: delegate to SDK MessagesService.send() when available.
+            # SDK-3b: delegate to SDK MessagesService when available. A reply
+            # target is a transport relation, not presentation metadata: route
+            # it through the native reply operation rather than flattening it
+            # into an ordinary send.
             # Once the SDK POST starts, an exception may mean Teams accepted
             # the message but the response was lost. Never raw-resend that
             # indeterminate operation: doing so can duplicate the reply.
-            if _SDK_AVAILABLE:
+            native_reply_degradation = None
+            native_reply_available = bool(
+                _SDK_AVAILABLE
+                and _SDKMessages is not None
+                and callable(getattr(_SDKMessages, "reply", None))
+            )
+            if reply_to and not native_reply_available:
+                native_reply_degradation = {
+                    "native_reply": {
+                        "status": "degraded",
+                        "relation_preserved": False,
+                        "reason": "sdk_unavailable",
+                    }
+                }
+                logger.warning(
+                    "TeamsMTK: native reply unavailable before send for "
+                    "conv=%s target=%s; using one flat send",
+                    _log_ref(chat_id),
+                    _log_ref(reply_to),
+                )
+
+            if _SDK_AVAILABLE and (not reply_to or native_reply_available):
                 try:
+                    sdk_operation = "reply" if reply_to else "send"
+                    sdk_content = content if reply_to else html_content
+                    sdk_kwargs = {
+                        "conversation_id": chat_id,
+                        "content": sdk_content,
+                        "return_context": False,
+                    }
+                    if reply_to:
+                        sdk_kwargs["message_id"] = str(reply_to)
+                    else:
+                        sdk_kwargs["is_html"] = True
                     result = await asyncio.to_thread(
                         self._call_sdk_messages,
-                        "send",
-                        conversation_id=chat_id,
-                        content=html_content,
-                        is_html=True,
-                        return_context=False,
+                        sdk_operation,
+                        **sdk_kwargs,
                     )
                     # SDK now returns OriginalArrivalTime as "id" when MSG API
                     # omits the "id" key (which happens in both 1:1 DMs and
                     # groups).  Fallback: read-back latest messages.
-                    msg_id = result.get("id")
+                    msg_id = _sent_message_id(result)
                     if not msg_id:
                         try:
                             recent = await asyncio.to_thread(
@@ -2272,10 +2344,30 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                             for m in recent:
                                 _props = m.get("properties", {})
                                 _raw = m.get("_raw_properties", {})
-                                _sender = _props.get("hermes_sender") or _raw.get("hermes_sender")
+                                _sender = _property_value(
+                                    _props, "hermes_sender"
+                                ) or _property_value(_raw, "hermes_sender")
+                                _raw_content = str(m.get("_raw_content") or "")
+                                if reply_to:
+                                    _relation = _reply_relation_id(
+                                        _property_value(
+                                            _raw, "replyChainMessageId"
+                                        )
+                                        or _property_value(
+                                            _props, "replyChainMessageId"
+                                        )
+                                    )
+                                    _content_matches = bool(
+                                        _relation == str(reply_to)
+                                        and sdk_content in _raw_content
+                                    )
+                                else:
+                                    _content_matches = (
+                                        _raw_content == html_content
+                                    )
                                 if (
                                     _sender in ("agent", "bot")
-                                    and m.get("_raw_content") == html_content
+                                    and _content_matches
                                     and m.get("id")
                                 ):
                                     matching.append(m)
@@ -2301,22 +2393,48 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "TeamsMTK: sent message id=%s to %s via SDK (html=%d chars)",
                         _log_ref(msg_id), _log_ref(chat_id), len(html_content) if html_content else 0,
                     )
-                    return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+                    native_reply_result = None
+                    if reply_to:
+                        native_reply_result = {
+                            "native_reply": {
+                                "status": "preserved",
+                                "relation_preserved": True,
+                            }
+                        }
+                    return SendResult(
+                        success=True,
+                        message_id=str(msg_id) if msg_id else None,
+                        raw_response=native_reply_result,
+                    )
                 except Exception as _sdk_err:
+                    operation_label = "native reply" if reply_to else "SDK send"
                     logger.error(
-                        "TeamsMTK: SDK send failed (%s) — delivery uncertain; "
+                        "TeamsMTK: %s failed (%s) — delivery uncertain; "
                         "raw fallback suppressed",
+                        operation_label,
                         _log_error(_sdk_err),
                     )
+                    uncertain_result = None
+                    if reply_to:
+                        uncertain_result = {
+                            "native_reply": {
+                                "status": "uncertain",
+                                "relation_preserved": None,
+                            }
+                        }
                     return SendResult(
                         success=False,
                         error=(
-                            "SDK send delivery uncertain; raw fallback suppressed "
+                            f"{operation_label.capitalize()} delivery uncertain; "
+                            "raw fallback suppressed "
                             f"({type(_sdk_err).__name__})"
                         ),
+                        raw_response=uncertain_result,
                     )
 
-            # Raw HTTP path when the SDK is unavailable before any send starts.
+            # Raw HTTP path when the selected SDK operation is unavailable
+            # before any send starts. For reply targets this is an explicit,
+            # duplicate-safe flat degradation rather than a silent relation loss.
             import requests
             from requests.adapters import HTTPAdapter
             self._auth._inject_truststore()
@@ -2373,7 +2491,11 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "TeamsMTK: sent message id=%s to %s via raw HTTP (html=%d chars)",
                 _log_ref(msg_id), _log_ref(chat_id), len(html_content) if html_content else 0,
             )
-            return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+            return SendResult(
+                success=True,
+                message_id=str(msg_id) if msg_id else None,
+                raw_response=native_reply_degradation,
+            )
         except Exception as e:
             logger.error("TeamsMTK: send failed: %s", _log_error(e))
             return SendResult(success=False, error=str(e))
@@ -4339,7 +4461,75 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             lock = self._sdk_fetch_lock = threading.Lock()
         with lock:
             try:
-                svc = _SDKMessages(self._get_sdk_http_layer_locked())
+                http_layer = self._get_sdk_http_layer_locked()
+                service_http = http_layer
+                if operation == "reply":
+                    import urllib.parse
+
+                    conversation_id = str(kwargs.get("conversation_id") or "")
+                    message_id = str(kwargs.get("message_id") or "")
+                    encoded_conversation = urllib.parse.quote(
+                        conversation_id, safe=""
+                    )
+                    encoded_message = urllib.parse.quote(message_id, safe="")
+                    page_url = (
+                        f"{self._auth.msg_base}/conversations/"
+                        f"{encoded_conversation}/messages"
+                    )
+                    response = http_layer._request(
+                        "GET", f"{page_url}/{encoded_message}"
+                    )
+                    source_payload = response.json()
+                    if isinstance(source_payload, dict) and isinstance(
+                        source_payload.get("messages"), list
+                    ):
+                        source_payload = next(
+                            (
+                                message
+                                for message in source_payload["messages"]
+                                if str(message.get("id") or "") == message_id
+                            ),
+                            None,
+                        )
+                    if (
+                        not isinstance(source_payload, dict)
+                        or str(source_payload.get("id") or "") != message_id
+                    ):
+                        raise RuntimeError(
+                            "Teams SDK exact reply source was not returned"
+                        )
+                    if not str(source_payload.get("content") or "").strip():
+                        page_response = http_layer._request(
+                            "GET",
+                            page_url,
+                            params={"pageSize": 100, "startTime": 0},
+                        )
+                        page_payload = page_response.json()
+                        page_messages = (
+                            page_payload.get("messages", [])
+                            if isinstance(page_payload, dict)
+                            else []
+                        )
+                        source_payload = next(
+                            (
+                                {**source_payload, **message}
+                                for message in page_messages
+                                if isinstance(message, dict)
+                                and str(message.get("id") or "") == message_id
+                                and str(message.get("content") or "").strip()
+                            ),
+                            source_payload,
+                        )
+                    if not str(source_payload.get("content") or "").strip():
+                        raise RuntimeError(
+                            "Teams SDK exact reply source content was unavailable"
+                        )
+                    service_http = _PinnedReplySourceHTTP(
+                        http_layer,
+                        page_url,
+                        source_payload,
+                    )
+                svc = _SDKMessages(service_http)
                 return getattr(svc, operation)(**kwargs)
             except Exception:
                 self._close_sdk_http_layer_locked()

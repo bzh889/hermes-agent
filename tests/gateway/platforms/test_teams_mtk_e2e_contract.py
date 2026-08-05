@@ -80,6 +80,36 @@ def test_quoted_reply_e2e_uses_ticket_registry_name():
     )
 
 
+def test_outbound_native_reply_e2e_uses_ticket_registry_name():
+    e2e = _load_e2e_module()
+
+    assert (
+        e2e.NAMED_TESTS["reply-to-native-thread-roundtrip"]
+        is e2e.test_reply_to_native_thread_roundtrip
+    )
+
+
+def test_native_reply_relation_parser_accepts_wire_shapes():
+    e2e = _load_e2e_module()
+    message = {
+        "content": (
+            '<blockquote itemtype="http://schema.skype.com/Reply">'
+            '<span itemprop="time" itemid="target-alias"></span>'
+            "</blockquote><p>reply</p>"
+        ),
+        "properties": json.dumps(
+            {
+                "replyChainMessageId": "target-alias",
+                "qtdMsgs": json.dumps(
+                    [{"messageId": "target-alias"}]
+                ),
+            }
+        ),
+    }
+
+    assert e2e._native_reply_relation_ids(message) == {"target-alias"}
+
+
 @pytest.mark.parametrize(
     "properties",
     [
@@ -1493,6 +1523,7 @@ def test_e2e_sdk_send_uses_gateway_auth_and_shared_transport(monkeypatch):
     truststore_injections = []
     gateway_auth = SimpleNamespace(
         _inject_truststore=lambda: truststore_injections.append(True),
+        msg_base="https://msg.example.invalid/v1/users/ME",
     )
     http = object()
     observed = {}
@@ -1503,9 +1534,11 @@ def test_e2e_sdk_send_uses_gateway_auth_and_shared_transport(monkeypatch):
 
         def send(self, *, conversation_id, content):
             observed["send"] = (conversation_id, content)
+            observed["msg_base"] = messages_module.MSG_BASE
             return {"OriginalArrivalTime": 12345}
 
     messages_module = importlib.import_module("teams_skype_sdk.api._messages")
+    previous_msg_base = messages_module.MSG_BASE
 
     monkeypatch.setattr(messages_module, "MessagesService", FakeMessagesService)
     monkeypatch.setattr(
@@ -1519,4 +1552,9 @@ def test_e2e_sdk_send_uses_gateway_auth_and_shared_transport(monkeypatch):
 
     assert result == "12345"
     assert truststore_injections == [True]
-    assert observed == {"http": http, "send": ("chat-id", "marker")}
+    assert observed == {
+        "http": http,
+        "send": ("chat-id", "marker"),
+        "msg_base": gateway_auth.msg_base,
+    }
+    assert messages_module.MSG_BASE == previous_msg_base
