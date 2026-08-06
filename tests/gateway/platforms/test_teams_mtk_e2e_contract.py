@@ -89,6 +89,173 @@ def test_outbound_native_reply_e2e_uses_ticket_registry_name():
     )
 
 
+def test_bot_classifier_accepts_sdk_raw_sender_marker():
+    e2e = _load_e2e_module()
+
+    assert e2e._is_hermes_bot_message(
+        {
+            "content": "session reset acknowledgement",
+            "properties": {},
+            "_raw_properties": {"hermes_sender": "bot"},
+        }
+    ) is True
+    assert e2e._is_hermes_bot_message(
+        {
+            "content": "human-authored message",
+            "properties": {},
+            "_raw_properties": {"hermes_sender": "user"},
+        }
+    ) is False
+
+
+def test_tail_log_reads_current_file_after_rotation(tmp_path):
+    e2e = _load_e2e_module()
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text("old-1\nold-2\nold-3\n", encoding="utf-8")
+    baseline_lines = 3
+
+    log_path.write_text("new-1\nnew-2\n", encoding="utf-8")
+
+    assert e2e.tail_log(str(log_path), baseline_lines) == "new-1\nnew-2\n"
+
+
+def test_send_text_allows_a_bounded_full_model_turn(monkeypatch):
+    e2e = _load_e2e_module()
+    calls = []
+    sent = []
+    deleted_graph = []
+    deleted_msg = []
+    marker = "E2ESENDABCDEF123456"
+    bot_reply = {
+        "id": "bot-reply",
+        "content": "ack",
+        "_raw_properties": {"hermes_sender": "bot"},
+    }
+    readbacks = iter([[], [bot_reply], []])
+
+    monkeypatch.setattr(
+        e2e.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="abcdef1234567890"),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_messages_raw",
+        lambda *args, **kwargs: next(readbacks),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda *args: sent.append(args) or "trigger",
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda *args: deleted_graph.append(args),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda *args: deleted_msg.append(args),
+    )
+
+    def _wait(log_path, baseline, patterns, wait_seconds):
+        calls.append((log_path, baseline, patterns, wait_seconds))
+        return True, "sent"
+
+    monkeypatch.setattr(e2e, "wait_and_check_log", _wait)
+
+    assert e2e.test_send_text("gateway.log", 17) == (True, "sent")
+    assert calls == [
+        ("gateway.log", 17, [r"TeamsMTK: sent message id="], 300)
+    ]
+    assert sent == [(e2e.DM_CHAT_ID, f"{marker} send test — hello")]
+    assert deleted_graph == [(e2e.DM_CHAT_ID, "trigger")]
+    assert deleted_msg == [
+        (e2e.DM_CHAT_ID, "bot-reply"),
+        (e2e.DM_CHAT_ID, "trigger"),
+    ]
+
+
+def test_garbage_detector_e2e_correlates_and_cleans_up(monkeypatch):
+    e2e = _load_e2e_module()
+    marker = "E2EGARBAGEABCDEF123456"
+    reset_reply = {
+        "id": "bot-reset",
+        "content": f"<div>{marker}RESET</div>",
+        "_raw_properties": {"hermes_sender": "bot"},
+    }
+    query_reply = {
+        "id": "bot-query",
+        "content": f"<div>{'正確內容' * 30} {marker}DONE</div>",
+        "_raw_properties": {"hermes_sender": "bot"},
+    }
+    readbacks = iter(
+        [
+            [],
+            [reset_reply],
+            [reset_reply, query_reply],
+            [reset_reply, query_reply],
+            [],
+        ]
+    )
+    sent_ids = iter(["graph-reset", "graph-query"])
+    sent = []
+    deleted_graph = []
+    deleted_msg = []
+
+    monkeypatch.setattr(
+        e2e.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="abcdef1234567890"),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_messages_raw",
+        lambda *args, **kwargs: next(readbacks),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda chat_id, content: sent.append((chat_id, content)) or next(sent_ids),
+    )
+    monkeypatch.setattr(e2e, "tail_log", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda *args: deleted_graph.append(args),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda *args: deleted_msg.append(args),
+    )
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+
+    import agent.garbage_detector as garbage_detector
+
+    monkeypatch.setattr(garbage_detector, "is_garbage", lambda _text: False)
+    monkeypatch.setattr(garbage_detector, "_garbage_score", lambda _text: 0.0)
+
+    ok, evidence = e2e.test_garbage_detector_no_false_positive_on_clean_output(
+        "gateway.log", 23
+    )
+
+    assert ok is True, evidence
+    assert sent[0] == (e2e.DM_CHAT_ID, f"/new {marker}RESET")
+    assert marker in sent[1][1]
+    assert deleted_graph == [
+        (e2e.DM_CHAT_ID, "graph-reset"),
+        (e2e.DM_CHAT_ID, "graph-query"),
+    ]
+    assert set(deleted_msg) == {
+        (e2e.DM_CHAT_ID, "bot-reset"),
+        (e2e.DM_CHAT_ID, "bot-query"),
+        (e2e.DM_CHAT_ID, "graph-reset"),
+        (e2e.DM_CHAT_ID, "graph-query"),
+    }
+
+
 def test_native_reply_relation_parser_accepts_wire_shapes():
     e2e = _load_e2e_module()
     message = {
@@ -1495,6 +1662,9 @@ def test_e2e_graph_token_uses_gateway_atomic_auth(monkeypatch):
         def get_token(self):
             return "graph-token"
 
+        def refresh(self):
+            return "refreshed-graph-token"
+
     def _legacy_sdk_auth_must_not_run():
         raise AssertionError("legacy SDK TeamsAuth would truncate the live cache")
 
@@ -1505,9 +1675,56 @@ def test_e2e_graph_token_uses_gateway_atomic_auth(monkeypatch):
     monkeypatch.setattr(e2e, "GraphToken", FakeGraphToken)
     setattr(e2e, "_gateway_auth", None)
     setattr(e2e, "_graph_token", None)
+    setattr(e2e, "_graph_token_manager", None)
 
     assert e2e.get_graph_token() == "graph-token"
+    assert e2e.get_graph_token() == "graph-token"
+    assert e2e.get_graph_token(force_refresh=True) == "refreshed-graph-token"
     assert seen_auth == [gateway_auth]
+
+
+def test_e2e_graph_send_refreshes_once_on_401(monkeypatch):
+    e2e = _load_e2e_module()
+    responses = iter(
+        [
+            SimpleNamespace(status_code=401, text="expired"),
+            SimpleNamespace(status_code=201, text="", json=lambda: {"id": "sent"}),
+        ]
+    )
+    refreshes = []
+
+    monkeypatch.setattr(
+        e2e,
+        "get_graph_token",
+        lambda *, force_refresh=False: refreshes.append(force_refresh)
+        or ("new" if force_refresh else "old"),
+    )
+    monkeypatch.setattr(e2e.requests, "post", lambda *args, **kwargs: next(responses))
+
+    assert e2e.send_chat_message("chat", "hello") == "sent"
+    assert refreshes == [False, True]
+
+
+def test_e2e_graph_delete_refreshes_once_on_401(monkeypatch):
+    e2e = _load_e2e_module()
+    responses = iter(
+        [
+            SimpleNamespace(status_code=401, text="expired"),
+            SimpleNamespace(status_code=204, text=""),
+        ]
+    )
+    refreshes = []
+
+    monkeypatch.setattr(
+        e2e,
+        "get_graph_token",
+        lambda *, force_refresh=False: refreshes.append(force_refresh)
+        or ("new" if force_refresh else "old"),
+    )
+    monkeypatch.setattr(e2e.requests, "delete", lambda *args, **kwargs: next(responses))
+
+    e2e.delete_graph_message("chat", "message")
+    assert refreshes == [False, True]
 
 
 def test_e2e_readback_uses_gateway_atomic_auth(monkeypatch):

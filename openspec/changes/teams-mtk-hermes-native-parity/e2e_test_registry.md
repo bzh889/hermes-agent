@@ -325,6 +325,7 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: 同一 chat/message identity 只出現一次 revision dispatch；重複 poll 不新增 turn
 **回覆內容驗證**: 新回覆只根據修訂後完整 query；舊 body 未重播，revision 只產生一個新回答
 **DONE 定義**: revision dispatch=1、duplicate=0、canonical edited body match、cleanup residue=0
+**驗證證據**: ✅ 2026-08-06 fresh targeted real-gateway PASS；same remote identity、完整 edited body、revision dispatch=1、duplicate=0、舊 body 未重播、cleanup residue=0。✅ 同一 final tree 不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `29/29`。
 
 #### quoted-reply-full-context-revises-query（Tier 2）
 **觸發方式**: 由 human inbound 路徑對一則長於 quote preview 的來源訊息做 native reply，reply body 明確修訂需求
@@ -337,7 +338,7 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: reply source identity 與 full-context fetch 成功；不把 preview 標成 full context
 **回覆內容驗證**: 回覆必須反映 terminal sentinel 後的完整 source 資訊與修訂 body
 **DONE 定義**: exact relation match、full source hash match、preview-only=false、cleanup residue=0
-**驗證證據**: ✅ 2026-08-04 targeted real-gateway PASS（`--only quoted-reply-full-context-revises-query`）；exact relation、full-source hash、terminal-rule model reply、preview-only=false 與 cleanup residue=0 均由同一 run 驗證。✅ 同日不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `28/28`。
+**驗證證據**: ✅ 2026-08-06 fresh targeted real-gateway PASS；exact relation、full-source hash、terminal-rule model reply、preview-only=false、fetch-log correlation、terminal reply=1 與 cleanup residue=0 均由同一 run 驗證。✅ 同一 final tree 不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `29/29`。
 
 #### reply-to-native-thread-roundtrip（Tier 2）
 **觸發方式**: 讓 Hermes 透過正式 delivery path 帶 `reply_to` 回覆受控來源訊息
@@ -350,3 +351,8 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: 正常路徑明確走 native SDK reply；只有 pre-send unavailable 可出現 flat degradation；indeterminate send 不得二次 flat send
 **回覆內容驗證**: 正常路徑保留 native relation；fallback 路徑內容只出現一次
 **DONE 定義**: native relation read-back PASS、duplicate=0、forced fallback observable、cleanup residue=0
+**驗證證據**: ✅ 2026-08-06 fresh targeted real-gateway PASS；同一 run 證明 `native_relation=1`、`flat_count=1`、`degraded=True`、`uncertain=True`、`duplicate=0`、`cleanup_residue=0`。✅ E2E contract `52/52`、media transport `17/17`。✅ canonical repository wrapper 對全部直接受影響 P0 files 通過 `308/308`。✅ 同一 final tree 不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `29/29`。
+
+#### Query Revision + Native Reply P0 final gate
+**驗證證據**: ✅ 2026-08-06 三個 named verdict 分別 targeted PASS；完整 sequential `NAMED_TESTS` `29/29`；directly impacted canonical wrapper `308/308`；fresh-context Standards/Spec review 無 blocker；gateway restart 後的 runtime process 晚於三個 production source mtime，且有 fresh startup、Teams polling 與 API-server events。
+**全 repo gate 說明**: `scripts/run_tests.sh` 全範圍曾啟動，但被 P0 diff 外的 Windows image-path contract 阻擋；`tests/agent/test_image_routing.py` 已用 canonical wrapper 單檔重現 `7 failed, 98 passed, 1 skipped`。此結果不作 P0 regression，也不誤報為全 repo green。

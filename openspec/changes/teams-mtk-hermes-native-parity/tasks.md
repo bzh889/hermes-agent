@@ -51,7 +51,7 @@
 > | `no-residual-markdown-in-reply` | 2 | `**`/`` ` ``/`[url]`/`- `/pipe table 殘留未轉 HTML | 讀回真實 HTML，正則檢查殘留語法 | ✅ 2026-07-13 PASS |
 > | `no-disallowed-fallback-models` | 1 | 480b fallback 撞 403 浪費 retry | 檢查 config.yaml provider 清單 | ✅ 2026-07-13 PASS |
 > | `attachment-domain-routing-covers-asm` | 1 | 圖片下載 domain routing | 檢查 `asyncgw.teams.microsoft.com` 與 `as-api.asm.skype.com` 都走 token auth | ✅ 2026-07-14 PASS |
-> | `garbage-detector-no-false-positive` | 2 | Garbage detector 誤判疑慮 | 真實訊息確認有送達 + 記錄 discard 次數（非零仍算過，因 retry 成功） | ✅ 2026-07-13 PASS |
+> | `garbage-detector-no-false-positive` | 2 | Garbage detector 誤判疑慮 | unique marker 關聯 exact bot reply；production detector PASS、discard=0、finally cleanup residue=0 | ✅ 2026-08-06 PASS |
 >
 
 > | 測項名稱 | 對應功能 | 上次驗證 |
@@ -76,6 +76,9 @@
 > | `reaction-roundtrip` | S7-1~3 | ✅ 2026-07-14 PASS（Graph add/remove；MSG `properties.emotions[].users` add 後非空、remove 後清空） |
 > | `delete-message-safety` | S9-1~3 | ✅ 2026-07-14 PASS（同一 adapter 先處理受控 Graph-user foreign 訊息，再驗 own tombstone、foreign 明確拒刪且內容 hash 不變；finally Graph cleanup） |
 > | `standalone-sender-fn` | cron deliver | ✅ 2026-07-14 PASS（真 registry sender 呼叫 + MSG read-back + finally delete cleanup） |
+> | `inbound-edit-revision-reopens-query` | Query Revision P0 / issue 01 | ✅ 2026-08-06 PASS（same-ID revision=1、duplicate=0、no original replay、cleanup=0） |
+> | `quoted-reply-full-context-revises-query` | Native Reply Context P0 / issue 02 | ✅ 2026-08-06 PASS（exact relation/source hash、preview-only=false、cleanup=0） |
+> | `reply-to-native-thread-roundtrip` | Outbound Native Reply P0 / issue 03 | ✅ 2026-08-06 PASS（native relation、single flat degradation、uncertain duplicate=0、cleanup=0） |
 >
 > **2026-07-15 G13-B.2/B.4 補完後全量重跑**：gateway 載入最新 source 後，
 > 25/25 real gateway E2E PASS。包含 model-picker、restart-no-replay、SDK
@@ -83,6 +86,15 @@
 > delete safety、G13 contact routing + live directory fallback、standalone sender cleanup 與 Tier-2 content
 > read-back。去識別與network fallback修正後重新驗證：完整 E2E 25/25、
 > 最新完整相關 pytest 415/415 PASS。
+>
+> **2026-08-06 Query Revision + Native Reply P0 real-gateway gate**：三個 P0
+> verdict 分別 targeted PASS，並在同一 final-tree sequential run 保持獨立；
+> 不帶 `--only` 的完整 `NAMED_TESTS` 通過 `29/29`；canonical repository
+> wrapper 對全部直接受影響 P0 files 通過 `308/308`；fresh-context
+> Standards/Spec review 無 blocker；gateway restart 後確認 final production
+> source 已載入並持續 polling。全 repo wrapper 另由 P0 diff 外的 Windows
+> image-path contract 阻擋，單檔重現為 `7 failed, 98 passed, 1 skipped`，
+> 不誤報為 P0 regression 或全 repo green。
 >
 > ### 仍缺少 E2E 測項的功能（⚠️ 必須補上才能標記完成）
 > | 功能 | Task ID | 需新增測項名稱 |

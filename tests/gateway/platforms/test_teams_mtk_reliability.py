@@ -225,6 +225,50 @@ async def test_raw_edit_acquires_skype_token_off_event_loop():
     assert token_threads and token_threads[0] != event_loop_thread
 
 
+async def test_adapter_sdk_edit_preserves_bot_sender_marker():
+    """SDK edits must remain recognizable as Hermes output after restart."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+    adapter._call_sdk_http = MagicMock(
+        return_value=MagicMock(status_code=200, content=b"")
+    )
+
+    with patch.object(teams_mtk, "_SDK_AVAILABLE", True):
+        result = await adapter.edit_message("conv-a", "msg-a", "updated")
+
+    assert result.success is True
+    method, url = adapter._call_sdk_http.call_args.args
+    assert method == "PUT"
+    assert url == "https://msg.example.com/v1/conversations/conv-a/messages/msg-a"
+    assert adapter._call_sdk_http.call_args.kwargs["json"]["properties"] == {
+        "hermes_sender": "bot"
+    }
+
+
+async def test_adapter_raw_edit_preserves_bot_sender_marker():
+    """Raw fallback edits must carry the same echo-guard marker as SDK edits."""
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    adapter = _make_adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+    adapter._auth.skype_token.return_value = "fake-skype-token"
+    response = MagicMock(status_code=200, content=b"")
+
+    with patch.object(teams_mtk, "_SDK_AVAILABLE", False), patch(
+        "requests.put", return_value=response
+    ) as put:
+        result = await adapter.edit_message("conv-a", "msg-a", "updated")
+
+    assert result.success is True
+    assert put.call_args.kwargs["json"]["properties"] == {
+        "hermes_sender": "bot"
+    }
+
+
 # ── §1 edit_message 429 ──────────────────────────────────────────────────
 
 async def test_edit_message_429_backs_off_and_retries():
@@ -633,7 +677,11 @@ async def test_trailing_runtime_footer_keeps_final_streamed_body_without_cursor(
         '<span style="color:#888;font-size:0.85em">— Hermes · old</span>'
         '</div>'
     )
-    adapter._call_sdk_messages = MagicMock(return_value={"id": "body-id"})
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.com/v1"
+    adapter._call_sdk_http = MagicMock(
+        return_value=MagicMock(status_code=200, content=b"")
+    )
 
     with patch.object(teams_mtk_module, "_SDK_AVAILABLE", True):
         final_result = await adapter.edit_message(
@@ -649,9 +697,9 @@ async def test_trailing_runtime_footer_keeps_final_streamed_body_without_cursor(
 
     assert final_result == SendResult(success=True, message_id="body-id")
     assert footer_result.success is True
-    final_footer_edit = adapter._call_sdk_messages.call_args_list[-1]
-    assert final_footer_edit.args[0] == "edit"
-    merged_html = final_footer_edit.kwargs["content"]
+    final_footer_edit = adapter._call_sdk_http.call_args_list[-1]
+    assert final_footer_edit.args[0] == "PUT"
+    merged_html = final_footer_edit.kwargs["json"]["content"]
     assert "complete answer with the missing details" in merged_html
     assert "partial answer" not in merged_html
     assert "▉" not in merged_html
@@ -772,6 +820,72 @@ def test_token_cache_atomic_write(tmp_path, monkeypatch):
     assert data["access_token"] == "abc123"
     # Temp file should not linger
     assert not cache_path.with_suffix(".json.tmp").exists()
+
+
+@pytest.mark.asyncio(False)
+def test_token_cache_atomic_write_retries_transient_replace_lock(tmp_path, monkeypatch):
+    """A transient destination lock does not fail an otherwise valid cache save."""
+    import json
+    from pathlib import Path
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    cache_path = tmp_path / "token_cache.json"
+    cache_path.write_text('{"access_token":"old"}', encoding="utf-8")
+    monkeypatch.setattr(teams_mtk._TeamsAuth, "TOKEN_CACHE", cache_path)
+
+    real_replace = Path.replace
+    attempts = []
+
+    def transiently_locked(path, target):
+        attempts.append((path, target))
+        if len(attempts) == 1:
+            raise PermissionError(5, "transient destination lock")
+        return real_replace(path, target)
+
+    sleep = MagicMock()
+    monkeypatch.setattr(Path, "replace", transiently_locked)
+    monkeypatch.setattr(teams_mtk.time, "sleep", sleep)
+
+    teams_mtk._TeamsAuth()._save({"access_token": "new"})
+
+    assert json.loads(cache_path.read_text(encoding="utf-8")) == {
+        "access_token": "new"
+    }
+    assert len(attempts) == 2
+    sleep.assert_called_once_with(0.15)
+    assert not list(tmp_path.glob("token_cache.json.tmp.*"))
+
+
+@pytest.mark.asyncio(False)
+def test_token_cache_atomic_write_preserves_old_cache_when_retry_stays_locked(
+    tmp_path, monkeypatch
+):
+    """A persistent destination lock raises without a non-atomic overwrite."""
+    from pathlib import Path
+    import gateway.platforms.teams_mtk as teams_mtk
+
+    cache_path = tmp_path / "token_cache.json"
+    original = b'{"access_token":"old"}'
+    cache_path.write_bytes(original)
+    monkeypatch.setattr(teams_mtk._TeamsAuth, "TOKEN_CACHE", cache_path)
+
+    attempts = []
+
+    def persistently_locked(path, target):
+        attempts.append((path, target))
+        raise PermissionError(5, "persistent destination lock")
+
+    sleep = MagicMock()
+    monkeypatch.setattr(Path, "replace", persistently_locked)
+    monkeypatch.setattr(teams_mtk.time, "sleep", sleep)
+
+    with pytest.raises(PermissionError, match="persistent destination lock"):
+        teams_mtk._TeamsAuth()._save({"access_token": "new"})
+
+    assert cache_path.read_bytes() == original
+    assert len(attempts) == 2
+    sleep.assert_called_once_with(0.15)
+    assert not list(tmp_path.glob("token_cache.json.tmp.*"))
 
 
 @pytest.mark.parametrize(

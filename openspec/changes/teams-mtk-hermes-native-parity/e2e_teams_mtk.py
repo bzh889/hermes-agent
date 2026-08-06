@@ -105,6 +105,7 @@ def _load_configured_chat_ids() -> None:
 
 _gateway_auth = None
 _graph_token = None
+_graph_token_manager = None
 _readback_http_layer = None
 
 
@@ -116,23 +117,33 @@ def _get_gateway_auth():
     return _gateway_auth
 
 
-def get_graph_token() -> str:
-    global _graph_token
-    if _graph_token is None:
-        gt = GraphToken(_get_gateway_auth())
-        _graph_token = gt.get_token()
-        if not _graph_token:
-            raise RuntimeError("Failed to acquire Graph token")
+def get_graph_token(*, force_refresh: bool = False) -> str:
+    global _graph_token, _graph_token_manager
+    if _graph_token_manager is None:
+        _graph_token_manager = GraphToken(_get_gateway_auth())
+    _graph_token = (
+        _graph_token_manager.refresh()
+        if force_refresh
+        else _graph_token_manager.get_token()
+    )
+    if not _graph_token:
+        raise RuntimeError("Failed to acquire Graph token")
     return _graph_token
 
 
 def send_chat_message(chat_id: str, content: str) -> str:
     """Send a message via Graph API and return the message ID."""
-    token = get_graph_token()
     url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {"body": {"content": content}}
-    r = requests.post(url, headers=headers, json=body)
+    for attempt in range(2):
+        token = get_graph_token(force_refresh=attempt == 1)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        r = requests.post(url, headers=headers, json=body)
+        if r.status_code != 401:
+            break
     if r.status_code != 201:
         raise RuntimeError(
             f"Graph API POST failed: status={r.status_code}, "
@@ -143,10 +154,13 @@ def send_chat_message(chat_id: str, content: str) -> str:
 
 def delete_graph_message(chat_id: str, message_id: str) -> None:
     """Delete a controlled Graph-user E2E message."""
-    token = get_graph_token()
     url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{message_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.delete(url, headers=headers)
+    for attempt in range(2):
+        token = get_graph_token(force_refresh=attempt == 1)
+        headers = {"Authorization": f"Bearer {token}"}
+        response = requests.delete(url, headers=headers)
+        if response.status_code != 401:
+            break
     if response.status_code not in (204, 404):
         raise RuntimeError(
             f"Graph API DELETE failed: status={response.status_code}, "
@@ -155,9 +169,11 @@ def delete_graph_message(chat_id: str, message_id: str) -> None:
 
 
 def tail_log(path: str, after_line: int = 0) -> str:
-    """Read gateway log from after_line onwards."""
+    """Read gateway log after a line baseline, including after rollover."""
     with open(path, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
+    if after_line > len(lines):
+        after_line = 0
     return "".join(lines[after_line:])
 
 
@@ -1314,69 +1330,161 @@ def test_garbage_detector_no_false_positive_on_clean_output(log_path: str, basel
     mush) and gateway.log shows at most the known intermittent trigger
     rate, not a discard on every turn.
     """
-    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=5)
-    baseline_ids = {m.get("id") for m in baseline_msgs}
-
-    send_chat_message(DM_CHAT_ID, "/new")
-    time.sleep(3)
-    send_chat_message(
-        DM_CHAT_ID,
-        "不用使用工具。請用繁體中文寫四點條列，說明軟體測試的重要性；"
-        "每點至少二十五個中文字，總長必須超過一百五十字。",
-    )
-    time.sleep(45)
-
-    msgs = get_messages_raw(DM_CHAT_ID, page_size=20)
-    bot_replies = [
-        m for m in msgs
-        if m.get("id") not in baseline_ids
-        and ("🤖" in (m.get("content") or "") or "border-left" in (m.get("content") or ""))
-    ]
-    if not bot_replies:
-        return False, "No bot reply received within wait window"
-
     from agent.garbage_detector import is_garbage, _garbage_score
     import html as _html
 
-    substantial = []
-    for reply in bot_replies:
-        raw = str(reply.get("content") or "")
-        text = _html.unescape(re.sub(r"<[^>]+>", " ", raw))
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) >= 80:
-            substantial.append(text)
+    marker = f"E2EGARBAGE{uuid.uuid4().hex[:12].upper()}"
+    baseline_msgs = get_messages_raw(DM_CHAT_ID, page_size=120)
+    baseline_ids = {
+        str(message.get("id") or "")
+        for message in baseline_msgs
+        if message.get("id")
+    }
+    graph_message_ids: list[str] = []
+    cleanup_message_ids: set[str] = set()
 
-    if not substantial:
-        return False, (
-            "Bot replied, but no reply was long enough to exercise the "
-            "production detector's 80-character threshold"
+    try:
+        reset_graph_id = send_chat_message(DM_CHAT_ID, f"/new {marker}RESET")
+        graph_message_ids.append(str(reset_graph_id))
+        reset_deadline = time.monotonic() + 300
+        reset_reply_id = ""
+        while time.monotonic() < reset_deadline:
+            reset_replies = [
+                message
+                for message in get_messages_raw(DM_CHAT_ID, page_size=120)
+                if str(message.get("id") or "") not in baseline_ids
+                and _is_hermes_bot_message(message)
+                and f"{marker}RESET" in _visible_model_body(message)
+            ]
+            cleanup_message_ids.update(
+                str(message.get("id") or "") for message in reset_replies
+            )
+            if len(reset_replies) > 1:
+                return False, f"reset_ack={len(reset_replies)}; duplicate_ack=True"
+            if reset_replies:
+                reset_reply_id = str(reset_replies[0].get("id") or "")
+                break
+            time.sleep(3)
+        if not reset_reply_id:
+            return False, "reset_ack=0"
+
+        query_graph_id = send_chat_message(
+            DM_CHAT_ID,
+            f"{marker}QUERY 不用使用工具。第一行務必原樣輸出 {marker}DONE；"
+            "接著用繁體中文寫四點條列，說明軟體測試的重要性；"
+            "每點至少二十五個中文字，總長必須超過一百五十字。",
         )
+        graph_message_ids.append(str(query_graph_id))
+        reply_deadline = time.monotonic() + 300
+        delivered_reply = None
+        while time.monotonic() < reply_deadline:
+            replies = [
+                message
+                for message in get_messages_raw(DM_CHAT_ID, page_size=120)
+                if str(message.get("id") or "") not in baseline_ids
+                and str(message.get("id") or "") != reset_reply_id
+                and _is_hermes_bot_message(message)
+                and f"{marker}DONE" in _visible_model_body(message)
+            ]
+            cleanup_message_ids.update(
+                str(message.get("id") or "") for message in replies
+            )
+            reply_ids = {
+                str(message.get("id") or "") for message in replies
+            }
+            if len(reply_ids) > 1:
+                return False, f"terminal_replies={len(reply_ids)}; duplicate_reply=True"
+            if replies:
+                delivered_reply = replies[0]
+                break
+            time.sleep(3)
+        if delivered_reply is None:
+            return False, "No marker-correlated bot reply received within 300s"
 
-    for text in substantial:
+        raw = _visible_model_body(delivered_reply)
+        text = _html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = text.replace(f"{marker}DONE", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) < 80:
+            return False, (
+                "Marker-correlated reply was not long enough to exercise the "
+                "production detector's 80-character threshold"
+            )
         if "\ufffd" in text:
             return False, "Delivered reply contains U+FFFD replacement characters"
         repeated = re.search(r"([^\s])\1{11,}", text)
         if repeated:
-            return False, f"Delivered reply contains a repeated-character run: {repeated.group(0)!r}"
+            return False, (
+                "Delivered reply contains a repeated-character run: "
+                f"{repeated.group(0)!r}"
+            )
         if is_garbage(text):
             return False, (
-                f"Production detector flags the delivered clean reply as garbage "
+                "Production detector flags the delivered clean reply as garbage "
                 f"(score={_garbage_score(text):.2f})"
             )
 
-    new_log = tail_log(log_path, baseline)
-    discard_count = len(
-        re.findall(r"(?:Garbage output detected|Corrupt final model output detected)", new_log)
-    )
-    if discard_count:
-        return False, (
-            f"Clean-output turn triggered {discard_count} garbage discard(s); "
-            "this is a false positive even though a retry eventually replied"
+        new_log = tail_log(log_path, baseline)
+        discard_count = len(
+            re.findall(
+                r"(?:Garbage output detected|Corrupt final model output detected)",
+                new_log,
+            )
         )
-    return True, (
-        f"{len(substantial)} substantial reply/replies delivered; detector score(s)="
-        f"{[_garbage_score(text) for text in substantial]}; 0 false-positive discards"
-    )
+        if discard_count:
+            return False, (
+                f"Clean-output turn triggered {discard_count} garbage discard(s); "
+                "this is a false positive even though a retry eventually replied"
+            )
+        return True, (
+            "1 marker-correlated substantial reply delivered; detector score="
+            f"{_garbage_score(text)}; 0 false-positive discards"
+        )
+    finally:
+        cleanup_errors: list[str] = []
+        try:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=120):
+                if marker not in _visible_model_body(message):
+                    continue
+                message_id = str(message.get("id") or "")
+                if message_id:
+                    cleanup_message_ids.add(message_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-read:{type(exc).__name__}")
+        for graph_message_id in graph_message_ids:
+            try:
+                delete_graph_message(DM_CHAT_ID, graph_message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+            cleanup_message_ids.add(graph_message_id)
+        for message_id in sorted(cleanup_message_ids):
+            try:
+                delete_msg_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        remaining = []
+        for attempt in range(12):
+            try:
+                remaining = [
+                    message
+                    for message in get_messages_raw(DM_CHAT_ID, page_size=120)
+                    if marker in _visible_model_body(message)
+                ]
+            except Exception as exc:
+                cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+                break
+            if not remaining:
+                break
+            if attempt < 11:
+                time.sleep(2)
+        if remaining:
+            cleanup_errors.append(f"msg-remain:{len(remaining)}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "garbage-detector E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + ")"
+            )
 
 
 # ── Named test cases ──────────────────────────────────────────────
@@ -2089,19 +2197,69 @@ def test_send_adaptive_card(log_path: str, baseline: int) -> tuple[bool, str]:
 
 def test_send_text(log_path: str, baseline: int) -> tuple[bool, str]:
     """DM: send a message via Graph API, gateway replies, check log for sent message."""
-    content = "E2E_AUTO send test — hello"
-    send_chat_message(DM_CHAT_ID, content)
+    marker = f"E2ESEND{uuid.uuid4().hex[:12].upper()}"
+    baseline_messages = get_messages_raw(DM_CHAT_ID, page_size=40)
+    baseline_ids = {
+        str(message.get("id") or "")
+        for message in baseline_messages
+        if message.get("id")
+    }
+    graph_message_id = ""
+    cleanup_message_ids: set[str] = set()
+    try:
+        graph_message_id = send_chat_message(
+            DM_CHAT_ID,
+            f"{marker} send test — hello",
+        )
 
-    # Wait for gateway to process and send a reply
-    # Pattern: "TeamsMTK: sent message id=" (outbound confirmation)
-    found, evidence = wait_and_check_log(
-        log_path, baseline,
-        [r"TeamsMTK: sent message id="],
         # Stable WS polling may take 30s before the inbound message is seen;
-        # leave another 30s for the real model turn and SDK delivery.
-        wait_seconds=60,
-    )
-    return found, evidence
+        # use the same bounded model-turn budget as the P0 query tests.
+        return wait_and_check_log(
+            log_path,
+            baseline,
+            [r"TeamsMTK: sent message id="],
+            wait_seconds=300,
+        )
+    finally:
+        cleanup_errors: list[str] = []
+        try:
+            for message in get_messages_raw(DM_CHAT_ID, page_size=60):
+                message_id = str(message.get("id") or "")
+                if (
+                    message_id
+                    and message_id not in baseline_ids
+                    and _is_hermes_bot_message(message)
+                ):
+                    cleanup_message_ids.add(message_id)
+        except Exception as exc:
+            cleanup_errors.append(f"msg-read:{type(exc).__name__}")
+        if graph_message_id:
+            try:
+                delete_graph_message(DM_CHAT_ID, str(graph_message_id))
+            except Exception as exc:
+                cleanup_errors.append(f"graph:{type(exc).__name__}")
+            cleanup_message_ids.add(str(graph_message_id))
+        for message_id in sorted(cleanup_message_ids):
+            try:
+                delete_msg_message(DM_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"msg:{type(exc).__name__}")
+        try:
+            remaining = [
+                message
+                for message in get_messages_raw(DM_CHAT_ID, page_size=60)
+                if marker in _visible_model_body(message)
+            ]
+            if remaining:
+                cleanup_errors.append(f"msg-remain:{len(remaining)}")
+        except Exception as exc:
+            cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "send-text E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + ")"
+            )
 
 
 def test_reaction_roundtrip(log_path: str, baseline: int) -> tuple[bool, str]:
@@ -2988,10 +3146,23 @@ def _wait_for_process_marker(
 
 def _is_hermes_bot_message(message: dict) -> bool:
     rendered = str(message.get("_raw_content") or message.get("content") or "")
-    properties = str(message.get("properties") or "")
+    sender_marker = ""
+    for candidate in (
+        message.get("properties"),
+        message.get("_raw_properties"),
+    ):
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                candidate = {}
+        if isinstance(candidate, dict):
+            sender_marker = str(candidate.get("hermes_sender") or "")
+        if sender_marker:
+            break
     return (
         ("🤖 Hermes" in rendered and "— Hermes ·" in rendered)
-        or "hermes_sender" in properties
+        or sender_marker in {"agent", "bot"}
     )
 
 

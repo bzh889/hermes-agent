@@ -275,6 +275,12 @@ class GatewayStreamConsumer:
         # streaming, even if the final edit (cursor removal etc.)
         # subsequently failed.
         self._final_content_delivered = False
+        # Exact source text presented to the consumer at the turn-final
+        # ``_DONE`` boundary. Delivery flags alone are insufficient: some
+        # providers can return a longer authoritative final response than the
+        # deltas they emitted, so a finalized partial buffer must not suppress
+        # the gateway's complete final delivery.
+        self._final_text_candidate = ""
         self._delivered_commentary_texts: list[str] = []
         # Retains the finalized visible text of each streaming segment so
         # ``has_delivered_text`` can still match after ``_reset_segment_state``
@@ -411,6 +417,11 @@ class GatewayStreamConsumer:
         target = self._clean_for_display(text or "").strip()
         if not target:
             return False
+        if (
+            (self._final_response_sent or self._final_content_delivered)
+            and self._final_text_candidate.strip() == target
+        ):
+            return True
         visible_prefix = self._visible_prefix().strip()
         if visible_prefix == target:
             return True
@@ -418,6 +429,47 @@ class GatewayStreamConsumer:
             sent.strip() == target
             for sent in (*self._delivered_commentary_texts, *self._delivered_segment_texts)
         )
+
+    async def ensure_final_text_delivered(self, text: str) -> bool:
+        """Confirm or repair an asserted final delivery with the exact text.
+
+        A provider may expose an authoritative final response that is longer
+        than its streamed deltas. If this consumer already claimed turn-final
+        delivery but the visible text differs, edit the existing stream message
+        in place. Returning ``False`` leaves the gateway's normal final-send
+        fallback enabled.
+        """
+        if not (self._final_response_sent or self._final_content_delivered):
+            return False
+        if self.has_delivered_text(text):
+            return True
+        if not self._message_id or self._message_id == "__no_edit__":
+            return False
+
+        try:
+            result = await self._edit_message(
+                message_id=self._message_id,
+                content=text,
+                finalize=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to reconcile streamed message %s with exact final text: %s",
+                self._message_id,
+                exc,
+            )
+            return False
+
+        if not getattr(result, "success", False):
+            return False
+
+        cleaned = self._clean_for_display(text or "").strip()
+        self._last_sent_text = text or ""
+        self._final_text_candidate = cleaned
+        self._already_sent = True
+        self._final_response_sent = True
+        self._final_content_delivered = True
+        return True
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
@@ -502,6 +554,7 @@ class GatewayStreamConsumer:
         # run.py reads these only after the consumer task exits.
         self._final_response_sent = False
         self._final_content_delivered = False
+        self._final_text_candidate = ""
         # Native draft streaming: bump the draft_id so the next text segment
         # animates as a fresh preview below the tool-progress bubbles, not
         # over the prior segment's already-finalized draft.  This is how
@@ -774,6 +827,14 @@ class GatewayStreamConsumer:
                     ):
                         await self._suppress_silence_marker()
                         return
+
+                    # Preserve the exact text this consumer is about to claim
+                    # as turn-final. The gateway later compares it with the
+                    # agent's authoritative final response before suppressing
+                    # normal delivery.
+                    self._final_text_candidate = self._clean_for_display(
+                        self._accumulated
+                    ).strip()
 
                 # Decide whether to flush an edit
                 now = time.monotonic()

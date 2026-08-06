@@ -258,6 +258,52 @@ async def test_pre_send_native_reply_unavailable_degrades_once(
     assert "private-target-alias" not in caplog.text
 
 
+async def test_flat_degradation_reuses_existing_sdk_tls_pool():
+    """A warmed SDK pool must carry flat fallbacks through MTK's TLS path."""
+    adapter = _adapter()
+    adapter._auth = MagicMock()
+    adapter._auth.msg_base = "https://msg.example.invalid/v1/users/ME"
+    response = MagicMock(status_code=201)
+    response.json.return_value = {"OriginalArrivalTime": "flat-message-alias"}
+    http_layer = MagicMock()
+    http_layer.verify_ssl = True
+    http_layer._get_headers.return_value = {
+        "Authentication": "skypetoken=token",
+        "Content-Type": "application/json",
+    }
+    http_layer._session.request.return_value = response
+    adapter._sdk_http_layer = http_layer
+
+    with (
+        patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False),
+        patch("requests.Session") as requests_session,
+    ):
+        result = await adapter.send(
+            "private-conversation-alias",
+            "flat fallback marker",
+            reply_to="private-target-alias",
+        )
+
+    assert result.success is True
+    assert result.message_id == "flat-message-alias"
+    requests_session.assert_not_called()
+    http_layer._session.request.assert_called_once()
+    method, url = http_layer._session.request.call_args.args
+    assert method == "POST"
+    assert url.endswith(
+        "/conversations/private-conversation-alias/messages"
+    )
+    payload = http_layer._session.request.call_args.kwargs["json"]
+    assert payload["properties"] == {"hermes_sender": "agent"}
+    assert result.raw_response == {
+        "native_reply": {
+            "status": "degraded",
+            "relation_preserved": False,
+            "reason": "sdk_unavailable",
+        }
+    }
+
+
 async def test_native_reply_indeterminate_outcome_never_flat_resends(caplog):
     adapter = _adapter()
     adapter._auth = MagicMock()

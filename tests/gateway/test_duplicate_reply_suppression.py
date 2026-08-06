@@ -14,6 +14,7 @@ Covers four fix paths:
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,7 +24,9 @@ from gateway.platforms.base import (
     MessageEvent,
     SendResult,
 )
+from gateway.run import _stream_confirmed_final_delivery
 from gateway.session import SessionSource, build_session_key
+from gateway.stream_consumer import GatewayStreamConsumer
 
 
 # ---------------------------------------------------------------------------
@@ -520,3 +523,89 @@ class TestFinalContentDeliveredSuppression:
             response["already_sent"] = True
 
         assert "already_sent" not in response
+
+
+class TestExactFinalDeliveryReconciliation:
+    """A successful partial stream must not suppress a longer exact final reply."""
+
+    @staticmethod
+    def _consumer(*, delivered_text: str, edit_success: bool = True):
+        adapter = SimpleNamespace(
+            edit_message=AsyncMock(
+                return_value=SendResult(success=edit_success, message_id="message-1")
+            )
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat-1")
+        consumer._message_id = "message-1"
+        consumer._last_sent_text = delivered_text
+        consumer._final_text_candidate = delivered_text
+        consumer._final_response_sent = True
+        consumer._final_content_delivered = True
+        return consumer, adapter
+
+    @pytest.mark.asyncio
+    async def test_partial_stream_is_repaired_in_place_with_exact_final(self):
+        consumer, adapter = self._consumer(delivered_text="partial answer")
+
+        confirmed = await consumer.ensure_final_text_delivered(
+            "partial answer with the missing tail"
+        )
+
+        assert confirmed is True
+        adapter.edit_message.assert_awaited_once_with(
+            chat_id="chat-1",
+            message_id="message-1",
+            content="partial answer with the missing tail",
+            finalize=True,
+        )
+        assert consumer.has_delivered_text(
+            "partial answer with the missing tail"
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_failed_repair_does_not_confirm_final_delivery(self):
+        consumer, adapter = self._consumer(
+            delivered_text="partial answer",
+            edit_success=False,
+        )
+
+        confirmed = await consumer.ensure_final_text_delivered("complete answer")
+
+        assert confirmed is False
+        adapter.edit_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_exact_stream_does_not_issue_redundant_edit(self):
+        consumer, adapter = self._consumer(delivered_text="complete answer")
+
+        confirmed = await consumer.ensure_final_text_delivered("complete answer")
+
+        assert confirmed is True
+        adapter.edit_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_suppression_accepts_successful_exact_repair(self):
+        consumer, adapter = self._consumer(delivered_text="partial answer")
+
+        confirmed = await _stream_confirmed_final_delivery(
+            consumer,
+            "complete answer",
+        )
+
+        assert confirmed is True
+        adapter.edit_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_suppression_rejects_failed_exact_repair(self):
+        consumer, adapter = self._consumer(
+            delivered_text="partial answer",
+            edit_success=False,
+        )
+
+        confirmed = await _stream_confirmed_final_delivery(
+            consumer,
+            "complete answer",
+        )
+
+        assert confirmed is False
+        adapter.edit_message.assert_awaited_once()

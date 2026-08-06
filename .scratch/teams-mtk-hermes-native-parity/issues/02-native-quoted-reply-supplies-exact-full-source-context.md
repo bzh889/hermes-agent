@@ -39,6 +39,8 @@ Do not create or reinterpret a second specification in this ticket.
 - 2026-08-04: deterministic reply-context, queue-preservation, gateway-injection, and E2E-contract tests passed on the final implementation.
 - 2026-08-04: targeted real-gateway `quoted-reply-full-context-revises-query` passed with exact relation, full-source hash, terminal-rule model response, `preview-only=false`, and zero cleanup residue.
 - 2026-08-04: the complete sequential named real-gateway suite passed `28/28` without `--only`.
+- 2026-08-06: fresh targeted real-gateway verification again proved exact native relation, full-source hash, terminal-rule model response, `preview-only=false`, fetch-log correlation, exactly one terminal reply, and cleanup residue `= 0`.
+- 2026-08-06: the expanded complete sequential named real-gateway suite passed `29/29` without `--only`; this ticket's verdict remained independent from the other two P0 verdicts.
 
 ## Out of scope
 

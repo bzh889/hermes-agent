@@ -33,6 +33,11 @@ Do not create or reinterpret a second specification in this ticket.
 - [x] Every remote side effect is cleaned in `finally` by exact returned identity or a unique marker; malformed send results trigger discovery cleanup, and cleanup failure fails this E2E item.
 - [x] Logs and retained test evidence contain only sanitized status, structural aliases, lengths, and hashes—never organization identities, message bodies, tenant hosts, or credentials.
 
+## Verification evidence
+
+- 2026-08-06: targeted real-gateway `inbound-edit-revision-reopens-query` passed with same remote identity, complete edited body, revision dispatch `= 1`, duplicate `= 0`, no original-body replay, and cleanup residue `= 0`.
+- 2026-08-06: the complete sequential named real-gateway suite passed `29/29` without `--only`; this ticket's verdict remained independent from the other two P0 verdicts.
+
 ## Out of scope
 
 - Exact native quoted-reply source retrieval and normalized reply context; issue 02 owns that slice.

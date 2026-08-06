@@ -358,6 +358,45 @@ def _non_conversational_metadata(
     return merged
 
 
+async def _stream_confirmed_final_delivery(
+    consumer,
+    final_text: str,
+    *,
+    previewed: bool = False,
+) -> bool:
+    """Confirm or repair delivery of the exact authoritative final reply."""
+    if consumer is None:
+        return False
+
+    has_delivered_text = getattr(consumer, "has_delivered_text", None)
+    if previewed and callable(has_delivered_text):
+        try:
+            if has_delivered_text(final_text):
+                return True
+        except Exception:
+            pass
+
+    ensure_final = getattr(consumer, "ensure_final_text_delivered", None)
+    if callable(ensure_final):
+        try:
+            return bool(await ensure_final(final_text))
+        except Exception:
+            return False
+
+    # Conservative fallback for legacy/custom consumers: an asserted success
+    # flag is not proof that the exact authoritative final text reached the
+    # platform.
+    if callable(has_delivered_text) and (
+        getattr(consumer, "final_response_sent", False)
+        or getattr(consumer, "final_content_delivered", False)
+    ):
+        try:
+            return bool(has_delivered_text(final_text))
+        except Exception:
+            return False
+    return False
+
+
 def _is_transient_network_error(exc: BaseException) -> bool:
     """Return True for transient network errors safe to log + swallow.
 
@@ -23455,26 +23494,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         _notify_task = asyncio.create_task(_notify_long_running())
 
-        def _stream_confirmed_final_delivery(
-            consumer,
-            final_text: str,
-            *,
-            previewed: bool = False,
-        ) -> bool:
-            """Return True only when the actual final reply reached the user."""
-            if consumer is None:
-                return False
-            if getattr(consumer, "final_response_sent", False):
-                return True
-            if previewed:
-                has_delivered_text = getattr(consumer, "has_delivered_text", None)
-                if callable(has_delivered_text):
-                    try:
-                        return bool(has_delivered_text(final_text))
-                    except Exception:
-                        return False
-            return False
-
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -24095,12 +24114,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # *exact* final text. Unrelated commentary/progress shown during a
             # compression/session split must not be mistaken for the final
             # response (#14238).
-            _streamed = _stream_confirmed_final_delivery(
-                _sc,
-                _final,
-                previewed=_previewed,
-            )
-            if not _is_empty_sentinel and not _transformed and (_streamed or _content_delivered):
+            _streamed = False
+            if not _is_empty_sentinel and not _transformed:
+                _streamed = await _stream_confirmed_final_delivery(
+                    _sc,
+                    _final,
+                    previewed=_previewed,
+                )
+            if not _is_empty_sentinel and not _transformed and _streamed:
                 logger.info(
                     "Suppressing normal final send for session %s: final delivery already confirmed (streamed=%s previewed=%s content_delivered=%s).",
                     session_key or "?",

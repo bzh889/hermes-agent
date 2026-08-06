@@ -402,17 +402,22 @@ class TestSendAdaptiveCard:
         mock_resp.status_code = 201
         mock_resp.json.return_value = {"OriginalArrivalTime": "msg-ac-1"}
         mock_resp.raise_for_status = MagicMock()
+        warm_get = MagicMock(return_value=MagicMock(status_code=200))
         mock_post = MagicMock(return_value=mock_resp)
+        adapter._call_sdk_http = warm_get
+        adapter._call_existing_sdk_http_once = mock_post
 
         card = {"type": "AdaptiveCard", "version": "1.4", "body": [
             {"type": "TextBlock", "text": "Hello"}]}
         with patch("hermes_cli.config.load_config_readonly",
-                   return_value={"gateway": {"teams_mtk": {"adaptive_cards": {"enabled": True}}}}), \
-             patch("requests.post", mock_post):
+                   return_value={"gateway": {"teams_mtk": {"adaptive_cards": {"enabled": True}}}}):
             result = asyncio.run(adapter.send_adaptive_card("conv1", card, "fallback"))
 
             assert result.success is True
             assert result.message_id == "msg-ac-1"
+            warm_get.assert_called_once()
+            assert warm_get.call_args.args[0] == "GET"
+            assert mock_post.call_count == 1
             payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
             assert payload["messagetype"] == "RichText/Html"
             cards = json.loads(payload["properties"]["cards"])
@@ -420,16 +425,30 @@ class TestSendAdaptiveCard:
             assert cards[0]["contentType"] == "application/vnd.microsoft.card.adaptive"
             assert cards[0]["content"]["type"] == "AdaptiveCard"
 
-    def test_send_failure_falls_back_to_text(self, adapter):
-        """If card POST fails, send fallback text via send()."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.side_effect = Exception("Server error")
-        mock_post = MagicMock(return_value=mock_resp)
+    def test_preflight_failure_falls_back_to_text(self, adapter):
+        """A failed idempotent warm-up is safe to degrade before POST starts."""
+        adapter._call_sdk_http = MagicMock(side_effect=OSError("preflight failed"))
+        adapter._call_existing_sdk_http_once = MagicMock()
 
         card = {"type": "AdaptiveCard", "version": "1.4", "body": []}
         with patch("hermes_cli.config.load_config_readonly",
-                   return_value={"gateway": {"teams_mtk": {"adaptive_cards": {"enabled": True}}}}), \
-             patch("requests.post", mock_post):
+                   return_value={"gateway": {"teams_mtk": {"adaptive_cards": {"enabled": True}}}}):
             result = asyncio.run(adapter.send_adaptive_card("conv1", card, "fallback text"))
             adapter.send.assert_called_once_with(chat_id="conv1", content="fallback text", metadata=None)
+            adapter._call_existing_sdk_http_once.assert_not_called()
+
+    def test_post_failure_is_uncertain_and_suppresses_text_fallback(self, adapter):
+        """Never create a duplicate text fallback after native POST starts."""
+        adapter._call_sdk_http = MagicMock(return_value=MagicMock(status_code=200))
+        adapter._call_existing_sdk_http_once = MagicMock(
+            side_effect=OSError("response lost")
+        )
+
+        card = {"type": "AdaptiveCard", "version": "1.4", "body": []}
+        with patch("hermes_cli.config.load_config_readonly",
+                   return_value={"gateway": {"teams_mtk": {"adaptive_cards": {"enabled": True}}}}):
+            result = asyncio.run(adapter.send_adaptive_card("conv1", card, "fallback text"))
+
+        assert result.success is False
+        assert "uncertain" in (result.error or "").lower()
+        adapter.send.assert_not_called()

@@ -889,7 +889,14 @@ class _TeamsAuth:
                 json.dump(tokens, f)
                 f.flush()
                 os.fsync(f.fileno())
-            tmp.replace(self.TOKEN_CACHE)
+            try:
+                tmp.replace(self.TOKEN_CACHE)
+            except PermissionError:
+                # Windows EDR/antivirus can briefly hold the destination after
+                # inspecting it. Retry once, but never fall back to a non-atomic
+                # copy for this credential-bearing cache.
+                time.sleep(0.15)
+                tmp.replace(self.TOKEN_CACHE)
         except Exception:
             # Clean up temp file on failure
             try:
@@ -2437,14 +2444,23 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # duplicate-safe flat degradation rather than a silent relation loss.
             import requests
             from requests.adapters import HTTPAdapter
-            self._auth._inject_truststore()
-            session = requests.Session()
-            session.mount("https://", HTTPAdapter(pool_connections=0, pool_maxsize=0, max_retries=0))
+            use_shared_transport = (
+                getattr(self, "_sdk_http_layer", None) is not None
+            )
+            session = None
+            if not use_shared_transport:
+                self._auth._inject_truststore()
+                session = requests.Session()
+                session.mount(
+                    "https://",
+                    HTTPAdapter(
+                        pool_connections=0,
+                        pool_maxsize=0,
+                        max_retries=0,
+                    ),
+                )
             try:
                 for attempt in range(2):
-                    skype_token = await asyncio.to_thread(
-                        self._auth.skype_token
-                    )
                     url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
                     payload = {
                         "content": html_content,
@@ -2452,17 +2468,32 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         "contenttype": "text",
                         "properties": {"hermes_sender": "agent"},
                     }
-                    resp = await asyncio.to_thread(
-                        session.post,
-                        url,
-                        json=payload,
-                        headers={
-                            "Authentication": f"skypetoken={skype_token}",
-                            "Content-Type": "application/json",
-                        },
-                        verify=True,
-                        timeout=15,
-                    )
+                    if use_shared_transport:
+                        resp = await asyncio.to_thread(
+                            self._call_existing_sdk_http_once,
+                            "POST",
+                            url,
+                            json=payload,
+                        )
+                        if resp is None:
+                            raise RuntimeError(
+                                "Teams SDK shared HTTP transport disappeared"
+                            )
+                    else:
+                        skype_token = await asyncio.to_thread(
+                            self._auth.skype_token
+                        )
+                        resp = await asyncio.to_thread(
+                            session.post,
+                            url,
+                            json=payload,
+                            headers={
+                                "Authentication": f"skypetoken={skype_token}",
+                                "Content-Type": "application/json",
+                            },
+                            verify=True,
+                            timeout=15,
+                        )
                     if resp.status_code == 401 and attempt == 0:
                         await asyncio.to_thread(self._auth._force_refresh)
                         continue
@@ -2475,7 +2506,8 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         continue
                     break
             finally:
-                session.close()
+                if session is not None:
+                    session.close()
 
             resp.raise_for_status()
             data = resp.json()
@@ -2721,15 +2753,26 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 _log_ref(message_id), len(content), len(html_content), finalize,
             )
 
-            # SDK-3c: delegate to SDK MessagesService.edit() when available.
+            # Edit through the shared SDK transport directly so Hermes-owned
+            # metadata survives the PUT even when the installed SDK's
+            # MessagesService.edit() signature only accepts content.
             if _SDK_AVAILABLE:
                 try:
+                    sdk_url = (
+                        f"{self._auth.msg_base}/conversations/{chat_id}"
+                        f"/messages/{message_id}"
+                    )
+                    sdk_payload = {
+                        "content": html_content,
+                        "messagetype": "RichText/Html",
+                        "contenttype": "text",
+                        "properties": {"hermes_sender": "bot"},
+                    }
                     await asyncio.to_thread(
-                        self._call_sdk_messages,
-                        "edit",
-                        conversation_id=chat_id,
-                        message_id=message_id,
-                        content=html_content,
+                        self._call_sdk_http,
+                        "PUT",
+                        sdk_url,
+                        json=sdk_payload,
                     )
                     if str(message_id) == str(self._last_sent_message_id):
                         self._last_sent_message_html = html_content
@@ -2745,7 +2788,12 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             import requests
             skype_token = await asyncio.to_thread(self._auth.skype_token)
             url = f"{self._auth.msg_base}/conversations/{chat_id}/messages/{message_id}"
-            payload = {"content": html_content, "messagetype": "RichText/Html", "contenttype": "text"}
+            payload = {
+                "content": html_content,
+                "messagetype": "RichText/Html",
+                "contenttype": "text",
+                "properties": {"hermes_sender": "bot"},
+            }
             headers = {"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"}
             resp = await asyncio.to_thread(
                 requests.put,
@@ -3155,7 +3203,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         """
         from gateway.platforms.base import SendResult
         from hermes_cli.config import load_config_readonly
-        import requests
 
         try:
             cfg = load_config_readonly()
@@ -3172,10 +3219,10 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 return await self.send(chat_id=chat_id, content=fallback_text, metadata=None)
             return SendResult(success=False, error="Adaptive cards are disabled (gateway.teams_mtk.adaptive_cards.enabled=false) and no fallback_text was provided")
 
+        post_started = False
         try:
             await self._maybe_throttle(chat_id)
             self._auth._inject_truststore()
-            skype_token = self._auth.skype_token()
             msg_url = f"{self._auth.msg_base}/conversations/{chat_id}/messages"
             cards_json = json.dumps([{
                 "contentType": "application/vnd.microsoft.card.adaptive",
@@ -3187,20 +3234,52 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 "contenttype": "text",
                 "properties": {"cards": cards_json},
             }
-            resp = requests.post(
+            # Warm the shared MSG TLS pool through an idempotent request.  MTK's
+            # corporate path can EOF fresh handshakes; retrying the card POST
+            # itself would be unsafe because the service may have accepted it.
+            await asyncio.to_thread(
+                self._call_sdk_http,
+                "GET",
+                msg_url,
+                params={
+                    "view": "msnp24Equivalent|supportsMessageProperties",
+                    "pageSize": 1,
+                },
+            )
+            post_started = True
+            resp = await asyncio.to_thread(
+                self._call_existing_sdk_http_once,
+                "POST",
                 msg_url,
                 json=payload,
-                headers={"Authentication": f"skypetoken={skype_token}", "Content-Type": "application/json"},
-                verify=True,
-                timeout=15,
             )
+            if resp is None:
+                post_started = False
+                raise RuntimeError("Teams SDK shared HTTP transport disappeared")
             resp.raise_for_status()
             msg_id = _sent_message_id(resp.json())
             if msg_id:
                 self._remember_sent_message(chat_id, msg_id)
             return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
         except Exception as e:
-            logger.warning("TeamsMTK: send_adaptive_card failed (%s) — falling back to text", _log_error(e))
+            if post_started:
+                logger.error(
+                    "TeamsMTK: send_adaptive_card failed (%s) — delivery "
+                    "uncertain; text fallback suppressed",
+                    _log_error(e),
+                )
+                return SendResult(
+                    success=False,
+                    error=(
+                        "Adaptive card delivery uncertain; text fallback "
+                        f"suppressed ({type(e).__name__})"
+                    ),
+                )
+            logger.warning(
+                "TeamsMTK: send_adaptive_card preflight failed (%s) — "
+                "falling back to text",
+                _log_error(e),
+            )
             if fallback_text:
                 return await self.send(chat_id=chat_id, content=fallback_text, metadata=None)
             return SendResult(success=False, error=str(e))
@@ -4653,6 +4732,29 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             try:
                 return self._get_sdk_http_layer_locked()._request(
                     method, url, **kwargs
+                )
+            except Exception:
+                self._close_sdk_http_layer_locked()
+                raise
+
+    def _call_existing_sdk_http_once(self, method: str, url: str, **kwargs):
+        """Use a warmed SDK TLS pool without retrying a non-idempotent request."""
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
+        with lock:
+            http_layer = getattr(self, "_sdk_http_layer", None)
+            if http_layer is None:
+                return None
+            request_kwargs = dict(kwargs)
+            request_kwargs.setdefault("timeout", 15)
+            request_kwargs.setdefault("verify", http_layer.verify_ssl)
+            request_kwargs.setdefault("headers", http_layer._get_headers())
+            try:
+                return http_layer._session.request(
+                    method,
+                    url,
+                    **request_kwargs,
                 )
             except Exception:
                 self._close_sdk_http_layer_locked()
