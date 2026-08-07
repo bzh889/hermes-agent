@@ -201,6 +201,7 @@ def test_residual_markdown_e2e_cleans_marker_bearing_human_mirror(monkeypatch):
             [baseline],
             [baseline, bot_reply],
             [baseline, bot_reply, human_mirror, unrelated_human],
+            [baseline, human_mirror, unrelated_human],
             [baseline, unrelated_human],
         ]
     )
