@@ -254,6 +254,43 @@ def test_residual_markdown_e2e_cleans_marker_bearing_human_mirror(monkeypatch):
     assert (e2e.DM_CHAT_ID, "unrelated-human") not in deleted_msg
 
 
+def test_residual_markdown_e2e_reports_cleanup_failure_without_masking_functional_failure(
+    monkeypatch, capsys
+):
+    e2e = _load_e2e_module()
+    readbacks = iter([[], [], []])
+    sent_ids = iter(["graph-reset", "graph-query"])
+
+    monkeypatch.setattr(
+        e2e,
+        "get_messages_raw",
+        lambda *_args, **_kwargs: next(readbacks),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda *_args: next(sent_ids),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+    monkeypatch.setattr(e2e, "delete_msg_message", lambda *_args: None)
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+
+    ok, evidence = e2e.test_no_residual_markdown_in_reply(
+        "gateway.log",
+        17,
+        reply_timeout=0,
+        poll_interval=0,
+    )
+
+    assert ok is False
+    assert evidence == "No marker-correlated bot reply found within wait window"
+    assert "cleanup failed (graph:RuntimeError, graph:RuntimeError)" in capsys.readouterr().err
+
+
 def test_garbage_detector_e2e_correlates_and_cleans_up(monkeypatch):
     e2e = _load_e2e_module()
     marker = "E2EGARBAGEABCDEF123456"
