@@ -1205,10 +1205,16 @@ def test_no_residual_markdown_in_reply(
         try:
             for message in get_messages_raw(DM_CHAT_ID, page_size=60):
                 message_id = str(message.get("id") or "")
+                raw_content = str(
+                    message.get("_raw_content") or message.get("content") or ""
+                )
                 if (
                     message_id
                     and message_id not in baseline_ids
-                    and _is_hermes_bot_message(message)
+                    and (
+                        _is_hermes_bot_message(message)
+                        or marker in raw_content
+                    )
                 ):
                     cleanup_message_ids.add(message_id)
         except Exception as exc:
@@ -1225,6 +1231,28 @@ def test_no_residual_markdown_in_reply(
                 delete_msg_message(DM_CHAT_ID, message_id)
             except Exception as exc:
                 cleanup_errors.append(f"msg:{type(exc).__name__}")
+        remaining = []
+        for attempt in range(12):
+            try:
+                remaining = [
+                    message
+                    for message in get_messages_raw(DM_CHAT_ID, page_size=120)
+                    if marker
+                    in str(
+                        message.get("_raw_content")
+                        or message.get("content")
+                        or ""
+                    )
+                ]
+            except Exception as exc:
+                cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
+                break
+            if not remaining:
+                break
+            if attempt < 11:
+                time.sleep(2)
+        if remaining:
+            cleanup_errors.append(f"msg-remain:{len(remaining)}")
         if cleanup_errors and functional_passed:
             raise RuntimeError(
                 "residual markdown E2E cleanup failed ("
