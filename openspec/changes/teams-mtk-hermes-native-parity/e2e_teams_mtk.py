@@ -1253,12 +1253,15 @@ def test_no_residual_markdown_in_reply(
                 time.sleep(2)
         if remaining:
             cleanup_errors.append(f"msg-remain:{len(remaining)}")
-        if cleanup_errors and functional_passed:
-            raise RuntimeError(
+        if cleanup_errors:
+            cleanup_detail = (
                 "residual markdown E2E cleanup failed ("
                 + ", ".join(cleanup_errors)
                 + ")"
             )
+            if functional_passed:
+                raise RuntimeError(cleanup_detail)
+            print(cleanup_detail, file=sys.stderr)
 
 
 def test_no_disallowed_fallback_models(log_path: str, baseline: int) -> tuple[bool, str]:
