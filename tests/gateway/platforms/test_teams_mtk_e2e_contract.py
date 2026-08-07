@@ -196,18 +196,21 @@ def test_residual_markdown_e2e_cleans_marker_bearing_human_mirror(monkeypatch):
         "content": "concurrent human message",
         "_raw_properties": {"hermes_sender": "user"},
     }
-    readbacks = iter(
-        [
-            [baseline],
-            [baseline, bot_reply],
-            [baseline, bot_reply, human_mirror, unrelated_human],
-            [baseline, human_mirror, unrelated_human],
-            [baseline, unrelated_human],
-        ]
-    )
+    readback_states = [
+        [baseline],
+        [baseline, bot_reply],
+        [baseline, bot_reply, unrelated_human],
+    ]
+    readback_states.extend([[baseline, unrelated_human]] * 20)
+    readback_states.append([baseline, human_mirror, unrelated_human])
     sent_ids = iter(["graph-reset", "graph-query"])
     deleted_graph = []
     deleted_msg = []
+
+    def fake_get_messages_raw(*_args, **_kwargs):
+        if readback_states:
+            return readback_states.pop(0)
+        return [baseline, unrelated_human]
 
     monkeypatch.setattr(
         e2e.uuid,
@@ -217,7 +220,7 @@ def test_residual_markdown_e2e_cleans_marker_bearing_human_mirror(monkeypatch):
     monkeypatch.setattr(
         e2e,
         "get_messages_raw",
-        lambda *args, **kwargs: next(readbacks),
+        fake_get_messages_raw,
     )
     monkeypatch.setattr(
         e2e,
@@ -259,13 +262,12 @@ def test_residual_markdown_e2e_reports_cleanup_failure_without_masking_functiona
     monkeypatch, capsys
 ):
     e2e = _load_e2e_module()
-    readbacks = iter([[], [], []])
     sent_ids = iter(["graph-reset", "graph-query"])
 
     monkeypatch.setattr(
         e2e,
         "get_messages_raw",
-        lambda *_args, **_kwargs: next(readbacks),
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         e2e,

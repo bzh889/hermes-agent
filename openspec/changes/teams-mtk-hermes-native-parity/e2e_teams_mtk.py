@@ -1231,8 +1231,10 @@ def test_no_residual_markdown_in_reply(
                 delete_msg_message(DM_CHAT_ID, message_id)
             except Exception as exc:
                 cleanup_errors.append(f"msg:{type(exc).__name__}")
+        verification_attempts = 45
         remaining = []
-        for attempt in range(12):
+        late_cleanup_ids = set()
+        for attempt in range(verification_attempts):
             try:
                 remaining = [
                     message
@@ -1247,10 +1249,30 @@ def test_no_residual_markdown_in_reply(
             except Exception as exc:
                 cleanup_errors.append(f"msg-verify:{type(exc).__name__}")
                 break
-            if not remaining:
-                break
-            if attempt < 11:
+            for message in remaining:
+                message_id = str(message.get("id") or "")
+                if not message_id or message_id in late_cleanup_ids:
+                    continue
+                try:
+                    delete_msg_message(DM_CHAT_ID, message_id)
+                    late_cleanup_ids.add(message_id)
+                except Exception as exc:
+                    cleanup_errors.append(f"msg-late:{type(exc).__name__}")
+            if attempt < verification_attempts - 1:
                 time.sleep(2)
+        try:
+            remaining = [
+                message
+                for message in get_messages_raw(DM_CHAT_ID, page_size=120)
+                if marker
+                in str(
+                    message.get("_raw_content")
+                    or message.get("content")
+                    or ""
+                )
+            ]
+        except Exception as exc:
+            cleanup_errors.append(f"msg-final:{type(exc).__name__}")
         if remaining:
             cleanup_errors.append(f"msg-remain:{len(remaining)}")
         if cleanup_errors:
