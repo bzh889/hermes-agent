@@ -87,8 +87,8 @@
     │
     ╰──→ S10 ✅ 訊息轉發
     │      S10-1 ✅ forward_message
-    │      S10-2 ✅ 只允許轉到白名單
-    │      S10-3 ✅ PLATFORM_HINTS + 測試
+    │      S10-2 ✅ trusted config default-deny（caller 不可擴權）
+    │      S10-3 ✅ PLATFORM_HINTS + unit/real E2E
     │
     ╰──→ REPLACE-1~7 ✅ 漸進替換 gateway 自行實作
            REPLACE-1 ✅ fetch_messages → SDK
@@ -177,7 +177,7 @@ Backlog
 | 18 | **S5-1~2** ✅ 通話 | SDK-0 | _get_call_logs ✅ |
 | 19 | **S7-1~3** ✅ Reactions | SDK-0 | send/remove_reaction ✅ |
 | 20 | **S9-1~3** ✅ 訊息刪除 | SDK-0 | delete_message ✅ |
-| 21 | **S10-1~3** ✅ 訊息轉發 | SDK-0 | forward_message + whitelist ✅ |
+| 21 | **S10-1~3** ✅ 訊息轉發 | SDK-0 | SDK-first + trusted-config default-deny + real E2E ✅ |
 | 22 | **C-5~7** ✅ CLI 加強 | C-2 | short-msg ✅ / whitelist ✅ / VIP ✅ |
 | 23 | **S1-5** ✅ PKB 即時落地 | S1-1 | on_message_processed hook ✅ |
 | 24 | **S2-4** ✅ 跨 conv 搜尋 | S2-1 | search_all_conversations ✅ |

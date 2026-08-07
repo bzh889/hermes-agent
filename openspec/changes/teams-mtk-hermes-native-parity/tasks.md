@@ -90,7 +90,7 @@
 > **2026-08-06 Query Revision + Native Reply P0 real-gateway gate**：三個 P0
 > verdict 分別 targeted PASS，並在同一 final-tree sequential run 保持獨立；
 > 不帶 `--only` 的完整 `NAMED_TESTS` 通過 `29/29`；canonical repository
-> wrapper 對全部直接受影響 P0 files 通過 `308/308`；fresh-context
+> wrapper 對全部直接受影響 P0 files 在停用file retry時通過 `310/310`；fresh-context
 > Standards/Spec review 無 blocker；gateway restart 後確認 final production
 > source 已載入並持續 polling。全 repo wrapper 另由 P0 diff 外的 Windows
 > image-path contract 阻擋，單檔重現為 `7 failed, 98 passed, 1 skipped`，
@@ -892,10 +892,20 @@
 
 ### 7.8 S10 — 訊息轉發（中低價值）
 
-- [ ] **S10-1** 🟡：新增 `forward_message(src_conv_id, src_msg_id, dst_conv_id)` 方法
+- [x] **S10-1** 🟡：新增 `forward_message(src_conv_id, src_msg_id, dst_conv_id)` 方法
       — 委託 SDK `MessagesService.forward()`。
-- [ ] **S10-2** 🟡：安全考量——只允許轉發到白名單內的 conv_id。
-- [ ] **S10-3** 🟡：`PLATFORM_HINTS` 更新 + 測試。
+- [x] **S10-2** 🟡：安全考量——只允許轉發到白名單內的 conv_id。
+- [x] **S10-3** 🟡：`PLATFORM_HINTS` 更新 + 測試。
+
+      **2026-08-07 驗收**：`forward_message()` 現從 trusted gateway
+      `conversation_ids` 與 `gateway.teams_mtk.groups` 解析允許目標，設定缺失、
+      空白或不含目標時一律在 auth/SDK/raw fetch/send 前拒絕；legacy
+      `allowed_targets` 只能收窄、不能擴權。`forward-whitelist-fail-closed`
+      真實 E2E 驗證 configured target 成功 forward、MSG 精確 read-back、cleanup
+      零殘留，另兩個拒絕分支均為零 transport call。直接受影響單元矩陣
+      106/106 PASS。加入 S10 後的 current named suite 以 resume gate 閉合為
+      30/30 PASS；途中修正 `busy-group-burst-redirect` prompt 的 runtime
+      interpreter path，未放寬任何功能或 cleanup assertion。
 
 ### 7.9 SDK 漸進替換現有 gateway 自行實作的方法
 

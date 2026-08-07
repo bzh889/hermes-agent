@@ -11,13 +11,15 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 import pytest
 
+from gateway.config import PlatformConfig
 from gateway.platforms.teams_mtk import TeamsMTKAdapter
 
 
-def _make_adapter():
-    adapter = TeamsMTKAdapter(config=None)
+def _make_adapter(conversation_ids=None):
+    adapter = TeamsMTKAdapter(PlatformConfig(extra={
+        "conversation_ids": conversation_ids or ["conv1", "conv2"],
+    }))
     adapter._message_handler = AsyncMock()
-    adapter._conv_ids = ["conv1", "conv2"]
     return adapter
 
 
@@ -72,35 +74,20 @@ class TestGetCallLogs:
 
 class TestForwardMessage:
     @pytest.mark.asyncio
-    async def test_whitelist_reject(self):
-        adapter = _make_adapter()
-        result = await adapter.forward_message(
-            "src", "m1", "target",
-            allowed_targets=["other_conv"]
-        )
-        assert result["status"] == "error"
-        assert "not in allowed list" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_whitelist_allow(self):
-        adapter = _make_adapter()
-        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
-             patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
-             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
-             patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
-            adapter._auth._skype_token = "fake"
-            mock_svc = MagicMock()
-            mock_svc.forward.return_value = {"status": "forwarded"}
-            MockSvc.return_value = mock_svc
+    async def test_caller_allowlist_cannot_widen_trusted_config(self):
+        adapter = _make_adapter(["other_conv"])
+        with patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc:
             result = await adapter.forward_message(
                 "src", "m1", "target",
-                allowed_targets=["target"]
+                allowed_targets=["target"],
             )
-            assert result["status"] == "forwarded"
+        assert result["status"] == "error"
+        assert "not authorized" in result["error"]
+        MockSvc.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_whitelist_passes(self):
-        adapter = _make_adapter()
+    async def test_trusted_config_target_is_allowed(self):
+        adapter = _make_adapter(["target"])
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
              patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
@@ -111,6 +98,49 @@ class TestForwardMessage:
             MockSvc.return_value = mock_svc
             result = await adapter.forward_message("src", "m1", "target")
             assert result["status"] == "forwarded"
+
+    @pytest.mark.asyncio
+    async def test_legacy_caller_allowlist_can_narrow_trusted_config(self):
+        adapter = _make_adapter(["target"])
+        with patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc:
+            result = await adapter.forward_message(
+                "src", "m1", "target",
+                allowed_targets=["other_conv"],
+            )
+        assert result["status"] == "error"
+        assert "not authorized" in result["error"]
+        MockSvc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_config_target_is_trusted(self):
+        adapter = _make_adapter(["dm"])
+        config = {"gateway": {"teams_mtk": {"groups": {"target": {}}}}}
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
+             patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
+             patch("gateway.platforms.teams_mtk._SDKAuthAdapter"), \
+             patch("hermes_cli.config.load_config_readonly", return_value=config):
+            adapter._auth._skype_token = "fake"
+            mock_svc = MagicMock()
+            mock_svc.forward.return_value = {"status": "forwarded"}
+            MockSvc.return_value = mock_svc
+            result = await adapter.forward_message("src", "m1", "target")
+        assert result["status"] == "forwarded"
+
+    @pytest.mark.asyncio
+    async def test_missing_trusted_allowlist_rejects_before_sdk(self):
+        with patch.dict(os.environ, {"MTK_TEAMS_CONVERSATION_ID": ""}):
+            adapter = TeamsMTKAdapter(PlatformConfig(extra={}))
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
+             patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
+             patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
+             patch("gateway.platforms.teams_mtk._SDKAuthAdapter"), \
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
+            adapter._auth._skype_token = "fake"
+            result = await adapter.forward_message("src", "m1", "target")
+        assert result["status"] == "error"
+        assert "not authorized" in result["error"]
+        MockSvc.assert_not_called()
 
 
 # ── S9-2: Delete-only-own ─────────────────────────────────────────────
@@ -210,6 +240,8 @@ class TestPlatformHints:
         assert "send_reaction" in hints
         assert "delete_message" in hints
         assert "forward_message" in hints
+        assert "configured targets only; default-deny" in hints
+        assert "optional target whitelist" not in hints
         assert "get_activity" in hints
         assert "search_messages" in hints
 

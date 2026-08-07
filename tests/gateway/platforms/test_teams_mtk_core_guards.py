@@ -381,14 +381,16 @@ class TestForwardWhitelistGuard:
     @pytest.mark.asyncio
     async def test_reject_non_whitelisted_target(self):
         adapter = _make_adapter()
+        adapter.config.extra["conversation_ids"] = ["good_target"]
         result = await adapter.forward_message("src", "m1", "bad_target",
-                                                allowed_targets=["good_target"])
+                                                allowed_targets=["bad_target"])
         assert result["status"] == "error"
-        assert "not in allowed list" in result["error"]
+        assert "not authorized" in result["error"]
 
     @pytest.mark.asyncio
     async def test_allow_whitelisted_target(self):
         adapter = _make_adapter()
+        adapter.config.extra["conversation_ids"] = ["good_target"]
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
              patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
@@ -397,23 +399,34 @@ class TestForwardWhitelistGuard:
             mock_svc = MagicMock()
             mock_svc.forward.return_value = {"status": "forwarded"}
             MockSvc.return_value = mock_svc
-            result = await adapter.forward_message("src", "m1", "good_target",
-                                                    allowed_targets=["good_target"])
+            result = await adapter.forward_message("src", "m1", "good_target")
             assert result["status"] == "forwarded"
 
     @pytest.mark.asyncio
-    async def test_no_whitelist_allows_all(self):
+    async def test_caller_list_does_not_authorize_unconfigured_target(self):
         adapter = _make_adapter()
         with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", True), \
              patch("gateway.platforms.teams_mtk._SDKMessages") as MockSvc, \
              patch("gateway.platforms.teams_mtk._SDKHTTPLayer", return_value=MagicMock()), \
              patch("gateway.platforms.teams_mtk._SDKAuthAdapter"):
             adapter._auth.skype_token = MagicMock(return_value="tok")
-            mock_svc = MagicMock()
-            mock_svc.forward.return_value = {"status": "forwarded"}
-            MockSvc.return_value = mock_svc
-            result = await adapter.forward_message("src", "m1", "any_target")
-            assert result["status"] == "forwarded"
+            result = await adapter.forward_message(
+                "src", "m1", "any_target", allowed_targets=["any_target"]
+            )
+        assert result["status"] == "error"
+        MockSvc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_raw_rejection_performs_no_fetch_or_send(self):
+        adapter = _make_adapter()
+        adapter.config.extra["conversation_ids"] = ["good_target"]
+        adapter.send = AsyncMock()
+        with patch("gateway.platforms.teams_mtk._SDK_AVAILABLE", False), \
+             patch("requests.get") as get:
+            result = await adapter.forward_message("src", "m1", "bad_target")
+        assert result["status"] == "error"
+        get.assert_not_called()
+        adapter.send.assert_not_awaited()
 
 
 # ── Echo guard across normalized/manual send paths ─────────────────────

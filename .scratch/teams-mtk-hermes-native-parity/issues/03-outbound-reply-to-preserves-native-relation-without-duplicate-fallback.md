@@ -37,7 +37,7 @@ Do not create or reinterpret a second specification in this ticket.
 
 - 2026-08-06: targeted real-gateway `reply-to-native-thread-roundtrip` passed with `native_relation=1`, `flat_count=1`, observable degradation, delivery uncertainty, duplicate `= 0`, and cleanup residue `= 0`.
 - 2026-08-06: deterministic E2E-contract tests passed `52/52`; media transport tests passed `17/17` after duplicate-safe adaptive-card transport hardening.
-- 2026-08-06: the canonical repository wrapper passed all seven directly impacted P0 files, `260/260`; the separately modified reliability file then passed `48/48`, for `308/308` final impacted tests.
+- 2026-08-06: the canonical repository wrapper passed the directly impacted P0 files `310/310` with file retries disabled. The reliability file passed `50/50` three consecutive times after adding one atomic Windows destination-lock retry while preserving fail-closed cleanup on a persistent lock.
 - 2026-08-06: the complete sequential named real-gateway suite passed `29/29` without `--only`; native success, pre-send degradation, and indeterminate outcome remained separately observable.
 - 2026-08-06: a full-repository wrapper attempt is independently blocked by isolated, out-of-diff Windows image-path failures in `tests/agent/test_image_routing.py` (`7 failed, 98 passed, 1 skipped`); no full-repository-green claim is made.
 - 2026-08-06: final gateway restart/read-back started PID 19312 after the production source mtimes; 104 fresh startup lines contained Teams connect/poll and API/gateway readiness events with zero ERROR/CRITICAL/Traceback lines.

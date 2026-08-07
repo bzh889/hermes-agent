@@ -132,6 +132,18 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **DONE 定義**: 訊息在 timeout 前正確轉發且內容完整
 **驗證證據**: [teams-mtk-hermes-native-parity/tasks.md L528-535](tasks.md#L528-L535)
 
+#### E9b: S10 forward-whitelist-fail-closed
+**觸發方式**: 以bot-token SDK建立唯一marker來源訊息，呼叫adapter分別轉發到configured、unconfigured與空設定目標。
+**操作步驟**:
+  1. 對configured group執行SDK-first forward。
+  2. 透過MSG API按唯一marker讀回，只接受一個新message ID。
+  3. 對unconfigured與empty-config目標執行forward，監測auth/SDK/raw fetch/send呼叫。
+  4. 刪除來源與轉發訊息，再次read-back確認marker零殘留。
+**Gateway log驗證**: 兩個拒絕分支出現hashed target `not authorized`，不輸出原始conv ID。
+**回覆內容驗證**: configured target精確read-back=1；另外兩個分支為明確error且transport calls=0。
+**DONE定義**: `python .../e2e_teams_mtk.py --only forward-whitelist-fail-closed`為1/1 PASS，cleanup零殘留。
+**驗證證據**: 2026-08-07 named real E2E 1/1 PASS；直接受影響unit matrix 106/106 PASS。加入S10後的30項current suite以resume gate閉合為30/30 PASS（前21項PASS、修正E2E prompt的runtime interpreter path後`busy-group-burst-redirect` 1/1 PASS、其後8項8/8 PASS）；未放寬任何verdict或cleanup條件。
+
 ### 3. 輸出品質 Content Tier 測項（2026-07-13 新增）
 
 > 這批測項誕生於一次會話中連續發現 5 個 **log-pattern tier 無法偵測** 的真實 bug。
@@ -351,8 +363,8 @@ python openspec/changes/teams-mtk-hermes-native-parity/e2e_teams_mtk.py --skip m
 **Gateway log 驗證**: 正常路徑明確走 native SDK reply；只有 pre-send unavailable 可出現 flat degradation；indeterminate send 不得二次 flat send
 **回覆內容驗證**: 正常路徑保留 native relation；fallback 路徑內容只出現一次
 **DONE 定義**: native relation read-back PASS、duplicate=0、forced fallback observable、cleanup residue=0
-**驗證證據**: ✅ 2026-08-06 fresh targeted real-gateway PASS；同一 run 證明 `native_relation=1`、`flat_count=1`、`degraded=True`、`uncertain=True`、`duplicate=0`、`cleanup_residue=0`。✅ E2E contract `52/52`、media transport `17/17`。✅ canonical repository wrapper 對全部直接受影響 P0 files 通過 `308/308`。✅ 同一 final tree 不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `29/29`。
+**驗證證據**: ✅ 2026-08-06 fresh targeted real-gateway PASS；同一 run 證明 `native_relation=1`、`flat_count=1`、`degraded=True`、`uncertain=True`、`duplicate=0`、`cleanup_residue=0`。✅ E2E contract `52/52`、media transport `17/17`。✅ canonical repository wrapper 對全部直接受影響 P0 files 在停用file retry時通過 `310/310`。✅ 同一 final tree 不帶 `--only` 的完整 sequential `NAMED_TESTS` 通過 `29/29`。
 
 #### Query Revision + Native Reply P0 final gate
-**驗證證據**: ✅ 2026-08-06 三個 named verdict 分別 targeted PASS；完整 sequential `NAMED_TESTS` `29/29`；directly impacted canonical wrapper `308/308`；fresh-context Standards/Spec review 無 blocker；gateway restart 後的 runtime process 晚於三個 production source mtime，且有 fresh startup、Teams polling 與 API-server events。
+**驗證證據**: ✅ 2026-08-06 三個 named verdict 分別 targeted PASS；完整 sequential `NAMED_TESTS` `29/29`；directly impacted canonical wrapper（停用file retry）`310/310`；fresh-context Standards/Spec review 無 blocker；gateway restart 後的 runtime process 晚於三個 production source mtime，且有 fresh startup、Teams polling 與 API-server events。
 **全 repo gate 說明**: `scripts/run_tests.sh` 全範圍曾啟動，但被 P0 diff 外的 Windows image-path contract 阻擋；`tests/agent/test_image_routing.py` 已用 canonical wrapper 單檔重現 `7 failed, 98 passed, 1 skipped`。此結果不作 P0 regression，也不誤報為全 repo green。

@@ -283,6 +283,7 @@ class TestForwardMessageRawFallback:
         ``Authentication: skypetoken=<token>``.
         """
         adapter = _make_adapter()
+        adapter.config.extra["conversation_ids"] = ["dst"]
         adapter._auth._msg_base = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME"
         fetch_resp = MagicMock()
         fetch_resp.json.return_value = {

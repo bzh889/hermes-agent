@@ -91,7 +91,7 @@ scripts/run_tests.sh \
 <tr><td>Interactive approval buttons</td><td>官方plugin可送Adaptive Card並處理<code>Action.Execute</code> callback，且default-deny驗clicker allowlist。</td><td>MTK Adaptive Card是static display；沒有invoke callback endpoint；只能用文字<code>/approve</code>／<code>/deny</code>。</td><td>Bot Framework webhook，不是單靠Graph</td><td>條件式UX缺口；不應為此破壞現有poll/Trouter。</td><td><code>approval-card-authorized-click</code>，只有部署callback endpoint才做。</td></tr>
 <tr><td>Reactions／safe delete</td><td>Hermes有platform contract；Graph正式API支援<code>setReaction</code>。</td><td>MTK有send/remove reaction及delete-own guard；OpenSpec記載真實readback E2E。</td><td>Graph＋Skype ownership registry</td><td>已實作；本輪未重跑live E2E。</td><td><code>reaction-roundtrip</code>＋<code>delete-message-safety</code>。</td></tr>
 <tr><td>Search／activity／call／forward／whitelist</td><td>不是Hermes core通用tool；須由platform command/skill暴露。</td><td>多個adapter方法存在；沒有runtime dispatch。<code>get_platform_hints()</code>也沒有consumer。</td><td>Skype SDK＋少量Graph</td><td><strong>code present, not chat-native integrated</strong>。</td><td><code>teams-native-command-dispatch</code>逐命令從人類訊息走完整gateway。</td></tr>
-<tr><td>Forward authorization</td><td>安全邊界應fail closed。</td><td><code>allowed_targets</code>為optional；未傳或空清單時任意target可轉發。</td><td>Adapter authorization</td><td><strong>P0安全缺口</strong>。</td><td><code>forward-whitelist-fail-closed</code>。</td></tr>
+<tr><td>Forward authorization</td><td>安全邊界應fail closed。</td><td>2026-08-07起由trusted gateway <code>conversation_ids</code>與<code>gateway.teams_mtk.groups</code>授權；legacy <code>allowed_targets</code>只能收窄。</td><td>Adapter authorization</td><td><strong>已修正並通過真實read-back E2E</strong>。</td><td><code>forward-whitelist-fail-closed</code>。</td></tr>
 <tr><td>WebSocket＋poll</td><td>官方Teams走webhook push。</td><td>MTK走Trouter即時加速＋poll fallback；目前5 healthy ticks放寬15s、20 ticks即30s。</td><td>Skype/Trouter</td><td>架構合理，但不符合OpenSpec的5分鐘／24小時政策；metrics只在loop區域記憶體。</td><td><code>ws-adaptive-policy-clock</code>＋24h soak。</td></tr>
 <tr><td>文件／setup</td><td>官方有<code>website/docs/user-guide/messaging/teams.md</code>與plugin setup。</td><td>MTK的<code>teams-mtk.md</code>仍缺；實際auth／SDK／Trouter／Graph boundaries未集中說明。</td><td>Documentation</td><td><strong>確認缺口</strong>。</td><td>乾淨profile依文件完成setup＋send/receive smoke。</td></tr>
 </tbody>
@@ -197,14 +197,16 @@ AIDE是custom provider route，不是官方Teams transport。Hermes的custom pro
 
 ## 7. OpenSpec reconciliation
 
-目前`tasks.md`共有21個unchecked，不能直接解讀成21個未實作。
+本節審計起點共有21個unchecked，不能直接解讀成21個未實作；
+2026-08-07關閉S10-1~3後，`tasks.md`目前剩18個unchecked。下表保留原始21項的分類帳。
 
 <table>
 <thead><tr><th>類別</th><th>數量</th><th>項目</th><th>實際判定</th></tr></thead>
 <tbody>
 <tr><td>應改closed／非工作項</td><td>2</td><td>G13-B.1、G-SP-1</td><td>文字本身已說不需要／走m365 skill，不應留unchecked。</td></tr>
-<tr><td>已有code但checkbox或整合過期</td><td>7</td><td>S2-4、S4-1、S4-3、S5-2、S10-1、S10-3、WS-7</td><td>方法或邏輯存在；但多數缺runtime dispatch、hint consumer或真實E2E，因此不能一律勾完成。</td></tr>
-<tr><td>真正仍需實作／收尾</td><td>12</td><td>§15/REV-6、G15 chat entry、G14-2.1、S1-5、S4-2、S5-1 filters、S10-2、WS-8、WS-9、C-5、C-6、C-7</td><td>包含文件、blocked persona、poll/SDK與安全／observability缺口。</td></tr>
+<tr><td>已有code但checkbox或整合過期</td><td>5</td><td>S2-4、S4-1、S4-3、S5-2、WS-7</td><td>方法或邏輯存在；但多數缺runtime dispatch、hint consumer或真實E2E，因此不能一律勾完成。</td></tr>
+<tr><td>真正仍需實作／收尾</td><td>11</td><td>§15/REV-6、G15 chat entry、G14-2.1、S1-5、S4-2、S5-1 filters、WS-8、WS-9、C-5、C-6、C-7</td><td>包含文件、blocked persona、poll/SDK與安全／observability缺口。</td></tr>
+<tr><td>本輪完成並關閉</td><td>3</td><td>S10-1、S10-2、S10-3</td><td>trusted-config default-deny、SDK-first/raw guard、platform hint、unit與真實E2E均完成。</td></tr>
 </tbody>
 </table>
 
@@ -214,7 +216,7 @@ AIDE是custom provider route，不是官方Teams transport。Hermes的custom pro
 - **S1-5**：per-turn append hook存在（`3434-3463`），另有S1-6外部全量cron；原任務要求的gateway即時全量落地仍未完成，且可能不值得做。應先決定是否由S1-6取代。
 - **S4-2**：低頻掃48:mentions／48:notifications尚未接poll loop。
 - **S5-1**：已有`get_call_logs(limit, offset)`，但缺`target_person`／`days_back`。
-- **S10-2**：forward whitelist是optional，必須改fail closed。
+- **S10-2**：2026-08-07已改為trusted-config default-deny；caller清單只能收窄且拒絕路徑零transport call。
 - **WS-8**：目前`_ws_stats`只是`_poll_loop`區域dict，未持久化，也沒有完整connection duration/reconnect success rate contract。
 - **WS-9**：目前20 healthy ticks就放寬30s，不是spec要求的24h證據。
 - **C-5/C-6/C-7**：指SDK獨立`poll.py`，不能拿gateway已有short gating／group config／VIP buffer冒充完成。

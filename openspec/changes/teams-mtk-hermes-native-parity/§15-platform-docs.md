@@ -25,7 +25,7 @@
 | 安全 | Group whitelist | authz_mixin `_teams_mtk_group_is_whitelisted` | config.yaml |
 | 安全 | VIP buffer | `_VIPBuffer` (立即/stale flush) | config.yaml |
 | 安全 | 只刪自己 | `delete_message_safe()` —驗證 sender | 內建 |
-| 安全 | 轉發白名單 | `allowed_targets=[]` 參數 | 內建 |
+| 安全 | 轉發白名單 | trusted gateway config；缺失/空白時 default-deny | 內建 |
 | WS | 雙通道 + 自適應 | WS 即時 + poll 兜底，WS healthy→15s/30s | 內建 |
 | PKB | 即時落地 | `on_message_processed()` hook | per-group config |
 | 平台提示 | PLATFORM_HINTS | `get_platform_hints()` | 內建 |

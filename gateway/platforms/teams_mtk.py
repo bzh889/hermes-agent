@@ -3834,19 +3834,49 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
     # ---- S10: Message forwarding ----
 
+    def _forward_target_allowlist(self) -> set[str]:
+        """Resolve trusted forwarding targets from gateway configuration."""
+        allowed = set(_configured_conversation_ids(self.config))
+        try:
+            from hermes_cli.config import load_config_readonly
+            groups = (
+                load_config_readonly()
+                .get("gateway", {})
+                .get("teams_mtk", {})
+                .get("groups", {})
+            )
+            if isinstance(groups, dict):
+                allowed.update(_normalize_conversation_ids(list(groups)))
+        except Exception as exc:
+            logger.warning(
+                "TeamsMTK: could not load forwarding group allowlist: %s",
+                _log_error(exc),
+            )
+        return allowed
+
     async def forward_message(self, source_conv: str, message_id: str,
-                              target_conv: str, allowed_targets: list = None) -> dict:
+                              target_conv: str,
+                              allowed_targets: list[str] | None = None) -> dict:
         """Forward a message from source to target conversation.
 
-        ``allowed_targets``: optional whitelist of target conversation IDs.
-        If set, forward is rejected if target_conv is not in the list.
+        Targets must be present in trusted gateway configuration. The legacy
+        ``allowed_targets`` argument may further restrict that configuration,
+        but can never authorize an otherwise unconfigured destination.
         """
-        # Whitelist check
-        if allowed_targets and target_conv not in allowed_targets:
-            logger.warning("TeamsMTK: forward rejected — target %s not in whitelist",
-                           _log_ref(target_conv))
-            return {"status": "error",
-                    "error": f"Target conversation not in allowed list"}
+        trusted_targets = self._forward_target_allowlist()
+        if allowed_targets is not None:
+            trusted_targets.intersection_update(
+                _normalize_conversation_ids(allowed_targets)
+            )
+        if target_conv not in trusted_targets:
+            logger.warning(
+                "TeamsMTK: forward rejected — target %s is not authorized",
+                _log_ref(target_conv),
+            )
+            return {
+                "status": "error",
+                "error": "Target conversation is not authorized for forwarding",
+            }
         try:
             if _SDK_AVAILABLE and self._auth.skype_token():
                 _adapter = _SDKAuthAdapter(self._auth)
@@ -3904,7 +3934,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "Capabilities:",
             "  - send_message, edit_message, delete_message (own messages only)",
             "  - send_reaction / remove_reaction (like/heart/laugh/surprised/sad/angry)",
-            "  - forward_message (with optional target whitelist)",
+            "  - forward_message (configured targets only; default-deny)",
             "  - search_messages (content + date range)",
             "  - get_activity (spaces/notes/call_logs/threads/saved)",
             "  - get_call_logs, list_conversations",

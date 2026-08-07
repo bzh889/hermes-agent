@@ -703,6 +703,7 @@ class TestE2EG11(_B):
         adapter = TeamsMTKAdapter(None)
         adapter._conv_id = cid
         adapter._conv_ids = [cid, gid]
+        adapter.config.extra["conversation_ids"] = [cid, gid]
         result = asyncio.run(adapter.forward_message(cid, fwd_msg_id, gid))
         self.assertNotEqual(result.get("status"), "error",
             f"G11 FAIL: forward returned error: {result}")

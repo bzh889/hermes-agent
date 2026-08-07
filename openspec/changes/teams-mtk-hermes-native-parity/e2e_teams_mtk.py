@@ -2311,6 +2311,160 @@ def test_reaction_roundtrip(log_path: str, baseline: int) -> tuple[bool, str]:
         asyncio.run(adapter.delete_message(DM_CHAT_ID, message_id))
 
 
+def test_forward_whitelist_fail_closed(
+    log_path: str,
+    baseline: int,
+) -> tuple[bool, str]:
+    """S10: allow configured forwarding and deny all unconfigured targets."""
+    del log_path, baseline
+    from unittest.mock import AsyncMock, patch
+
+    from gateway.config import PlatformConfig
+    from gateway.platforms.teams_mtk import TeamsMTKAdapter
+
+    marker = f"E2E_AUTO forward allowlist {uuid.uuid4().hex}"
+    source_id = ""
+    forwarded_ids: set[str] = set()
+    functional_result = (False, "Forward allowlist E2E did not run")
+
+    def _assert_denied_without_transport(adapter, target: str) -> tuple[bool, str]:
+        adapter.send = AsyncMock()
+        with patch("gateway.platforms.teams_mtk._SDKMessages") as sdk_messages, \
+             patch("requests.get") as raw_get, \
+             patch.object(
+                 adapter._auth,
+                 "skype_token",
+                 side_effect=AssertionError("denied forward touched auth transport"),
+             ) as token:
+            result = asyncio.run(
+                adapter.forward_message(DM_CHAT_ID, source_id or "source", target)
+            )
+        if result.get("status") != "error" or "not authorized" not in result.get("error", ""):
+            return False, f"Denied target returned unexpected status={result.get('status')}"
+        if sdk_messages.called or raw_get.called or adapter.send.await_count or token.called:
+            return False, "Denied target touched SDK/raw/auth/send transport"
+        return True, "denied with zero transport calls"
+
+    target_baseline = {
+        str(message.get("id") or "")
+        for message in get_messages_raw(GROUP_CHAT_ID, page_size=50)
+        if message.get("id")
+    }
+    adapter = TeamsMTKAdapter(PlatformConfig(extra={
+        "conversation_ids": [DM_CHAT_ID, GROUP_CHAT_ID],
+    }))
+
+    try:
+        source_id = send_via_sdk(DM_CHAT_ID, marker)
+        allowed = asyncio.run(
+            adapter.forward_message(DM_CHAT_ID, source_id, GROUP_CHAT_ID)
+        )
+        if allowed.get("status") == "error":
+            functional_result = (False, "Configured target forward returned error")
+        else:
+            allowed_id = str(
+                allowed.get("id") or allowed.get("OriginalArrivalTime") or ""
+            )
+            if allowed_id:
+                forwarded_ids.add(allowed_id)
+            deadline = time.monotonic() + 30
+            matches: list[dict] = []
+            while time.monotonic() < deadline:
+                matches = [
+                    message
+                    for message in get_messages_raw(GROUP_CHAT_ID, page_size=50)
+                    if str(message.get("id") or "") not in target_baseline
+                    and marker in (
+                        str(message.get("content") or "")
+                        + str(message.get("_raw_content") or "")
+                    )
+                ]
+                if matches:
+                    break
+                time.sleep(1)
+            matched_ids = {
+                str(message.get("id"))
+                for message in matches
+                if message.get("id")
+            }
+            forwarded_ids.update(matched_ids)
+            if len(matched_ids) != 1:
+                functional_result = (
+                    False,
+                    f"Configured forward read-back count={len(matched_ids)}",
+                )
+            else:
+                fake_target = f"19:e2e-denied-{uuid.uuid4().hex}@thread.v2"
+                denied_ok, denied_evidence = _assert_denied_without_transport(
+                    adapter,
+                    fake_target,
+                )
+                if not denied_ok:
+                    functional_result = (False, denied_evidence)
+                else:
+                    with patch.dict(
+                        os.environ,
+                        {"MTK_TEAMS_CONVERSATION_ID": ""},
+                    ), patch(
+                        "hermes_cli.config.load_config_readonly",
+                        return_value={},
+                    ):
+                        empty_adapter = TeamsMTKAdapter(PlatformConfig(extra={}))
+                        empty_ok, empty_evidence = _assert_denied_without_transport(
+                            empty_adapter,
+                            GROUP_CHAT_ID,
+                        )
+                    functional_result = (
+                        empty_ok,
+                        (
+                            "configured_forward_readback=1; "
+                            f"unconfigured={denied_evidence}; empty={empty_evidence}"
+                        ),
+                    )
+        return functional_result
+    finally:
+        cleanup_errors: list[str] = []
+        for message_id in sorted(forwarded_ids):
+            try:
+                delete_msg_message(GROUP_CHAT_ID, message_id)
+            except Exception as exc:
+                cleanup_errors.append(f"forwarded:{type(exc).__name__}")
+        if source_id:
+            try:
+                delete_msg_message(DM_CHAT_ID, source_id)
+            except Exception as exc:
+                cleanup_errors.append(f"source:{type(exc).__name__}")
+
+        residue: list[dict] = []
+        cleanup_deadline = time.monotonic() + 20
+        while True:
+            residue = []
+            try:
+                for chat_id in (DM_CHAT_ID, GROUP_CHAT_ID):
+                    residue.extend(
+                        message
+                        for message in get_messages_raw(chat_id, page_size=50)
+                        if marker in (
+                            str(message.get("content") or "")
+                            + str(message.get("_raw_content") or "")
+                        )
+                    )
+            except Exception as exc:
+                cleanup_errors.append(f"readback:{type(exc).__name__}")
+                break
+            if not residue or time.monotonic() >= cleanup_deadline:
+                break
+            time.sleep(1)
+        if residue:
+            cleanup_errors.append(f"residue_count={len(residue)}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "forward allowlist E2E cleanup failed ("
+                + ", ".join(cleanup_errors)
+                + ")"
+            )
+
+
 def test_delete_message_safety(log_path: str, baseline: int) -> tuple[bool, str]:
     """S9: delete an own message and refuse a processed foreign message."""
     del log_path, baseline
@@ -3767,9 +3921,10 @@ def test_busy_group_burst_redirect(
     old_marker = f"{prefix}OLD"
     marker_a = f"{prefix}A"
     marker_b = f"{prefix}B"
+    e2e_python = os.path.abspath(sys.executable).replace("\\", "/")
     initial_prompt = (
         "E2E busy burst verification. Use the terminal tool exactly once to run "
-        f"venv/Scripts/python.exe -c \"import time; print('{tool_marker}', "
+        f"\"{e2e_python}\" -c \"import time; print('{tool_marker}', "
         f"flush=True); time.sleep(45); print('{old_marker}', flush=True)\". "
         f"Do not use another tool. After it finishes, reply with exactly {old_marker}."
     )
@@ -4390,6 +4545,7 @@ NAMED_TESTS = {
     "restart-no-replay": test_restart_no_replay,
     "send-text": test_send_text,
     "reaction-roundtrip": test_reaction_roundtrip,
+    "forward-whitelist-fail-closed": test_forward_whitelist_fail_closed,
     "delete-message-safety": test_delete_message_safety,
     "edit-message": test_edit_message,
     "download-attachment": test_download_attachment,
