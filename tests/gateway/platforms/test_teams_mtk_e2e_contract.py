@@ -177,6 +177,83 @@ def test_send_text_allows_a_bounded_full_model_turn(monkeypatch):
     ]
 
 
+def test_residual_markdown_e2e_cleans_marker_bearing_human_mirror(monkeypatch):
+    e2e = _load_e2e_module()
+    marker = "E2ERENDERABCDEF123456"
+    baseline = {"id": "baseline", "content": "existing human message"}
+    bot_reply = {
+        "id": "bot-reply",
+        "content": _branded_bot_html(f"rendered table {marker}"),
+        "_raw_properties": {"hermes_sender": "bot"},
+    }
+    human_mirror = {
+        "id": "human-mirror",
+        "content": f"request {marker}",
+        "_raw_properties": {"hermes_sender": "user"},
+    }
+    unrelated_human = {
+        "id": "unrelated-human",
+        "content": "concurrent human message",
+        "_raw_properties": {"hermes_sender": "user"},
+    }
+    readbacks = iter(
+        [
+            [baseline],
+            [baseline, bot_reply],
+            [baseline, bot_reply, human_mirror, unrelated_human],
+            [baseline, unrelated_human],
+        ]
+    )
+    sent_ids = iter(["graph-reset", "graph-query"])
+    deleted_graph = []
+    deleted_msg = []
+
+    monkeypatch.setattr(
+        e2e.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="abcdef1234567890"),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "get_messages_raw",
+        lambda *args, **kwargs: next(readbacks),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "send_chat_message",
+        lambda *_args: next(sent_ids),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_graph_message",
+        lambda *args: deleted_graph.append(args),
+    )
+    monkeypatch.setattr(
+        e2e,
+        "delete_msg_message",
+        lambda *args: deleted_msg.append(args),
+    )
+    monkeypatch.setattr(e2e.time, "sleep", lambda _seconds: None)
+
+    ok, evidence = e2e.test_no_residual_markdown_in_reply(
+        "gateway.log",
+        17,
+        reply_timeout=1,
+        poll_interval=0,
+    )
+
+    assert ok is True, evidence
+    assert deleted_graph == [
+        (e2e.DM_CHAT_ID, "graph-reset"),
+        (e2e.DM_CHAT_ID, "graph-query"),
+    ]
+    assert set(deleted_msg) == {
+        (e2e.DM_CHAT_ID, "bot-reply"),
+        (e2e.DM_CHAT_ID, "human-mirror"),
+    }
+    assert (e2e.DM_CHAT_ID, "unrelated-human") not in deleted_msg
+
+
 def test_garbage_detector_e2e_correlates_and_cleans_up(monkeypatch):
     e2e = _load_e2e_module()
     marker = "E2EGARBAGEABCDEF123456"
