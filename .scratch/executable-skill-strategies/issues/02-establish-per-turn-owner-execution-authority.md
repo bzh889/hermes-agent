@@ -16,3 +16,9 @@
 - [x] Delete and archive remain subject to separate Destructive Curation Consent and are not implied by patch/edit authority.
 - [x] Sequential and concurrent turn tests prove authority is reset and isolated when one cached Agent processes different senders.
 - [x] Existing TUI approvals and safety checks remain observable and unchanged for authorized operations.
+
+## Comments
+
+- 2026-08-10: Re-verified after a live local-TUI maintenance request was denied later in a turn that had manually run a cron job. `cron.run_job()` opened a nested session context, then `clear_session_vars()` replaced every outer ContextVar with an explicit empty value instead of restoring its tokens. The same TUI turn therefore lost `source=tui` before `skill_manage` evaluated authority.
+- The gateway-integration regression follows `tui_gateway._set_session_context()` through the nested cron context boundary into the public `skill_manage(action="patch")` handler. It failed with `untrusted_runtime` before the fix and passed after session and runtime-cwd tokens became stack-safe; top-level cleanup still converts `_UNSET` string values to explicit empty values so stale process environment mirrors remain fail-closed.
+- Fresh verification ran 78 affected test cases across 9 files with file retry disabled and no failures. A separate fresh Python runtime then bound a real TUI session, dispatched an actual no-agent cron run through `model_tools.handle_function_call`, patched and read back an existing loadable skill through the public tools, reverted and read it back again, and verified the cron execution completed successfully. The temporary job, scripts, child process, and skill marker were removed; unauthorized-source authority tests remained green.

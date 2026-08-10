@@ -139,6 +139,27 @@ _VAR_MAP = {
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
 }
 
+# Exact token order returned by set_session_vars(). Keeping this centralized is
+# load-bearing: clear_session_vars() must restore an outer binding when a tool
+# (for example, a manually-run cron job) opens a nested session context inside a
+# live TUI/gateway turn.
+_SESSION_BIND_VARS = (
+    _SESSION_PLATFORM,
+    _SESSION_SOURCE,
+    _SESSION_CHAT_ID,
+    _SESSION_CHAT_NAME,
+    _SESSION_THREAD_ID,
+    _SESSION_USER_ID,
+    _SESSION_USER_NAME,
+    _SESSION_KEY,
+    _SESSION_ID,
+    _SESSION_UI_SESSION_ID,
+    _SESSION_MESSAGE_ID,
+    _SESSION_PROFILE,
+    _SESSION_ASYNC_DELIVERY,
+    _CRON_SESSION,
+)
+
 
 def set_current_session_id(session_id: str) -> None:
     """Synchronize ``HERMES_SESSION_ID`` across ContextVar and ``os.environ``.
@@ -175,10 +196,9 @@ def set_session_vars(
     """Set all session context variables and return reset tokens.
 
     Call ``clear_session_vars(tokens)`` in a ``finally`` block when the handler
-    exits. Note ``clear_session_vars`` resets every var to ``""`` (to suppress
-    the ``os.environ`` fallback) rather than restoring prior values — these
-    helpers are not nestable/stack-safe, and the returned tokens are accepted
-    only for API compatibility.
+    exits. Nested bindings restore the outer session; a top-level clear converts
+    an unset prior value to ``""`` so stale process-wide environment mirrors
+    still cannot leak into the completed handler's context.
 
     ``cwd`` pins the logical working directory for this context.
 
@@ -192,69 +212,67 @@ def set_session_vars(
     # "ContextVar-authoritative, strip on _UNSET" — see session_context_engaged.
     global _session_context_engaged
     _session_context_engaged = True
-    tokens = [
-        _SESSION_PLATFORM.set(platform),
-        _SESSION_SOURCE.set(source),
-        _SESSION_CHAT_ID.set(chat_id),
-        _SESSION_CHAT_NAME.set(chat_name),
-        _SESSION_THREAD_ID.set(thread_id),
-        _SESSION_USER_ID.set(user_id),
-        _SESSION_USER_NAME.set(user_name),
-        _SESSION_KEY.set(session_key),
-        _SESSION_ID.set(session_id),
-        _SESSION_UI_SESSION_ID.set(ui_session_id),
-        _SESSION_MESSAGE_ID.set(message_id),
-        _SESSION_PROFILE.set(profile),
-        _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
-        _CRON_SESSION.set("1" if cron_session else ""),
-    ]
+    values = (
+        platform,
+        source,
+        chat_id,
+        chat_name,
+        thread_id,
+        user_id,
+        user_name,
+        session_key,
+        session_id,
+        ui_session_id,
+        message_id,
+        profile,
+        bool(async_delivery),
+        "1" if cron_session else "",
+    )
+    tokens = [var.set(value) for var, value in zip(_SESSION_BIND_VARS, values)]
     try:
         from agent.runtime_cwd import set_session_cwd
 
-        set_session_cwd(cwd)
+        tokens.append(set_session_cwd(cwd))
     except Exception:
-        pass
+        tokens.append(None)
     return tokens
 
 
 def clear_session_vars(tokens: list) -> None:
-    """Mark session context variables as explicitly cleared.
+    """Restore an outer binding, or explicitly clear a completed top-level one.
 
-    Sets all variables to ``""`` so that ``get_session_env`` returns an empty
-    string instead of falling back to (potentially stale) ``os.environ``
-    values.  The *tokens* argument is accepted for API compatibility with
-    callers that saved the return value of ``set_session_vars``, but the
-    actual clearing uses ``var.set("")`` rather than ``var.reset(token)``
-    to ensure the "explicitly cleared" state is distinguishable from
-    "never set" (which holds the ``_UNSET`` sentinel).
+    ``ContextVar.reset(token)`` makes nested session scopes stack-safe. If a
+    token restores ``_UNSET`` (the top-level case), string session vars are set
+    to ``""`` instead so ``get_session_env`` cannot fall back to a stale
+    process-wide mirror. Async delivery deliberately keeps ``_UNSET`` because
+    its default is the supported behavior.
     """
-    for var in (
-        _SESSION_PLATFORM,
-        _SESSION_SOURCE,
-        _SESSION_CHAT_ID,
-        _SESSION_CHAT_NAME,
-        _SESSION_THREAD_ID,
-        _SESSION_USER_ID,
-        _SESSION_USER_NAME,
-        _SESSION_KEY,
-        _SESSION_ID,
-        _SESSION_UI_SESSION_ID,
-        _SESSION_MESSAGE_ID,
-        _CRON_SESSION,
-        _SESSION_PROFILE,
-    ):
-        var.set("")
-    # Reset async-delivery capability to the "never set" sentinel rather than a
-    # falsy value: a cleared context should fall back to the default-supported
-    # behavior (CLI / unaware paths), not be mistaken for an opted-out
-    # stateless adapter.
-    _SESSION_ASYNC_DELIVERY.set(_UNSET)
-    try:
-        from agent.runtime_cwd import clear_session_cwd
+    for index, var in enumerate(_SESSION_BIND_VARS):
+        fallback = _UNSET if var is _SESSION_ASYNC_DELIVERY else ""
+        if index >= len(tokens) or tokens[index] is None:
+            var.set(fallback)
+            continue
+        try:
+            var.reset(tokens[index])
+        except (RuntimeError, TypeError, ValueError):
+            var.set(fallback)
+            continue
+        if var.get() is _UNSET and fallback is not _UNSET:
+            var.set(fallback)
 
-        clear_session_cwd()
+    try:
+        from agent.runtime_cwd import clear_session_cwd, reset_session_cwd
+
+        cwd_index = len(_SESSION_BIND_VARS)
+        if cwd_index < len(tokens) and tokens[cwd_index] is not None:
+            reset_session_cwd(tokens[cwd_index])
+        else:
+            clear_session_cwd()
     except Exception:
-        pass
+        try:
+            clear_session_cwd()
+        except Exception:
+            pass
 
 
 def reset_session_vars() -> None:

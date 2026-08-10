@@ -3123,9 +3123,9 @@ def run_job(
     # _resolve_origin(job) and the HERMES_CRON_AUTO_DELIVER_* vars set
     # below, so clearing HERMES_SESSION_* here does not affect delivery.
     # Resolve workdir BEFORE set_session_vars so we can pass it as cwd=,
-    # letting set_session_vars handle the _SESSION_CWD ContextVar set/clear
-    # via its existing machinery (clear_session_vars calls clear_session_cwd
-    # internally). This avoids a separate import/set/clear dance (#69396).
+    # letting set_session_vars handle the _SESSION_CWD ContextVar scope via its
+    # existing token machinery. This avoids a separate import/set/clear dance
+    # (#69396) and restores an outer interactive turn after a manual cron run.
     _job_workdir = (job.get("workdir") or "").strip() or None
     if _job_workdir and not Path(_job_workdir).is_dir():
         logger.warning(
@@ -3809,9 +3809,9 @@ def run_job(
             _terminal_cwd_lock.release_write()
         else:
             _terminal_cwd_lock.release_read()
-        # Clean up ContextVar session/delivery state for this job.
-        # clear_session_vars also clears _SESSION_CWD internally, so no
-        # separate clear_session_cwd() call is needed.
+        # Restore the ContextVar session/delivery state that preceded this job.
+        # clear_session_vars also restores _SESSION_CWD internally, so no
+        # separate cwd reset is needed.
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")

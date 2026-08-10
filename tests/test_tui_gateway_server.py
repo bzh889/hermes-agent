@@ -109,6 +109,71 @@ def test_session_context_uses_session_cwd(monkeypatch, tmp_path):
         server._sessions.pop(sid, None)
 
 
+def test_tui_owner_authority_survives_nested_cron_session_context(monkeypatch, tmp_path):
+    """A nested cron run must not erase the outer TUI turn's skill authority."""
+    from agent.runtime_cwd import resolve_agent_cwd
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from tools.skill_manager_tool import skill_manage
+
+    home = tmp_path / ".hermes"
+    skill_root = home / "skills"
+    skill_dir = skill_root / "authority-skill"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        """---
+name: authority-skill
+description: Tests nested TUI execution authority.
+---
+
+# Authority Skill
+
+OLD_MARKER
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    sid = "authority-nested-tui"
+    session_key = "authority-nested-tui-key"
+    with server._sessions_lock:
+        server._sessions[sid] = {
+            "session_key": session_key,
+            "source": "tui",
+            "cwd": str(tmp_path),
+        }
+
+    with patch("tools.skill_manager_tool.SKILLS_DIR", skill_root), patch(
+        "agent.skill_utils.get_all_skills_dirs", return_value=[skill_root]
+    ):
+        outer_tokens = server._set_session_context(session_key)
+        try:
+            cron_tokens = set_session_vars(
+                platform="",
+                source="",
+                cron_session=True,
+                async_delivery=False,
+            )
+            clear_session_vars(cron_tokens)
+            restored_cwd = resolve_agent_cwd()
+            result = json.loads(
+                skill_manage(
+                    action="patch",
+                    name="authority-skill",
+                    old_string="OLD_MARKER",
+                    new_string="NEW_MARKER",
+                )
+            )
+        finally:
+            server._clear_session_context(outer_tokens)
+            with server._sessions_lock:
+                server._sessions.pop(sid, None)
+
+    assert result["success"] is True, result
+    assert restored_cwd == tmp_path
+    assert "NEW_MARKER" in skill_file.read_text(encoding="utf-8")
+
+
 def test_handoff_fail_marks_only_inflight_rows(monkeypatch):
     class DbContext:
         def __init__(self, db):
