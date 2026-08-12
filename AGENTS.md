@@ -21,8 +21,8 @@ Triage uses the five canonical role strings: `needs-triage`, `needs-info`,
 
 ### Domain docs
 
-Domain documentation uses a multi-context layout rooted at `CONTEXT-MAP.md`,
-with contexts for Core, Gateway, Desktop, TUI, and Web. See
+Domain documentation uses a multi-context layout for Core, Gateway, Desktop,
+TUI, and Web. Read `CONTEXT-MAP.md` when present and follow
 `docs/agents/domain.md`.
 
 ## MTK upstream upgrades
