@@ -5307,11 +5307,6 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                 self._advance_message_cursor(conv_id, msg_id)
                 continue
 
-            # Skip empty messages
-            if not content:
-                self._advance_message_cursor(conv_id, msg_id)
-                continue
-
             # Echo-loop guard: in a self-chat (48:notes), every message can
             # come from the same OID. Ownership therefore requires one of two
             # trusted signals:
@@ -5372,11 +5367,31 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             # 3) properties.files array (file shares like PDF/DOCX)
             if isinstance(props, dict):
                 _files = props.get("files")
+                if isinstance(_files, str):
+                    try:
+                        _files = json.loads(_files)
+                    except (json.JSONDecodeError, TypeError):
+                        _files = []
                 if isinstance(_files, list):
                     for fi in _files:
                         if isinstance(fi, dict):
-                            furl = fi.get("contentUrl") or fi.get("contenturl") or ""
-                            fname = fi.get("name") or fi.get("fileName") or ""
+                            _file_info = fi.get("fileInfo")
+                            if not isinstance(_file_info, dict):
+                                _file_info = {}
+                            furl = (
+                                fi.get("contentUrl")
+                                or fi.get("contenturl")
+                                or _file_info.get("fileUrl")
+                                or fi.get("objectUrl")
+                                or fi.get("baseUrl")
+                                or ""
+                            )
+                            fname = (
+                                fi.get("name")
+                                or fi.get("fileName")
+                                or fi.get("title")
+                                or ""
+                            )
                             if furl.startswith("http"):
                                 _att_urls.append(furl)
                                 _att_names.append(fname)

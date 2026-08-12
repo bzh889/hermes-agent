@@ -478,6 +478,33 @@ async def test_process_new_messages_properties_files():
     assert event.media_types == ["file"]
 
 
+async def test_process_new_messages_empty_content_with_stringified_teams_file():
+    """A native Teams file share has empty content and JSON-string properties.files."""
+    adapter = _make_adapter()
+    conv_id = "19:dm-file@unq.gbl.spaces"
+    adapter._last_message_ids[conv_id] = "msg0"
+
+    messages = [{
+        "id": "msg9",
+        "messagetype": "RichText/Html",
+        "content": "",
+        "imdisplayname": "Carol",
+        "from": "8:orgid:11111",
+        "properties": {
+            "files": '[{"fileName":"machine-log.rar","fileInfo":'
+                     '{"fileUrl":"https://tenant.sharepoint.com/machine-log.rar"}}]'
+        },
+    }]
+
+    event = await _run_process(adapter, conv_id, messages)
+
+    assert isinstance(event, MessageEvent)
+    assert event.text == "[attachment]"
+    assert event.media_urls == ["/tmp/cached"]
+    assert event.media_types == ["file"]
+    assert event.message_type == MessageType.DOCUMENT
+
+
 async def test_process_new_messages_top_level_attachments_image():
     """Top-level 'attachments' array with contentType image/* should be image."""
     adapter = _make_adapter()
