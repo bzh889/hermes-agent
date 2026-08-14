@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import posixpath
 import shlex
 import shutil
 import subprocess
@@ -121,7 +122,13 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
             add(shutil.which(name))
         for path in paths:
             add(path)
-    add_windows_install_paths(("/mnt/c/Program Files", "/mnt/c/Program Files (x86)"), _WINDOWS_BROWSER_GROUPS)
+    # These are paths inside WSL even when the caller is being exercised from
+    # a Windows-hosted test process.  Native os.path.join() would introduce
+    # backslashes and produce a path that cannot exist inside WSL.
+    for _, group in _WINDOWS_BROWSER_GROUPS:
+        for base in ("/mnt/c/Program Files", "/mnt/c/Program Files (x86)"):
+            for parts in group:
+                add(posixpath.join(base, *parts))
     return candidates
 
 

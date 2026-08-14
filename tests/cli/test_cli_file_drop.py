@@ -243,7 +243,12 @@ class TestEdgeCases:
 
     def test_symlink_to_file(self, tmp_image, tmp_path):
         link = tmp_path / "link.png"
-        link.symlink_to(tmp_image)
+        try:
+            link.symlink_to(tmp_image)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
         result = _detect_file_drop(str(link))
         assert result is not None
         assert result["is_image"] is True

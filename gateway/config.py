@@ -1719,7 +1719,7 @@ def load_gateway_config() -> GatewayConfig:
 
             if _pr is not None:
                 for entry in _pr.relevant_entries(
-                    _enabled_platform_names,
+                    _configured_platform_names,
                     os.environ,
                 ):
                     if entry.apply_yaml_config_fn is None:

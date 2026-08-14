@@ -2780,18 +2780,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 unique.append(mid)
         model_ids = unique
 
-        data = [
-            {
+        data = []
+        for mid in model_ids:
+            route = self._model_routes.get(mid)
+            route_model = route.get("model") if route else None
+            data.append({
                 "id": mid,
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "hermes",
                 "permission": [],
-                "root": mid,
-                "parent": None,
-            }
-            for mid in model_ids
-        ]
+                "root": route_model if isinstance(route_model, str) and route_model else mid,
+                "parent": model_name if route else None,
+            })
         return web.json_response({"object": "list", "data": data})
 
     async def _handle_model_options(self, request: "web.Request") -> "web.Response":

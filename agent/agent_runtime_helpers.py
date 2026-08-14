@@ -2633,7 +2633,17 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             pass
         return result
 
-    if function_name == "todo":
+    if function_name == "strategy_execute":
+        def _execute(next_args: dict) -> Any:
+            from agent.strategy_runtime import execute_strategy_for_agent
+
+            return _finish_agent_tool(
+                execute_strategy_for_agent(
+                    agent, next_args, task_id=effective_task_id
+                ),
+                next_args,
+            )
+    elif function_name == "todo":
         def _execute(next_args: dict) -> Any:
             from tools.todo_tool import todo_tool as _todo_tool
             return _finish_agent_tool(

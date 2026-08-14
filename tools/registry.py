@@ -91,11 +91,14 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "contract_operation", "normalized_outcomes", "contract_normalizer",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 contract_operation=None, normalized_outcomes=None,
+                 contract_normalizer=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -114,6 +117,9 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        self.contract_operation = contract_operation
+        self.normalized_outcomes = frozenset(normalized_outcomes or ())
+        self.contract_normalizer = contract_normalizer
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +381,9 @@ class ToolRegistry:
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
+        contract_operation: str | None = None,
+        normalized_outcomes: Set[str] | None = None,
+        contract_normalizer: Callable[[str | dict], str | dict] | None = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
@@ -445,6 +454,9 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                contract_operation=contract_operation,
+                normalized_outcomes=normalized_outcomes,
+                contract_normalizer=contract_normalizer,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by
@@ -575,6 +587,93 @@ class ToolRegistry:
                     )
             result.append({"type": "function", "function": schema_with_name})
         return result
+
+    def _contract_entry(self, operation: str) -> Optional[ToolEntry]:
+        """Resolve one unambiguous normalized provider operation."""
+        matches = [
+            entry for entry in self._snapshot_entries()
+            if entry.contract_operation == operation
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def has_contract_operation(self, operation: str) -> bool:
+        return self._contract_entry(operation) is not None
+
+    def get_contract_outcomes(self, operation: str) -> frozenset[str]:
+        entry = self._contract_entry(operation)
+        return entry.normalized_outcomes if entry is not None else frozenset()
+
+    def get_contract_tool_name(self, operation: str) -> str | None:
+        """Return the tool backing one unambiguous normalized operation."""
+        entry = self._contract_entry(operation)
+        return entry.name if entry is not None else None
+
+    def contract_operation_available(self, operation: str) -> bool:
+        entry = self._contract_entry(operation)
+        return bool(
+            entry
+            and (entry.check_fn is None or _check_fn_cached(entry.check_fn))
+        )
+
+    def dispatch_contract_operation(
+        self, operation: str, args: dict, **kwargs
+    ) -> str | dict:
+        """Dispatch an existing handler by its stable contract operation id."""
+        entry = self._contract_entry(operation)
+        if entry is None:
+            return json.dumps({
+                "error": f"Contract operation '{operation}' is not registered",
+                "error_type": "contract_operation_not_found",
+                "operation": operation,
+            })
+        if entry.check_fn is not None and not _check_fn_cached(entry.check_fn):
+            return json.dumps({
+                "error": f"Contract operation '{operation}' is unavailable",
+                "error_type": "operation_unavailable",
+                "operation": operation,
+            })
+        raw = self.dispatch(entry.name, args, **kwargs)
+        return self.normalize_contract_result(operation, raw)
+
+    def normalize_contract_result(
+        self, operation: str, raw: str | dict
+    ) -> str | dict:
+        """Normalize one already-dispatched provider result for a contract."""
+        entry = self._contract_entry(operation)
+        if entry is None:
+            return json.dumps({
+                "error": f"Contract operation '{operation}' is not registered",
+                "error_type": "contract_operation_not_found",
+                "operation": operation,
+            })
+        if entry.contract_normalizer is None:
+            return raw
+        try:
+            normalized = entry.contract_normalizer(raw)
+            if isinstance(normalized, str):
+                payload = json.loads(normalized)
+            elif isinstance(normalized, dict):
+                payload = normalized
+            else:
+                raise TypeError(
+                    "contract normalizer must return a JSON string or mapping"
+                )
+            outcome = payload.get("outcome")
+            if outcome not in entry.normalized_outcomes:
+                raise ValueError(
+                    f"undeclared normalized outcome {outcome!r}; expected one of "
+                    f"{sorted(entry.normalized_outcomes)}"
+                )
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception as exc:
+            logger.exception(
+                "Contract normalizer failed for operation %s", operation
+            )
+            return json.dumps({
+                "error": f"Contract result normalization failed: {exc}",
+                "error_type": "contract_normalization_failed",
+                "operation": operation,
+            }, ensure_ascii=False)
 
     # ------------------------------------------------------------------
     # Dispatch

@@ -6783,6 +6783,12 @@ class AIAgent:
         # Keep the scope local instead of storing ContextVar tokens on the agent,
         # which may be observed from another thread.
         with scoped_runtime_main({}):
+            from agent.strategy_runtime import (
+                reset_active_strategies,
+                set_active_strategies_from_message,
+            )
+
+            strategy_token = set_active_strategies_from_message(user_message)
             try:
                 return run_conversation(
                     self,
@@ -6796,6 +6802,7 @@ class AIAgent:
                     moa_config=moa_config,
                 )
             finally:
+                reset_active_strategies(strategy_token)
                 reset_accounting_context(acct_token)
                 reset_conversation_context(token)
 

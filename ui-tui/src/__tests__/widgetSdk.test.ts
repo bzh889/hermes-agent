@@ -1,9 +1,19 @@
+import { Text } from '@hermes/ink'
+import { createElement } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
+import { renderToScreen } from '../../packages/hermes-ink/src/ink/render-to-screen.js'
+import { $isBlocked, getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { dialogTestApp, gridTestApp } from '../sdk/apps/index.js'
-import { closeWidget, dispatchWidgetInput, launchWidget, openWidget } from '../sdk/host.js'
-import { getWidgetApp, listWidgetApps } from '../sdk/registry.js'
+import {
+  AmbientDock,
+  ambientRailWidth,
+  closeWidget,
+  dispatchWidgetInput,
+  launchWidget,
+  openWidget
+} from '../sdk/host.js'
+import { defineWidgetApp, getWidgetApp, listWidgetApps } from '../sdk/registry.js'
 import type { WidgetInput } from '../sdk/types.js'
 
 const key = (overrides: Partial<WidgetInput['key']> = {}, ch = ''): WidgetInput =>
@@ -57,12 +67,7 @@ describe('widget SDK host', () => {
     expect(getOverlayState().widget).toBeNull()
   })
 
-  it('a widget that throws in render shows an error chip, not a dead TUI', async () => {
-    const { defineWidgetApp } = await import('../sdk/registry.js')
-    const { AmbientDock } = await import('../sdk/host.js')
-    const { renderToScreen } = await import('../../packages/hermes-ink/src/ink/render-to-screen.js')
-    const { createElement } = await import('react')
-
+  it('a widget that throws in render shows an error chip, not a dead TUI', () => {
     defineWidgetApp({
       help: 'crash test',
       id: 'crash-test',
@@ -87,9 +92,7 @@ describe('widget SDK host', () => {
     expect(getOverlayState().widget).toBeNull()
   })
 
-  it('a MODAL widget blocks the composer; ambient never does', async () => {
-    const { $isBlocked } = await import('../app/overlayStore.js')
-
+  it('a MODAL widget blocks the composer; ambient never does', () => {
     expect($isBlocked.get()).toBe(false)
     launchWidget('ticker', '')
     expect($isBlocked.get()).toBe(false)
@@ -97,11 +100,7 @@ describe('widget SDK host', () => {
     expect($isBlocked.get()).toBe(true)
   })
 
-  it('ambient zones route by the app contract (docks + floats)', async () => {
-    const { defineWidgetApp } = await import('../sdk/registry.js')
-    const { Text } = await import('@hermes/ink')
-    const { createElement } = await import('react')
-
+  it('ambient zones route by the app contract (docks + floats)', () => {
     defineWidgetApp({
       help: 'corner test app',
       id: 'corner-test',
@@ -123,12 +122,7 @@ describe('widget SDK host', () => {
     ])
   })
 
-  it('rails reserve the widest railed app; docks reserve nothing sideways', async () => {
-    const { ambientRailWidth } = await import('../sdk/host.js')
-    const { defineWidgetApp } = await import('../sdk/registry.js')
-    const { Text } = await import('@hermes/ink')
-    const { createElement } = await import('react')
-
+  it('rails reserve the widest railed app; docks reserve nothing sideways', () => {
     defineWidgetApp({
       help: 'wide rail app',
       id: 'rail-wide',

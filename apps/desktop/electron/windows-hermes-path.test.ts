@@ -20,9 +20,9 @@ import { test } from 'vitest'
 import {
   buildPathExtCandidates,
   chooseUpdaterArgs,
-  getVenvSitePackagesEntries,
   findPreferredVenvRoot,
   findVenvBasePython,
+  getVenvSitePackagesEntries,
   resolveVenvHermesCommand
 } from './windows-hermes-path'
 

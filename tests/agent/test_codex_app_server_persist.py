@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import threading
 
 from agent.codex_runtime import run_codex_app_server_turn
 from hermes_state import SessionDB
@@ -58,6 +59,25 @@ def _make_agent(session_db=None, session_id="sess-codex"):
     agent._session_db = session_db
     agent._session_db_created = True
     agent.session_id = session_id
+    agent._session_persist_lock = threading.RLock()
+    agent._persist_disabled = False
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    agent._persist_user_message_timestamp = None
+    agent._pending_cli_user_message = None
+    agent._flushed_db_message_session_id = None
+    agent._flushed_db_message_ids = set()
+    agent._last_flushed_db_idx = 0
+    agent._active_compression_lock_holder = None
+    # Bind the production persistence implementation without constructing a
+    # network-configured AIAgent. The codex runtime only needs this method and
+    # the explicit fields above for this regression test.
+    agent._flush_messages_to_session_db = (
+        AIAgent._flush_messages_to_session_db.__get__(agent, AIAgent)
+    )
+    agent._flush_messages_to_session_db_unlocked = (
+        AIAgent._flush_messages_to_session_db_unlocked.__get__(agent, AIAgent)
+    )
     return agent
 
 
@@ -115,20 +135,8 @@ def test_codex_turn_persists_each_message_exactly_once():
         sid = "sess-codex-once"
         db.create_session(session_id=sid, source="telegram", model="codex")
 
-        # Real agent bound to this DB/session, minimal construction.
-        agent = AIAgent(
-            api_key="test-key",
-            base_url="https://openrouter.ai/api/v1",
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-            session_db=db,
-            session_id=sid,
-        )
-        agent._session_db_created = True
-        agent._codex_session = MagicMock()
+        agent = _make_agent(session_db=db, session_id=sid)
         agent._codex_session.run_turn.return_value = _make_turn()
-        agent.tool_progress_callback = None
 
         # Model the real flow: the inbound user turn is flushed at turn start
         # (turn_context._persist_session) on the SAME `messages` list the codex
@@ -158,6 +166,8 @@ def test_codex_turn_persists_each_message_exactly_once():
     finally:
         import shutil
 
+        if "db" in locals():
+            db.close()
         shutil.rmtree(tmp)
 
 

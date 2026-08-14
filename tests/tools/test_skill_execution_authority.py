@@ -131,6 +131,7 @@ def test_tui_owner_can_perform_nondestructive_skill_maintenance(
 
 
 def test_exact_teams_control_owner_can_patch_user_owned_skill(skill_root):
+    from agent.execution_authority import TurnCapability, current_execution_authority
     from gateway.run import GatewayRunner
     from gateway.session import Platform, SessionContext, SessionSource
 
@@ -148,10 +149,13 @@ def test_exact_teams_control_owner_can_patch_user_owned_skill(skill_root):
     )
     tokens = runner._set_session_env(context)
     try:
+        authority = current_execution_authority()
         result = _patch()
     finally:
         runner._clear_session_env(tokens)
 
+    assert authority.allows(TurnCapability.SKILL_WRITE)
+    assert not authority.allows(TurnCapability.CONTRACT_EXECUTE)
     assert result["success"] is True, result
 
 

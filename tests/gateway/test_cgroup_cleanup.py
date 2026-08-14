@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 from pathlib import Path
 
 import pytest
@@ -51,9 +50,9 @@ class TestReapCgroup:
         count = cgroup_cleanup.reap_cgroup(cgroup_path)
 
         assert count == 2
-        assert (own, signal.SIGKILL) not in killed_pids
-        assert (1001, signal.SIGKILL) in killed_pids
-        assert (1002, signal.SIGKILL) in killed_pids
+        assert (own, cgroup_cleanup._SIGKILL) not in killed_pids
+        assert (1001, cgroup_cleanup._SIGKILL) in killed_pids
+        assert (1002, cgroup_cleanup._SIGKILL) in killed_pids
 
     def test_tolerates_already_exited_pids(self, tmp_path, monkeypatch):
         cgroup_path = "/test.slice/hermes-gateway.service"

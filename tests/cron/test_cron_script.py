@@ -131,7 +131,7 @@ class TestRunJobScript:
             })()
 
         monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
-        success, output = scheduler._run_job_script("test.py", cwd=str(workdir))
+        success, output = scheduler._run_job_script("test.py", workdir=str(workdir))
 
         assert success is True
         assert output == "ok"
@@ -157,7 +157,7 @@ class TestRunJobScript:
             })()
 
         monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
-        success, output = scheduler._run_job_script("test.py", cwd=str(cron_env.parent))
+        success, output = scheduler._run_job_script("test.py", workdir=str(cron_env.parent))
 
         assert success is True
         assert output == "retry-ok"
@@ -166,11 +166,10 @@ class TestRunJobScript:
         # Second call (fallback after PermissionError): still has
         # creationflags (CREATE_NO_WINDOW) — we never do a bare retry.
         assert "creationflags" in calls[1]
-        # The fallback uses CREATE_NO_WINDOW only (0x08000000), the
-        # primary used CREATE_NEW_CONSOLE (0x10) + startupinfo.  Both
-        # suppress visible windows; the numeric values aren't directly
-        # comparable because the primary also sets startupinfo.
-        assert "startupinfo" in calls[0]
+        # Both attempts remain window-less. The compatibility helper now uses
+        # CREATE_NO_WINDOW directly to avoid Windows Terminal ghost windows.
+        assert calls[0]["creationflags"] == scheduler.windows_hide_flags()
+        assert calls[1]["creationflags"] == scheduler.windows_hide_flags()
 
     def test_script_relative_path(self, cron_env):
         from cron.scheduler import _run_job_script
@@ -266,7 +265,7 @@ class TestRunJobScript:
 
         assert success is True
         assert output == "ok"
-        assert captured["argv"] == [str(base_python), str(script.resolve())]
+        assert [Path(arg) for arg in captured["argv"]] == [base_python, script.resolve()]
         assert captured["kwargs"]["creationflags"] == 0x08000000
         env = captured["kwargs"]["env"]
         assert env["VIRTUAL_ENV"] == str(venv)
@@ -303,11 +302,11 @@ class TestRunJobScript:
 
         assert success is True
         assert output == "ok"
-        assert captured["argv"] == [str(python), str(script.resolve())]
+        assert [Path(arg) for arg in captured["argv"]] == [python, script.resolve()]
         assert captured["kwargs"]["encoding"] == "utf-8"
         assert captured["kwargs"]["errors"] == "replace"
 
-    def test_non_windows_script_preserves_default_text_decoding(self, cron_env, monkeypatch):
+    def test_non_windows_script_uses_explicit_utf8_decoding(self, cron_env, monkeypatch):
         from cron import scheduler as sched_mod
         from cron.scheduler import _run_job_script
 
@@ -328,11 +327,11 @@ class TestRunJobScript:
 
         assert success is True
         assert output == "ok"
-        assert captured["argv"] == [sys.executable, str(script.resolve())]
+        assert [Path(arg) for arg in captured["argv"]] == [Path(sys.executable), script.resolve()]
         assert captured["kwargs"]["text"] is True
         assert "creationflags" not in captured["kwargs"]
-        assert "encoding" not in captured["kwargs"]
-        assert "errors" not in captured["kwargs"]
+        assert captured["kwargs"]["encoding"] == "utf-8"
+        assert captured["kwargs"]["errors"] == "replace"
 
     def test_script_empty_output(self, cron_env):
         from cron.scheduler import _run_job_script
@@ -436,8 +435,8 @@ class TestBuildJobPromptWithScript:
         workdir = cron_env.parent
         captured = {}
 
-        def fake_run_script(_path, *, cwd=None):
-            captured["cwd"] = cwd
+        def fake_run_script(_path, *, workdir=None):
+            captured["workdir"] = workdir
             return True, '{"wakeAgent": false}'
 
         monkeypatch.setattr(scheduler, "_run_job_script", fake_run_script)
@@ -452,7 +451,7 @@ class TestBuildJobPromptWithScript:
         assert success is True
         assert final_response == scheduler.SILENT_MARKER
         assert error is None
-        assert captured["cwd"] == str(workdir)
+        assert captured["workdir"] == str(workdir)
 
     def test_no_script_unchanged(self, cron_env):
         from cron.scheduler import _build_job_prompt

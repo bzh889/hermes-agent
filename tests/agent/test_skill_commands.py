@@ -150,6 +150,7 @@ class TestScanSkillCommands:
         assert "/impeccable" in result
         assert message is not None
         assert "Apply impeccable design craft." in message
+        assert "[HERMES_STRATEGY_INDEX]" not in message
 
     def test_get_skill_commands_rescans_when_platform_scope_changes(self, tmp_path):
         """Platform-specific disabled-skill caches must not leak across platforms.
@@ -884,13 +885,14 @@ class TestInlineShellExpansion:
             skill_dir = _make_skill(
                 tmp_path,
                 "dyn-cwd",
-                body="Here: !`pwd`",
+                body="Here: !`test -f cwd-marker.txt && printf CWD_OK`",
             )
+            (skill_dir / "cwd-marker.txt").write_text("marker", encoding="utf-8")
             scan_skill_commands()
             msg = build_skill_invocation_message("/dyn-cwd")
 
         assert msg is not None
-        assert f"Here: {skill_dir}" in msg
+        assert "Here: CWD_OK" in msg
 
     def test_inline_shell_timeout_does_not_break_message(self, tmp_path):
         with (

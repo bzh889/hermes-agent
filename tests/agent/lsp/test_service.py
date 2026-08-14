@@ -7,12 +7,15 @@ on.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agent.lsp.manager import LSPService
+from agent.lsp.workspace import clear_cache
 from agent.lsp.servers import (
     SERVERS,
     ServerContext,
@@ -22,6 +25,25 @@ from agent.lsp.servers import (
 
 
 MOCK_SERVER = str(Path(__file__).parent / "_mock_lsp_server.py")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workspace_ancestry(tmp_path, monkeypatch):
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    real_home_git = Path.home() / ".git"
+    real_exists = Path.exists
+
+    def isolated_exists(path: Path) -> bool:
+        if path == real_home_git:
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", isolated_exists)
+    monkeypatch.chdir(isolated_home)
+    clear_cache()
+    yield
+    clear_cache()
 
 
 def _install_mock_server(monkeypatch, script: str = "errors", server_id: str = "pyright"):
@@ -174,3 +196,63 @@ def test_service_status_includes_clients(mock_pyright):
         assert any(c["server_id"] == "pyright" for c in info["clients"])
     finally:
         svc.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_waiter_does_not_cancel_shared_spawn(monkeypatch):
+    """One timed-out caller must not cancel the owner-managed spawn future."""
+    import agent.lsp.manager as manager
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakeClient:
+        server_id = "fake"
+        workspace_root = "workspace"
+        is_running = True
+
+        async def start(self):
+            started.set()
+            await release.wait()
+
+        async def shutdown(self):
+            return None
+
+    fake_client = FakeClient()
+    fake_server = SimpleNamespace(
+        server_id="fake",
+        resolve_root=lambda file_path, workspace_root: workspace_root,
+        build_spawn=lambda workspace_root, context: SimpleNamespace(
+            workspace_root=workspace_root,
+            command=["fake-lsp"],
+            env={},
+            cwd=workspace_root,
+            initialization_options={},
+            seed_diagnostics_on_first_push=False,
+        ),
+        seed_first_push=False,
+    )
+    monkeypatch.setattr(manager, "find_server_for_file", lambda file_path: fake_server)
+    monkeypatch.setattr(
+        manager,
+        "resolve_workspace_for_file",
+        lambda file_path: ("workspace", True),
+    )
+    monkeypatch.setattr(manager, "LSPClient", lambda **kwargs: fake_client)
+
+    service = LSPService(
+        enabled=False,
+        wait_mode="document",
+        wait_timeout=1.0,
+        install_strategy="manual",
+    )
+    owner = asyncio.create_task(service._get_or_spawn("x.py"))
+    await started.wait()
+    waiter = asyncio.create_task(service._get_or_spawn("x.py"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    release.set()
+    assert await owner is fake_client

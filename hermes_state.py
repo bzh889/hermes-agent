@@ -1227,6 +1227,13 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
 );
 
+CREATE TABLE IF NOT EXISTS strategy_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    trace_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -1276,6 +1283,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestam
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
+CREATE INDEX IF NOT EXISTS idx_strategy_traces_session
+    ON strategy_traces(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 """
@@ -6282,6 +6291,51 @@ class SessionDB:
             return ""
         decoded = self._decode_content(row["content"])
         return decoded if isinstance(decoded, str) else ""
+
+    # =========================================================================
+    # Executable strategy traces
+    # =========================================================================
+
+    def append_strategy_trace(self, session_id: str, trace: Dict[str, Any]) -> int:
+        """Persist a structured strategy trace outside the role message stream."""
+        if not isinstance(trace, dict):
+            raise TypeError("strategy trace must be an object")
+        encoded = json.dumps(trace, ensure_ascii=False, sort_keys=True)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "INSERT INTO strategy_traces(session_id, trace_json, created_at) "
+                "VALUES (?, ?, ?)",
+                (session_id, encoded, time.time()),
+            )
+            return int(cursor.lastrowid)
+
+        return self._execute_write(_do)
+
+    def get_strategy_traces(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return strategy traces in execution order for one session."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, trace_json, created_at FROM strategy_traces "
+                "WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        traces: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                trace = json.loads(row["trace_json"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Ignoring malformed strategy trace id=%s", row["id"])
+                continue
+            if isinstance(trace, dict):
+                traces.append(
+                    {
+                        "id": row["id"],
+                        "trace": trace,
+                        "created_at": row["created_at"],
+                    }
+                )
+        return traces
 
     # =========================================================================
     # Message storage

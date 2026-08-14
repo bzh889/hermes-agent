@@ -111,6 +111,46 @@ class TestRegisterAndDispatch:
         assert result["tool"] == name
         assert result["result_type"] == "NoneType"
 
+    def test_contract_dispatch_normalizes_without_changing_adaptive_dispatch(self):
+        reg = ToolRegistry()
+        raw_result = json.dumps({"content": "hello", "total_lines": 1})
+
+        reg.register(
+            name="read_fixture",
+            toolset="file",
+            schema=_make_schema("read_fixture"),
+            handler=lambda args, **kw: raw_result,
+            contract_operation="file.read",
+            normalized_outcomes={"ok", "not_found"},
+            contract_normalizer=lambda raw: {
+                **json.loads(raw),
+                "outcome": "ok",
+            },
+        )
+
+        assert reg.dispatch("read_fixture", {}) == raw_result
+        assert json.loads(reg.dispatch_contract_operation("file.read", {})) == {
+            "content": "hello",
+            "total_lines": 1,
+            "outcome": "ok",
+        }
+
+    def test_contract_normalizer_failure_is_a_structured_contract_error(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="broken_normalizer",
+            toolset="file",
+            schema=_make_schema("broken_normalizer"),
+            handler=lambda args, **kw: json.dumps({"content": "hello"}),
+            contract_operation="file.read",
+            normalized_outcomes={"ok"},
+            contract_normalizer=lambda raw: (_ for _ in ()).throw(ValueError("bad")),
+        )
+
+        result = json.loads(reg.dispatch_contract_operation("file.read", {}))
+        assert result["error_type"] == "contract_normalization_failed"
+        assert result["operation"] == "file.read"
+
 
 class TestGetDefinitions:
     def test_returns_openai_format(self):

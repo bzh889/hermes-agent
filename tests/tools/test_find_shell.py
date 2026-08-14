@@ -16,6 +16,7 @@ import pytest
 from tools.environments.local import _find_bash, _find_shell
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="$SHELL preference is POSIX-only")
 class TestFindShellPrefersUserShell:
     """_find_shell should prefer $SHELL over bash on POSIX."""
 
@@ -159,6 +160,7 @@ class TestGitBashExternalProgramProbe:
 
         monkeypatch.setattr(local_mod.subprocess, "run", fake_run)
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        monkeypatch.setattr(local_mod, "windows_hide_flags", lambda: 0)
 
         assert local_mod._bash_starts(r"C:\Git\bin\bash.exe") is True
         assert calls[0][0][-1] == "/usr/bin/true; /usr/bin/cat --version >/dev/null"

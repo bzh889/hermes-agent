@@ -1454,6 +1454,11 @@ def init_agent(
     elif not agent.quiet_mode:
         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
 
+    # Decide this service-gated schema once. It never mutates mid-conversation.
+    from agent.strategy_runtime import attach_strategy_execute_tool
+
+    attach_strategy_execute_tool(agent)
+
     # Kanban worker/orchestrator lifecycle guidance is session-static:
     # the dispatcher decides at spawn time whether this process is a kanban
     # worker (kanban_show tool is present iff HERMES_KANBAN_TASK is set).

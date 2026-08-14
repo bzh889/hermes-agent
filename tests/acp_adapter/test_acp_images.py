@@ -10,7 +10,27 @@ from acp.schema import (
     TextResourceContents,
 )
 
-from acp_adapter.server import HermesACPAgent, _content_blocks_to_openai_user_content
+from acp_adapter.server import (
+    HermesACPAgent,
+    _content_blocks_to_openai_user_content,
+    _path_from_file_uri,
+)
+
+
+def test_file_uri_uses_native_windows_drive_path_on_windows(monkeypatch):
+    monkeypatch.setattr("acp_adapter.server._IS_WINDOWS", True)
+
+    path = _path_from_file_uri("file:///C:/Users/example/note.txt")
+    assert path is not None
+    assert path.as_posix() == "C:/Users/example/note.txt"
+
+
+def test_windows_file_uri_maps_to_wsl_mount_on_posix(monkeypatch):
+    monkeypatch.setattr("acp_adapter.server._IS_WINDOWS", False)
+
+    path = _path_from_file_uri("file:///C:/Users/example/note.txt")
+    assert path is not None
+    assert path.as_posix() == "/mnt/c/Users/example/note.txt"
 
 
 def test_acp_image_blocks_convert_to_openai_multimodal_content():
@@ -55,7 +75,7 @@ def test_acp_resource_link_file_is_inlined_as_text(tmp_path):
         "Please read this file\n"
         "[Attached file: Project notes (notes.md)]\n"
         f"URI: {attached.as_uri()}\n\n"
-        "# Notes\n\nAttached file body"
+        + attached.read_bytes().decode("utf-8")
     )
 
 

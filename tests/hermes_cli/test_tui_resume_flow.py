@@ -1139,7 +1139,7 @@ def test_oneshot_subprocess_exits_without_teardown_abort():
     )
 
     assert result.returncode == 0
-    assert result.stdout == b"ok\n"
+    assert result.stdout.splitlines() == [b"ok"]
     # Don't demand byte-empty stderr — an import-time warning from the heavy
     # CLI import chain shouldn't fail this. What matters is no crash traceback.
     assert b"Traceback" not in result.stderr
@@ -1168,7 +1168,7 @@ def test_exit_after_oneshot_bypasses_late_atexit_abort():
     )
 
     assert result.returncode == 0
-    assert result.stdout == b"done\n"
+    assert result.stdout.splitlines() == [b"done"]
 
 
 def test_run_and_exit_oneshot_passes_through_nonzero_return(monkeypatch, main_mod):
@@ -1225,7 +1225,7 @@ def test_main_oneshot_path_bypasses_late_atexit_abort():
     )
 
     assert result.returncode == 0
-    assert result.stdout == b"ok\n"
+    assert result.stdout.splitlines() == [b"ok"]
     assert b"Traceback" not in result.stderr
 
 
@@ -1700,6 +1700,7 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     captured = {}
     active_path_during_call = None
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "inherited-cli-source")
 
     monkeypatch.setattr(
         main_mod,
@@ -1727,6 +1728,7 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert env["HERMES_TUI_PROVIDER"] == "nous"
     assert env["HERMES_INFERENCE_PROVIDER"] == "nous"
     assert env["HERMES_TUI_TOOLSETS"] == "web,terminal"
+    assert env["HERMES_SESSION_SOURCE"] == "tui"
     active_path = Path(env["HERMES_TUI_ACTIVE_SESSION_FILE"])
     assert active_path.name.startswith("hermes-tui-active-session-")
     assert active_path.suffix == ".json"

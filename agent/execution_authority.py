@@ -15,6 +15,7 @@ class TurnCapability(str, Enum):
     """Capabilities granted to the current agent turn."""
 
     SKILL_WRITE = "skill_write"
+    CONTRACT_EXECUTE = "contract_execute"
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,10 @@ class ExecutionAuthority:
         return capability in self.capabilities
 
 
-_SKILL_WRITER = frozenset({TurnCapability.SKILL_WRITE})
+_TUI_OWNER_CAPABILITIES = frozenset(
+    {TurnCapability.SKILL_WRITE, TurnCapability.CONTRACT_EXECUTE}
+)
+_SKILL_OWNER_CAPABILITIES = frozenset({TurnCapability.SKILL_WRITE})
 _NO_CAPABILITIES: FrozenSet[TurnCapability] = frozenset()
 
 
@@ -107,7 +111,7 @@ def current_execution_authority() -> ExecutionAuthority:
         user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip()
         if not platform and not source:
             return _authority(
-                _SKILL_WRITER,
+                _SKILL_OWNER_CAPABILITIES,
                 "local_cli",
                 "direct local owner session",
             )
@@ -117,16 +121,23 @@ def current_execution_authority() -> ExecutionAuthority:
     chat_id = (chat_id or "").strip()
     user_id = (user_id or "").strip()
 
-    if platform == "local" or source == "tui":
+    if source == "tui":
         return _authority(
-            _SKILL_WRITER,
+            _TUI_OWNER_CAPABILITIES,
             "local_tui",
             "trusted local TUI owner session",
         )
 
+    if platform == "local":
+        return _authority(
+            _SKILL_OWNER_CAPABILITIES,
+            "local_cli",
+            "direct local owner session",
+        )
+
     if platform == "teams_mtk" and _teams_mtk_control_owner(chat_id, user_id):
         return _authority(
-            _SKILL_WRITER,
+            _SKILL_OWNER_CAPABILITIES,
             "teams_mtk_control_owner",
             "exact Teams MTK control conversation and owner identity matched",
         )

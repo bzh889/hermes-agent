@@ -280,6 +280,8 @@ class TestHomeDotfilesGuard:
         monkeypatch.setattr(Path, "home", lambda: home)
         cfg = {"agent": {"coding_context": "auto"}}
         assert cc.is_coding_context(platform="cli", cwd=home, config=cfg) is False
+        assert cc.project_facts_for(home) is None
+        assert cc.build_coding_workspace_block(home) == ""
 
     def test_real_project_under_dotfiles_home_still_detects(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
@@ -291,6 +293,12 @@ class TestHomeDotfilesGuard:
         (proj / "package.json").write_text("{}")
         cfg = {"agent": {"coding_context": "auto"}}
         assert cc.is_coding_context(platform="cli", cwd=proj, config=cfg) is True
+
+        facts = cc.project_facts_for(proj)
+        assert facts is not None
+        assert facts["root"] == str(proj.resolve())
+        assert facts["manifests"] == ["package.json"]
+        assert f"Root: {proj.resolve()}" in cc.build_coding_workspace_block(proj)
 
     def test_on_mode_bypasses_the_guard(self, tmp_path, monkeypatch):
         home = tmp_path / "home"

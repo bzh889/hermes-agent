@@ -391,6 +391,18 @@ class TestFailureAttribution:
         )
         from agent.credential_pool import load_pool
 
+        # This unit tests explicit pool-entry attribution. Do not merge the
+        # developer machine's ~/.claude singleton or provider env vars into
+        # the isolated temp auth store.
+        monkeypatch.setattr(
+            "agent.credential_pool._seed_from_singletons",
+            lambda provider, pool_entries: (False, set()),
+        )
+        monkeypatch.setattr(
+            "agent.credential_pool._seed_from_env",
+            lambda provider, pool_entries: (False, set()),
+        )
+
         return load_pool("anthropic")
 
     def _entry(self, idx, key, **overrides):

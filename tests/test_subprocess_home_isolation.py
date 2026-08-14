@@ -11,10 +11,28 @@ See: https://github.com/NousResearch/hermes-agent/issues/29015
 """
 
 import os
+import sys
 import threading
 from pathlib import Path
 
 import hermes_constants
+import pytest
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Known Folder fallback")
+def test_windows_default_home_survives_missing_home_environment(monkeypatch):
+    expected = hermes_constants._get_platform_default_hermes_home()
+
+    for name in (
+        "LOCALAPPDATA",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert hermes_constants._get_platform_default_hermes_home() == expected
 
 
 
@@ -129,8 +147,8 @@ class TestGetSubprocessHome:
         assert home_a is not None
         assert home_b is not None
         assert home_a != home_b
-        assert home_a.endswith("alpha/home")
-        assert home_b.endswith("beta/home")
+        assert Path(home_a) == base / "alpha" / "home"
+        assert Path(home_b) == base / "beta" / "home"
 
     def test_context_override_is_thread_local(self, tmp_path, monkeypatch):
         root = tmp_path / "root"

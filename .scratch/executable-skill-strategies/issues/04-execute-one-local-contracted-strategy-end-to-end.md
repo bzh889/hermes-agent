@@ -4,15 +4,15 @@
 
 **Blocked by:** 02 — Establish per-turn owner Execution Authority through skill maintenance.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] Skill discovery reads only the compact versioned capability index and does not eagerly inject the full strategy manifest.
-- [ ] Explicit skill loading resolves the referenced manifest within the exact skill root and rejects traversal outside that root.
-- [ ] A minimal versioned manifest with one contracted node validates before its first operation runs.
-- [ ] `strategy_execute` is service-gated and present at Agent construction only when executable strategies are available to that eligible session.
-- [ ] The Contract Executor dispatches the declared operation through the real registry and consumes a stable normalized success outcome.
-- [ ] No additional model decision occurs between dispatching the single contracted operation and selecting its sole terminal transition.
-- [ ] The user receives the operation result and a trace records capability, execution mode, node, normalized outcome, terminal state, budget, and manifest digest.
-- [ ] Existing skills without strategy metadata and direct tools without normalized contract operations continue unchanged in Adaptive mode.
-- [ ] The implementation remains provider-neutral and contains no fixture- or product-specific branch in Core.
-- [ ] A high-level `AIAgent.run_conversation` test uses an isolated Hermes home, real skill loading, real registry dispatch, real persistence, and a deterministic fake provider while leaving the executor unmocked.
+- [x] Skill discovery reads only the compact versioned capability index and does not eagerly inject the full strategy manifest.
+- [x] Explicit skill loading resolves the referenced manifest within the exact skill root and rejects traversal outside that root.
+- [x] A minimal versioned manifest with one contracted node validates before its first operation runs.
+- [x] `strategy_execute` is service-gated and present at Agent construction only when executable strategies are available to that eligible session.
+- [x] The Contract Executor dispatches the declared operation through the real registry and consumes a stable normalized success outcome.
+- [x] No additional model decision occurs between dispatching the single contracted operation and selecting its sole terminal transition.
+- [x] The user receives the operation result and a trace records capability, execution mode, node, normalized outcome, terminal state, budget, and manifest digest.
+- [x] Existing skills without strategy metadata and direct tools without normalized contract operations continue unchanged in Adaptive mode.
+- [x] The implementation remains provider-neutral and contains no fixture- or product-specific branch in Core.
+- [x] A high-level `AIAgent.run_conversation` test uses an isolated Hermes home, real skill loading, real registry dispatch, real persistence, and a deterministic fake provider while leaving the executor unmocked.

@@ -8738,7 +8738,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 try:
                     import json as _json
                     from gateway.status import _pid_exists as _is_host_pid_alive
-                    file_watchers = _json.loads(watcher_file.read_text())
+                    file_watchers = _json.loads(
+                        watcher_file.read_text(encoding="utf-8")
+                    )
                     if isinstance(file_watchers, list):
                         for _fw in file_watchers:
                             _fw_sid = _fw.get("session_id", "")
@@ -16053,8 +16055,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         asked to deliver (#20834). Only ``MEDIA:`` directives — the explicit
         attachment contract — trigger post-stream uploads.
         """
-        from urllib.parse import quote as _quote
-
         try:
             # Capture [[as_document]] before extract_media strips it, so the
             # dispatch partition below can route image-extension files
@@ -16096,7 +16096,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if image_paths:
                 try:
-                    images = [(f"file://{_quote(p)}", "") for p in image_paths]
+                    images = [(Path(p).resolve().as_uri(), "") for p in image_paths]
                     await adapter.send_multiple_images(
                         chat_id=event.source.chat_id,
                         images=images,
@@ -17860,8 +17860,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             async_delivery=_async_delivery,
         )
 
-    def _clear_session_env(self, tokens: list) -> None:
-        """Restore session context variables to their pre-handler values."""
+    def _clear_session_env(self, tokens: list | None) -> None:
+        """Restore session vars, tolerating legacy binders that did no work."""
+        if tokens is None:
+            return
         from gateway.session_context import clear_session_vars
         clear_session_vars(tokens)
 
@@ -18781,11 +18783,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             has_new_output = current_output_len > last_output_len
             # For detached sessions (no pipe), treat "process still alive" as
             # having new output — interval_report still fires on uptime progress.
-            if session.detached and not session.exited:
+            is_detached = getattr(session, "detached", False)
+            if is_detached and not session.exited:
                 has_new_output = True
             last_output_len = current_output_len
             logger.debug("_run_process_watcher tick: session=%s detached=%s exited=%s has_new_output=%s output_len=%d",
-                         session_id, session.detached, session.exited, has_new_output, current_output_len)
+                         session_id, is_detached, session.exited, has_new_output, current_output_len)
 
             if session.exited:
                 # --- Agent-triggered completion: inject synthetic message ---
@@ -18926,7 +18929,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if _pf_path and _pf_path.exists():
                             try:
                                 # Read last 10KB — plenty for structured summary parsing
-                                _raw = _pf_path.read_text(errors="replace")[-10240:]
+                                _raw = _pf_path.read_text(
+                                    encoding="utf-8", errors="replace"
+                                )[-10240:]
                             except Exception:
                                 pass
 
@@ -18988,7 +18993,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _ckpt_path = Path(session.cwd) / "data" / "graph_ingest_state.json"
                         if _ckpt_path.exists():
                             try:
-                                _ckpt_data = json.loads(_ckpt_path.read_text(errors="replace"))
+                                _ckpt_data = json.loads(
+                                    _ckpt_path.read_text(
+                                        encoding="utf-8", errors="replace"
+                                    )
+                                )
                                 _ckpt_errors = len(_ckpt_data.get("errors", []))
                                 _ckpt_pending_images = len(_ckpt_data.get("pending_images", {}))
                                 _ckpt_done_pages = len(_ckpt_data.get("done_pages", []))
@@ -23873,7 +23882,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _delivery_result = response if isinstance(response, dict) else (result or {})
                     _previewed = bool(_delivery_result.get("response_previewed"))
                     first_response = _delivery_result.get("final_response", "")
-                    _already_streamed = _stream_confirmed_final_delivery(
+                    _already_streamed = await _stream_confirmed_final_delivery(
                         _sc,
                         first_response,
                         previewed=_previewed,

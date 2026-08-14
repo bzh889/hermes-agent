@@ -62,6 +62,12 @@ def _build_agent(shared_client=None):
     agent._client_lock = threading.RLock()
     agent._client_kwargs = {"api_key": "***", "base_url": agent.base_url}
     agent.client = shared_client or FakeSharedClient(lambda **kwargs: {"shared": True})
+    # These tests exercise OpenAI client ownership, not the real TLS/proxy
+    # transport constructor.  Building an actual httpx.Client here can take
+    # longer than the stale-call threshold on Windows; the test then returns
+    # while its worker is still constructing the client and that orphan can
+    # consume the next test's monkeypatched OpenAI factory.
+    agent._build_keepalive_http_client = lambda *args, **kwargs: None
     agent.stream_delta_callback = None
     agent._stream_callback = None
     agent.reasoning_callback = None
@@ -97,7 +103,9 @@ def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
 
 def test_stale_non_stream_close_is_single_owner(monkeypatch):
     def slow_responder(**kwargs):
-        time.sleep(0.1)
+        # interruptible_api_call polls every 0.3s.  Stay in-flight long enough
+        # to exercise the stale detector and its stranger-thread abort path.
+        time.sleep(0.5)
         raise _connection_error()
 
     request_client = FakeRequestClient(slow_responder)

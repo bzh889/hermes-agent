@@ -6038,13 +6038,12 @@ def refresh_agent_mcp_tools(
     swap).
 
     Crucially it is **additive-preserving**: ``get_tool_definitions`` returns
-    only the registry-derived tools, but ``agent_init`` appends two further
-    families directly onto ``agent.tools`` *after* that — external
-    memory-provider tools (mem0/honcho/…) and context-engine tools
-    (``lcm_*``).  A naive ``agent.tools = get_tool_definitions(...)`` would
-    silently DELETE those.  So after rebuilding the registry set we re-run the
-    same post-build injectors ``agent_init`` used, reconstructing the full
-    surface.  The new ``(tools, valid_tool_names)`` pair is published together
+    only registry-derived tools, but construction can append external memory
+    tools, context-engine tools (``lcm_*``), and schemas whose availability is
+    fixed for the conversation.  A naive assignment would silently DELETE
+    those.  After rebuilding the registry set we therefore restore every
+    post-build family, reconstructing the full surface.  The new
+    ``(tools, valid_tool_names)`` pair is published together
     under ``_agent_tools_lock`` so a concurrent reader never sees a
     cross-attribute half-swap.
 
@@ -6094,14 +6093,16 @@ def refresh_agent_mcp_tools(
     new_names = {t["function"]["name"] for t in new_defs}
 
     # Re-append the post-build injected families that get_tool_definitions does
-    # NOT reproduce, so a refresh never strips them (memory-provider + context-
-    # engine tools). Staged entirely on LOCALS — the live ``agent.tools`` /
+    # NOT reproduce, so a refresh never strips them (memory-provider, context-
+    # engine, and construction-static tools). Staged entirely on LOCALS — the
+    # live ``agent.tools`` /
     # ``valid_tool_names`` / ``_context_engine_tool_names`` are never touched
     # until the single atomic publish below, so a concurrent reader
     # (``build_api_kwargs``) can't see a partial rebuild or a cross-attribute
     # half-swap. ``staged_engine_names`` are the context-engine routing names
     # this rebuild actually appended (matching agent_init's dedup-aware add).
     staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
+    _reinject_construction_static_tools(agent, new_defs, new_names)
 
     # Single atomic read-diff-publish so the returned ``added`` is consistent
     # with what was actually published, even under concurrent callers, and a
@@ -6203,6 +6204,29 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
         logger.debug("Context-engine tool re-injection skipped", exc_info=True)
 
     return staged_engine_names
+
+
+def _reinject_construction_static_tools(agent, tools_list: list, name_set: set) -> None:
+    """Restore schemas whose availability was fixed at agent construction.
+
+    These schemas are deliberately not re-evaluated during an MCP refresh: doing
+    so would change the provider tool prefix mid-conversation.  A construction
+    snapshot also wins a late registry name collision so its schema stays exact.
+    """
+    for wrapped in getattr(agent, "_construction_static_tools", ()) or ():
+        if not isinstance(wrapped, dict):
+            continue
+        function = wrapped.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        if not name:
+            continue
+        tools_list[:] = [
+            tool
+            for tool in tools_list
+            if tool.get("function", {}).get("name") != name
+        ]
+        tools_list.append(wrapped)
+        name_set.add(name)
 
 
 def shutdown_mcp_servers():

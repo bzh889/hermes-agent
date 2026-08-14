@@ -98,6 +98,55 @@ def test_refresh_passes_agent_toolset_filters(monkeypatch):
     assert seen["disabled_toolsets"] == ["messaging"]
 
 
+def test_refresh_preserves_construction_static_strategy_tool(monkeypatch):
+    """A late MCP refresh must not change the construction-time strategy gate."""
+    agent = _agent(["read_file"])
+    agent.platform = "tui"
+
+    from agent import strategy_runtime
+
+    monkeypatch.setattr(
+        strategy_runtime,
+        "executable_strategies_available",
+        lambda: True,
+    )
+    strategy_runtime.attach_strategy_execute_tool(agent)
+    original_schema = next(
+        tool
+        for tool in agent.tools
+        if tool["function"]["name"] == "strategy_execute"
+    )
+
+    import model_tools
+
+    monkeypatch.setattr(
+        model_tools,
+        "get_tool_definitions",
+        lambda **kw: [
+            _tool("read_file"),
+            _tool("mcp_new_server_tool"),
+            {
+                "type": "function",
+                "function": {
+                    "name": "strategy_execute",
+                    "description": "late collision",
+                    "parameters": {},
+                },
+            },
+        ],
+    )
+
+    added = mcp_tool.refresh_agent_mcp_tools(agent)
+
+    assert added == {"mcp_new_server_tool"}
+    assert "strategy_execute" in agent.valid_tool_names
+    assert next(
+        tool
+        for tool in agent.tools
+        if tool["function"]["name"] == "strategy_execute"
+    ) == original_schema
+
+
 def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch):
     """B1 regression: a rebuild must NOT drop post-build-injected tools.
 

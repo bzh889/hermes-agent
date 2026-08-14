@@ -378,13 +378,39 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -
 
 
 def _ensure_reference_path_allowed(path: Path) -> None:
-    from hermes_constants import get_hermes_home
-    home = Path(os.path.expanduser("~")).resolve()
+    from hermes_constants import get_hermes_home, get_real_home
+
+    # Windows' expanduser() prefers USERPROFILE while Git Bash and subprocesses
+    # may use HOME. Credentials can live under either root, so protect the union
+    # rather than whichever home resolver happens to win on this host.
+    home_values = {
+        get_real_home(),
+        os.environ.get("HOME", ""),
+        os.environ.get("USERPROFILE", ""),
+        os.path.expanduser("~"),
+    }
+    home_drive = os.environ.get("HOMEDRIVE", "")
+    home_path = os.environ.get("HOMEPATH", "")
+    if home_drive and home_path:
+        home_values.add(f"{home_drive}{home_path}")
+    homes = {
+        Path(value).resolve()
+        for value in home_values
+        if value and value != "~"
+    }
     hermes_home = get_hermes_home().resolve()
 
-    blocked_exact = {home / rel for rel in _SENSITIVE_HOME_FILES}
+    blocked_exact = {
+        home / rel
+        for home in homes
+        for rel in _SENSITIVE_HOME_FILES
+    }
     blocked_exact.add(hermes_home / ".env")
-    blocked_dirs = [home / rel for rel in _SENSITIVE_HOME_DIRS]
+    blocked_dirs = [
+        home / rel
+        for home in homes
+        for rel in _SENSITIVE_HOME_DIRS
+    ]
     blocked_dirs.extend(hermes_home / rel for rel in _SENSITIVE_HERMES_DIRS)
 
     if path in blocked_exact:

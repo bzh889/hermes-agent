@@ -602,7 +602,12 @@ def _resolve_provider_vision_default(provider: str) -> Optional[str]:
 # api.kimi.com/coding (Anthropic Messages wire) which Kimi's own docs
 # describe as having no image_in capability. Vision lives on the separate
 # Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).  See #17076.
+#
+# deepseek: the official api.deepseek.com endpoint currently exposes text /
+# reasoning models only.  Unknown providers remain permissive, but this known
+# endpoint must never receive OpenAI-style image_url parts (#31179).
 _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
+    "deepseek",
     "kimi-coding",
     "kimi-coding-cn",
 })

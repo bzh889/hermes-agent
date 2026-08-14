@@ -599,15 +599,31 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         resolved = filepath
-    normalized = os.path.normpath(_expand_tilde(filepath))
+    expanded = _expand_tilde(filepath)
+    normalized = os.path.normpath(expanded)
+    # V4A headers may carry an absolute POSIX path even when the host process
+    # runs on Windows (for example a container path).  Host ``normpath`` turns
+    # ``/etc/passwd`` into ``\\etc\\passwd`` and would otherwise erase the
+    # lexical root before the POSIX denylist sees it.  Compare both flavours;
+    # ``posixpath.normpath`` leaves ordinary drive-qualified Windows paths
+    # unchanged, so this does not broaden the denylist for native paths.
+    posix_normalized = posixpath.normpath(expanded.replace("\\", "/"))
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
     for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+        if (
+            resolved.startswith(prefix)
+            or normalized.startswith(prefix)
+            or posix_normalized.startswith(prefix)
+        ):
             return _err
-    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
+    if (
+        resolved in _SENSITIVE_EXACT_PATHS
+        or normalized in _SENSITIVE_EXACT_PATHS
+        or posix_normalized in _SENSITIVE_EXACT_PATHS
+    ):
         return _err
     # Prevent agents from modifying the Hermes config file directly.
     # approvals.mode and other security settings live here; a malicious or
@@ -2052,6 +2068,30 @@ def _handle_read_file(args, **kw):
     return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
 
 
+def _normalize_read_file_contract(raw: str | dict) -> dict:
+    """Map ordinary ``read_file`` output to its finite contract vocabulary."""
+    payload = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    error = str(payload.get("error", "")).lower()
+    if not error:
+        outcome = "ok"
+    elif "not found" in error or "no such file" in error:
+        outcome = "not_found"
+    elif any(
+        marker in error
+        for marker in (
+            "denied",
+            "blocked",
+            "credential",
+            "protected",
+            "device file",
+        )
+    ):
+        outcome = "denied"
+    else:
+        outcome = "error"
+    return {**payload, "outcome": outcome}
+
+
 def _handle_write_file(args, **kw):
     tid = kw.get("task_id") or "default"
     if not args.get("path") or not isinstance(args.get("path"), str):
@@ -2101,7 +2141,18 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
-registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
+registry.register(
+    name="read_file",
+    toolset="file",
+    schema=READ_FILE_SCHEMA,
+    handler=_handle_read_file,
+    check_fn=_check_file_reqs,
+    emoji="📖",
+    max_result_size_chars=100_000,
+    contract_operation="file.read",
+    normalized_outcomes={"ok", "not_found", "denied", "error"},
+    contract_normalizer=_normalize_read_file_contract,
+)
 registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
 registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
 registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)

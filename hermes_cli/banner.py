@@ -37,10 +37,21 @@ _RST = "\033[0m"
 
 
 def cprint(text: str):
-    """Print ANSI-colored text through prompt_toolkit's renderer."""
+    """Print ANSI text, falling back when no interactive console exists."""
     from prompt_toolkit import print_formatted_text as _pt_print
     from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
-    _pt_print(_PT_ANSI(text))
+
+    try:
+        _pt_print(_PT_ANSI(text))
+    except Exception:
+        # Headless Windows subprocesses have stdout but no console screen
+        # buffer, so prompt_toolkit cannot construct Win32Output. Display must
+        # never turn a completed operation (for example secret storage) into a
+        # failure; match the classic CLI's best-effort output behavior.
+        try:
+            print(text)
+        except Exception:
+            pass
 
 
 # =========================================================================

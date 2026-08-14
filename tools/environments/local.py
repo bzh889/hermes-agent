@@ -14,7 +14,10 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hidden_console_popen_kwargs
+from hermes_cli._subprocess_compat import (
+    windows_hidden_console_popen_kwargs,
+    windows_hide_flags,
+)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -1337,6 +1340,10 @@ class LocalEnvironment(BaseEnvironment):
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
         cwd = _resolve_local_initial_cwd(cwd)
         super().__init__(cwd=cwd, timeout=timeout, env=env)
+        # Git Bash login startup on Windows can legitimately take over 30s on
+        # cold or loaded hosts.  Keep the base budget everywhere else, but
+        # avoid misclassifying a slow Windows login shell as unusable.
+        self._snapshot_timeout = 60 if _IS_WINDOWS else BaseEnvironment._snapshot_timeout
         self.init_session()
 
     def get_temp_dir(self) -> str:

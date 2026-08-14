@@ -111,6 +111,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -448,13 +449,25 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         "error": None,
     }
     try:
-        argv = shlex.split(os.path.expanduser(spec.command))
+        argv = shlex.split(spec.command, posix=not IS_WINDOWS)
     except ValueError as exc:
         result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
         return result
     if not argv:
         result["error"] = "empty command"
         return result
+
+    argv = [_expand_shell_home(part.strip("'\"")) for part in argv]
+    if IS_WINDOWS:
+        # Native Windows cannot execute a shebang script directly. Hermes
+        # runs under Git Bash on Windows, so route bare shell hooks through
+        # bash while preserving shell=False and the original argv.
+        if Path(argv[0]).suffix.lower() in {
+            ".sh", ".bash", ".zsh", ".fish",
+        }:
+            bash = shutil.which("bash")
+            if bash:
+                argv.insert(0, bash)
 
     t0 = time.monotonic()
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
@@ -813,11 +826,12 @@ def _command_script_path(command: str) -> str:
     common bare-path form.
     """
     try:
-        parts = shlex.split(command)
+        parts = shlex.split(command, posix=not IS_WINDOWS)
     except ValueError:
         return command
     if not parts:
         return command
+    parts = [part.strip("'\"") for part in parts]
     for part in parts:
         if part.lower().endswith(_SCRIPT_EXTENSIONS):
             return part
@@ -825,6 +839,22 @@ def _command_script_path(command: str) -> str:
         if "/" in part or part.startswith("~"):
             return part
     return parts[0]
+
+
+def _expand_shell_home(path: str) -> str:
+    """Expand plain ``~`` using the shell HOME before OS account fallback.
+
+    Python 3.12 on Windows intentionally ignores ``HOME`` in ``expanduser``
+    and prefers ``USERPROFILE``.  Hermes executes hooks through Git Bash,
+    where ``HOME`` is authoritative, so approval and drift checks must resolve
+    the same path that the runtime command resolves.
+    """
+    if path == "~" or path.startswith(("~/", "~\\")):
+        home = os.environ.get("HOME")
+        if home:
+            suffix = path[2:] if len(path) > 1 else ""
+            return os.path.join(home, suffix) if suffix else home
+    return os.path.expanduser(path)
 
 
 # ---------------------------------------------------------------------------
@@ -877,7 +907,7 @@ def script_mtime_iso(command: str) -> Optional[str]:
     if not path:
         return None
     try:
-        expanded = os.path.expanduser(path)
+        expanded = _expand_shell_home(path)
         return datetime.fromtimestamp(
             os.path.getmtime(expanded), tz=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
@@ -896,15 +926,28 @@ def script_is_executable(command: str) -> bool:
     path = _command_script_path(command)
     if not path:
         return False
-    expanded = os.path.expanduser(path)
+    expanded = _expand_shell_home(path)
     if not os.path.isfile(expanded):
         return False
     try:
-        argv = shlex.split(command)
+        argv = shlex.split(command, posix=not IS_WINDOWS)
     except ValueError:
         return False
+    argv = [part.strip("'\"") for part in argv]
     is_bare_invocation = bool(argv) and argv[0] == path
-    required = os.X_OK if is_bare_invocation else os.R_OK
+    # Bare shell scripts are run through bash on Windows, so readability is
+    # sufficient for those. Other bare files still need to be executable.
+    is_windows_shell_script = (
+        IS_WINDOWS
+        and Path(path).suffix.lower() in {".sh", ".bash", ".zsh", ".fish"}
+    )
+    if IS_WINDOWS and is_bare_invocation and not is_windows_shell_script:
+        return False
+    required = (
+        os.R_OK
+        if not is_bare_invocation or is_windows_shell_script
+        else os.X_OK
+    )
     return os.access(expanded, required)
 
 

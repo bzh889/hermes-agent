@@ -2262,6 +2262,10 @@ def _launch_tui(
     import tempfile
 
     env = os.environ.copy()
+    # The child is the trusted local TUI regardless of a generic --source tag
+    # inherited by the Python launcher.  Execution authority is derived from
+    # this runtime-owned value, never from model input.
+    env["HERMES_SESSION_SOURCE"] = "tui"
     try:
         from hermes_cli.config import apply_terminal_config_to_env
         apply_terminal_config_to_env(env=env)

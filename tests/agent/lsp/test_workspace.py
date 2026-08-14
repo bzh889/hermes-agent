@@ -17,7 +17,23 @@ from agent.lsp.workspace import (
 
 
 @pytest.fixture(autouse=True)
-def _clear():
+def _clear(tmp_path: Path, monkeypatch):
+    # The developer's real home may itself be a git worktree.  Keep tests
+    # that assert "outside any repo" under an isolated filesystem root.
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    real_home_git = Path.home() / ".git"
+    real_exists = Path.exists
+
+    def isolated_exists(path: Path) -> bool:
+        if path == real_home_git:
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", isolated_exists)
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("USERPROFILE", str(isolated_home))
+    monkeypatch.chdir(isolated_home)
     clear_cache()
     yield
     clear_cache()
@@ -133,7 +149,9 @@ def test_resolve_workspace_falls_back_to_file_location(tmp_path: Path, monkeypat
     assert gated is True
 
 
-def test_normalize_path_expands_tilde(monkeypatch):
-    monkeypatch.setenv("HOME", "/home/user")
+def test_normalize_path_expands_tilde(tmp_path: Path, monkeypatch):
+    expected_home = tmp_path / "home" / "user"
+    monkeypatch.setenv("HOME", str(expected_home))
+    monkeypatch.setenv("USERPROFILE", str(expected_home))
     p = normalize_path("~/x.py")
-    assert p == os.path.abspath("/home/user/x.py")
+    assert p == os.path.abspath(str(expected_home / "x.py"))

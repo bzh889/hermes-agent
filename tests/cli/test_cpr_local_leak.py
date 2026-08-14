@@ -42,6 +42,7 @@ class TestClassicCliOutputSelection:
     def test_application_receives_cpr_not_supported_without_ssh(self, monkeypatch):
         """Classic-CLI Application construction must get CPR-disabled output."""
         from prompt_toolkit.application import Application
+        from prompt_toolkit.input import DummyInput
         from prompt_toolkit.layout import FormattedTextControl, Layout, Window
         from prompt_toolkit.renderer import CPR_Support
 
@@ -51,6 +52,7 @@ class TestClassicCliOutputSelection:
 
         app = Application(
             layout=Layout(Window(FormattedTextControl("x"))),
+            input=DummyInput(),
             output=out,
             full_screen=False,
         )

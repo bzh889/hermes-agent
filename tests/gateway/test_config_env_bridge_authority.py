@@ -56,10 +56,22 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
     )
     env = dict(initial_env)
     env["HERMES_HOME"] = str(hermes_home)
-    # Keep PATH / PYTHONPATH so venv imports resolve.
-    for k in ("PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME"):
+    # Keep import paths plus the minimal Windows OS environment. In
+    # particular, Winsock cannot initialize without SYSTEMROOT (WinError
+    # 10106), so stripping it makes the gateway import fail before the config
+    # bridge under test can run.
+    for k in (
+        "PATH", "PYTHONPATH", "VIRTUAL_ENV",
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+    ):
         if k in os.environ and k not in env:
             env[k] = os.environ[k]
+    # Keep all home-directory discovery inside the test sandbox. Python on
+    # POSIX uses HOME; Python on Windows uses USERPROFILE (or HOMEDRIVE plus
+    # HOMEPATH) and otherwise raises before gateway.run can be imported.
+    isolated_home = str(hermes_home.parent)
+    env["HOME"] = isolated_home
+    env["USERPROFILE"] = isolated_home
 
     result = subprocess.run(
         [sys.executable, "-c", script],

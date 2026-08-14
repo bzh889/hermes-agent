@@ -1,6 +1,8 @@
 """Tests for gateway/platforms/base.py — MessageEvent, media extraction, message truncation."""
 
+import errno
 import os
+import sys
 import time
 from unittest.mock import patch
 
@@ -1510,7 +1512,15 @@ class TestMediaDeliveryDefaultMode:
         workdir = fake_home / "work"
         workdir.mkdir()
         link = workdir / "innocent.pdf"
-        link.symlink_to(key)
+        try:
+            link.symlink_to(key)
+        except OSError as exc:
+            if sys.platform == "win32" and (
+                getattr(exc, "winerror", None) == 1314
+                or exc.errno in {errno.EPERM, errno.EACCES}
+            ):
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
             "gateway.platforms.base._MEDIA_DELIVERY_DENIED_PREFIXES",
@@ -2001,11 +2011,11 @@ class TestMediaDeliveryDiagnosability:
 
     def test_canonical_cache_roots_present(self):
         from gateway.platforms.base import MEDIA_DELIVERY_SAFE_ROOTS
-        roots = {str(r) for r in MEDIA_DELIVERY_SAFE_ROOTS}
-        assert any(r.endswith("cache/images") for r in roots)
-        assert any(r.endswith("cache/documents") for r in roots)
+        roots = {tuple(r.parts) for r in MEDIA_DELIVERY_SAFE_ROOTS}
+        assert any(r[-2:] == ("cache", "images") for r in roots)
+        assert any(r[-2:] == ("cache", "documents") for r in roots)
         # Legacy layout still present.
-        assert any(r.endswith("image_cache") for r in roots)
+        assert any(r[-1:] == ("image_cache",) for r in roots)
 
 
 # ---------------------------------------------------------------------------

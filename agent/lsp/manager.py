@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from agent.lsp import eventlog
 from agent.lsp.client import (
     DIAGNOSTICS_DOCUMENT_WAIT,
+    INITIALIZE_TIMEOUT,
     LSPClient,
 )
 from agent.lsp.servers import (
@@ -343,7 +344,16 @@ class LSPService:
         server_id = srv.server_id if srv else "?"
 
         try:
-            t = timeout if timeout is not None else self._wait_timeout + 2.0
+            # The configured wait timeout governs post-open diagnostic
+            # freshness, not cold server startup.  Keep an independent
+            # outer budget so a healthy server can spawn and use its full
+            # initialize allowance even when the user selects a short
+            # diagnostics budget.  Explicit caller timeouts still win.
+            t = (
+                timeout
+                if timeout is not None
+                else INITIALIZE_TIMEOUT + self._wait_timeout + 3.0
+            )
             diags = self._loop.run(self._open_and_wait_async(file_path), timeout=t)
         except asyncio.TimeoutError as e:
             eventlog.log_timeout(server_id, file_path)
@@ -544,7 +554,9 @@ class LSPService:
             spawning = self._spawning.get(key)
         if spawning is not None:
             try:
-                return await spawning
+                # The first caller owns this shared future.  A later caller
+                # timing out must not cancel the in-flight spawn for everyone.
+                return await asyncio.shield(spawning)
             except Exception:  # noqa: BLE001
                 return None
 
@@ -582,10 +594,23 @@ class LSPService:
             )
             try:
                 await client.start()
+            except asyncio.CancelledError:
+                # The synchronous caller can time out while start() still owns
+                # a live subprocess.  The client is not in _clients yet, so
+                # service shutdown cannot discover it; clean it up here before
+                # propagating cancellation to the outer timeout handler.
+                await client.shutdown()
+                if not spawn_future.done():
+                    spawn_future.cancel()
+                raise
             except Exception as e:  # noqa: BLE001
+                # start() can fail after spawning the process.  As above, the
+                # client is not registered yet and must be torn down locally.
+                await client.shutdown()
                 eventlog.log_spawn_failed(srv.server_id, per_server_root, e)
                 self._broken.add(key)
-                spawn_future.set_result(None)
+                if not spawn_future.done():
+                    spawn_future.set_result(None)
                 return None
             with self._state_lock:
                 self._clients[key] = client

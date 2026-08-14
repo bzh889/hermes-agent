@@ -251,14 +251,12 @@ def test_unknown_base_cmd_returns_false():
 def test_check_lint_returns_skipped_when_npx_tsc_unusable(tmp_path):
     """Integration: _check_lint sees npx exit non-zero with the npx banner
     and returns a ``skipped`` LintResult so LSP can still run."""
-    from tools.environments.local import LocalEnvironment
     from tools.file_operations import ShellFileOperations
 
     ts_file = tmp_path / "bad.ts"
     ts_file.write_text("const x: string = 42;\n")
 
-    env = LocalEnvironment()
-    fops = ShellFileOperations(env)
+    fops = ShellFileOperations.__new__(ShellFileOperations)
 
     # Patch _exec to simulate ``npx tsc`` failing because tsc is missing.
     npx_banner = (
@@ -272,7 +270,8 @@ def test_check_lint_returns_skipped_when_npx_tsc_unusable(tmp_path):
         result.stdout = npx_banner
         return result
 
-    with patch.object(fops, "_exec", side_effect=fake_exec), \
+    with patch.object(fops, "_lsp_will_handle", return_value=False), \
+         patch.object(fops, "_exec", side_effect=fake_exec), \
          patch.object(fops, "_has_command", return_value=True):
         lint = fops._check_lint(str(ts_file))
 
@@ -285,14 +284,12 @@ def test_check_lint_returns_skipped_when_npx_tsc_unusable(tmp_path):
 
 def test_check_lint_returns_error_for_real_ts_type_errors(tmp_path):
     """Sanity: real TypeScript errors still go through the error path."""
-    from tools.environments.local import LocalEnvironment
     from tools.file_operations import ShellFileOperations
 
     ts_file = tmp_path / "bad.ts"
     ts_file.write_text("const x: string = 42;\n")
 
-    env = LocalEnvironment()
-    fops = ShellFileOperations(env)
+    fops = ShellFileOperations.__new__(ShellFileOperations)
 
     real_tsc_error = (
         "bad.ts:1:7 - error TS2322: Type 'number' is not assignable to type 'string'.\n"
@@ -307,7 +304,8 @@ def test_check_lint_returns_error_for_real_ts_type_errors(tmp_path):
         result.stdout = real_tsc_error
         return result
 
-    with patch.object(fops, "_exec", side_effect=fake_exec), \
+    with patch.object(fops, "_lsp_will_handle", return_value=False), \
+         patch.object(fops, "_exec", side_effect=fake_exec), \
          patch.object(fops, "_has_command", return_value=True):
         lint = fops._check_lint(str(ts_file))
 

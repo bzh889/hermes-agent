@@ -70,10 +70,9 @@ function mount(
 /** Render a SubscriptionOverlay to a string via renderSync + PassThrough. */
 function render(overlay: SubscriptionOverlayState): string {
   const mounted = mount(overlay)
-  const output = mounted.output()
   mounted.cleanup()
 
-  return output
+  return mounted.output()
 }
 
 const TIERS = [
@@ -600,15 +599,15 @@ describe('SubscriptionOverlay — upgrade response mapping', () => {
       )
 
       const result = { message: 'Upgraded to Ultra.', ok: true, pendingTierId: 'ultra' }
+      expect(render(at('result', subscriber(), { ctx: { ...ctx, refreshState }, result }))).toContain('Applying…')
       const mounted = mount(at('result', subscriber(), { ctx: { ...ctx, refreshState }, result }))
 
-      expect(mounted.output()).toContain('Applying…')
       await vi.advanceTimersByTimeAsync(2000)
       mounted.rerender()
       expect(refreshState).toHaveBeenCalledTimes(1)
+      mounted.cleanup()
       expect(mounted.output()).toContain('Done')
       expect(mounted.output()).toContain('Upgraded to Ultra.')
-      mounted.cleanup()
     } finally {
       vi.useRealTimers()
     }
@@ -625,10 +624,10 @@ describe('SubscriptionOverlay — upgrade response mapping', () => {
       await vi.advanceTimersByTimeAsync(30_000)
       mounted.rerender()
       expect(refreshState).toHaveBeenCalledTimes(15)
+      mounted.cleanup()
       expect(mounted.output()).toContain('Still applying')
       expect(mounted.output()).toContain('refresh in a moment')
       expect(mounted.output()).not.toContain('Could not complete')
-      mounted.cleanup()
     } finally {
       vi.useRealTimers()
     }

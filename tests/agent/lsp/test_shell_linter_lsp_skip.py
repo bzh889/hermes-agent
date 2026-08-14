@@ -38,9 +38,13 @@ import pytest
 
 
 def _make_fops():
-    from tools.environments.local import LocalEnvironment
     from tools.file_operations import ShellFileOperations
-    return ShellFileOperations(LocalEnvironment())
+
+    # These tests replace every backend-facing method they exercise.  Avoid
+    # constructing LocalEnvironment here: it bootstraps a real shell session
+    # for each parametrized case, turning a pure routing unit test into a
+    # multi-minute integration test on Windows.
+    return ShellFileOperations.__new__(ShellFileOperations)
 
 
 @pytest.mark.parametrize("ext", [".ts", ".go", ".rs"])

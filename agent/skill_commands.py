@@ -364,7 +364,19 @@ def _build_skill_message(
         parts.append("")
         parts.append(f"[Runtime note: {runtime_note}]")
 
-    return "\n".join(parts)
+    message = "\n".join(parts)
+    try:
+        from agent.strategy_runtime import activate_strategy_message
+
+        raw_skill = str(
+            loaded_skill.get("raw_content") or loaded_skill.get("content") or ""
+        )
+        message = activate_strategy_message(message, raw_skill, skill_dir)
+    except Exception:
+        # Strategy metadata is optional and the full manifest is validated by
+        # the executor. Ordinary skill invocation remains backward compatible.
+        pass
+    return message
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:

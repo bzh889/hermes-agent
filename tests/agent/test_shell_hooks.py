@@ -359,7 +359,7 @@ class TestCallbackSubprocess:
         script = _write_script(
             tmp_path, "log.sh",
             f"#!/usr/bin/env bash\n"
-            f"echo \"$(cat -)\" >> {calls}\n"
+            f"echo \"$(cat -)\" >> '{calls.as_posix()}'\n"
             f"printf '{{}}\\n'\n",
         )
         spec = shell_hooks.ShellHookSpec(
@@ -379,7 +379,7 @@ class TestCallbackSubprocess:
         capture = tmp_path / "payload.json"
         script = _write_script(
             tmp_path, "capture.sh",
-            f"#!/usr/bin/env bash\ncat - > {capture}\nprintf '{{}}\\n'\n",
+            f"#!/usr/bin/env bash\ncat - > '{capture.as_posix()}'\nprintf '{{}}\\n'\n",
         )
         spec = shell_hooks.ShellHookSpec(
             event="pre_tool_call", command=str(script),
@@ -431,6 +431,35 @@ class TestCallbackSubprocess:
         cb = shell_hooks._make_callback(spec)
         # No crash = shlex parsed it correctly.
         assert cb(tool_name="terminal") is None  # empty object parses to None
+
+    @pytest.mark.skipif(not shell_hooks.IS_WINDOWS, reason="Windows shebang handling")
+    def test_windows_shell_script_with_arguments_runs_through_bash(self, tmp_path):
+        dir_with_space = tmp_path / "path with space"
+        dir_with_space.mkdir()
+        script = _write_script(
+            dir_with_space, "with_args.sh",
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = \"--flag\" ]; then\n"
+            "  printf '{\"context\": \"flag-ok\"}\\n'\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n",
+        )
+        spec = shell_hooks.ShellHookSpec(
+            event="pre_llm_call",
+            command=f'"{script}" --flag',
+        )
+
+        result = shell_hooks._make_callback(spec)(
+            session_id="s1",
+            user_message="hello",
+            conversation_history=[],
+            is_first_turn=True,
+            model="test-model",
+            platform="cli",
+        )
+
+        assert result == {"context": "flag-ok"}
 
     def test_missing_binary_logged_not_raised(self, tmp_path):
         spec = shell_hooks.ShellHookSpec(
@@ -695,7 +724,12 @@ class TestAllowlistConcurrency:
 
         # Flip +x; bare invocation is now runnable too.
         script.chmod(0o755)
-        assert shell_hooks.script_is_executable(str(script))
+        if shell_hooks.IS_WINDOWS:
+            # Windows has no POSIX executable bit and a bare .py file is not a
+            # runnable command. Interpreter-prefixed invocation remains valid.
+            assert not shell_hooks.script_is_executable(str(script))
+        else:
+            assert shell_hooks.script_is_executable(str(script))
 
     def test_command_script_path_resolution(self):
         """Regression: ``_command_script_path`` used to return the first

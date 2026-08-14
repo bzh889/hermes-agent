@@ -447,6 +447,20 @@ class TestGitBashCoreutilsOnPath:
 # ---------------------------------------------------------------------------
 
 class TestWrapCommandWindowsNativeCwd:
+    def test_windows_local_snapshot_budget_allows_slow_git_bash_startup(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        with patch.object(LocalEnvironment, "init_session", autospec=True):
+            env = LocalEnvironment(cwd=os.getcwd(), timeout=10)
+
+        assert env._snapshot_timeout == 60
+
+    def test_posix_local_snapshot_budget_keeps_base_default(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
+        with patch.object(LocalEnvironment, "init_session", autospec=True):
+            env = LocalEnvironment(cwd=os.getcwd(), timeout=10)
+
+        assert env._snapshot_timeout == BaseEnvironment._snapshot_timeout
+
     def test_wrap_command_converts_native_cwd_for_builtin_cd(self, monkeypatch):
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
 

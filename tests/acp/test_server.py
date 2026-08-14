@@ -53,8 +53,16 @@ def mock_manager():
 
 @pytest.fixture()
 def agent(mock_manager):
-    """HermesACPAgent backed by a mock session manager."""
-    return HermesACPAgent(session_manager=mock_manager)
+    """HermesACPAgent backed by a mock session manager.
+
+    Model inventory behavior has dedicated tests below that construct their own
+    agent and control the inventory payload.  Keep the generic fixture focused
+    on ACP session/protocol behavior instead of rescanning authenticated
+    providers on every ``new_session``/``load_session`` call.
+    """
+    acp_agent = HermesACPAgent(session_manager=mock_manager)
+    acp_agent._build_model_state = MagicMock(return_value=None)
+    return acp_agent
 
 
 @pytest.mark.asyncio

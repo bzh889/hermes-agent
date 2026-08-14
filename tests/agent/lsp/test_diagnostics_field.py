@@ -88,7 +88,10 @@ def test_write_file_populates_lsp_diagnostics_when_layer_returns_block(tmp_path)
 
     block = "<diagnostics file=\"x.py\">\nERROR [1:1] problem\n</diagnostics>"
 
-    with patch.object(fops, "_maybe_lsp_diagnostics", return_value=block):
+    with (
+        patch.object(fops, "_snapshot_lsp_baseline"),
+        patch.object(fops, "_maybe_lsp_diagnostics", return_value=block),
+    ):
         res = fops.write_file(str(target), "x = 1\n")
 
     assert res.lsp_diagnostics == block
@@ -101,7 +104,10 @@ def test_write_file_lsp_diagnostics_none_when_layer_returns_empty(tmp_path):
     fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
     target = tmp_path / "x.py"
 
-    with patch.object(fops, "_maybe_lsp_diagnostics", return_value=""):
+    with (
+        patch.object(fops, "_snapshot_lsp_baseline"),
+        patch.object(fops, "_maybe_lsp_diagnostics", return_value=""),
+    ):
         res = fops.write_file(str(target), "x = 1\n")
 
     assert res.lsp_diagnostics is None
@@ -114,7 +120,10 @@ def test_write_file_skips_lsp_when_syntax_failed(tmp_path):
     fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
     target = tmp_path / "broken.py"
 
-    with patch.object(fops, "_maybe_lsp_diagnostics") as mock_lsp:
+    with (
+        patch.object(fops, "_snapshot_lsp_baseline"),
+        patch.object(fops, "_maybe_lsp_diagnostics") as mock_lsp,
+    ):
         res = fops.write_file(str(target), "def x(:\n")  # syntax error
     assert mock_lsp.call_count == 0
     assert res.lsp_diagnostics is None
@@ -135,7 +144,10 @@ def test_patch_replace_propagates_lsp_diagnostics(tmp_path):
 
     block = "<diagnostics>ERROR [1:5] semantic issue</diagnostics>"
 
-    with patch.object(fops, "_maybe_lsp_diagnostics", return_value=block):
+    with (
+        patch.object(fops, "_snapshot_lsp_baseline"),
+        patch.object(fops, "_maybe_lsp_diagnostics", return_value=block),
+    ):
         res = fops.patch_replace(str(target), "x = 1", "x = 2")
 
     assert res.success is True

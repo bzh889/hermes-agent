@@ -24,7 +24,19 @@ from agent.lsp.workspace import clear_cache
 
 
 @pytest.fixture(autouse=True)
-def _clear_workspace_cache():
+def _clear_workspace_cache(tmp_path, monkeypatch):
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    real_home_git = Path.home() / ".git"
+    real_exists = Path.exists
+
+    def isolated_exists(path: Path) -> bool:
+        if path == real_home_git:
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", isolated_exists)
+    monkeypatch.chdir(isolated_home)
     clear_cache()
     yield
     clear_cache()

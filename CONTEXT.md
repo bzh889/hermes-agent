@@ -60,6 +60,22 @@ _Avoid_: Provider logic, Buganizer special case
 The per-turn upper bound on operations and side effects derived from the current execution surface, conversation, and immutable sender identity. A strategy may narrow this authority but can never expand or semantically inherit it.
 _Avoid_: Skill permission, Intent Thread trust, cached session role
 
+**Restricted Group Policy**:
+A reusable, fail-closed authorization contract bound to an exact group conversation that narrows every member's turn authority across tools, providers, data sources, execution environments, and outbound destinations. Mention gating or a toolset blocklist alone is not a Restricted Group Policy.
+_Avoid_: Group whitelist, blocked toolsets, prompt rule
+
+**CQ Read Broker**:
+The credential-owning Capability Provider that exposes only non-mutating ALPS and MOLY operations authorized by a Restricted Group Policy. It never delegates the owner's credential, cookie, arbitrary URL access, or a general command surface to the agent or its sandbox.
+_Avoid_: crtool shell access, browser login, CQ skill instructions
+
+**Ephemeral Task Sandbox**:
+A disposable execution boundary created for one restricted task, without access to host files or owner credentials, whose only durable outputs are policy-authorized results and whose filesystem is destroyed at task termination.
+_Avoid_: Working directory, temporary filename, project workspace
+
+**Origin-Bound Egress**:
+An outbound authority that permits delivery only back to the exact conversation origin of the current restricted turn. A configured or otherwise trusted Teams destination does not widen this authority.
+_Avoid_: Forward allowlist, home channel, messaging prompt rule
+
 **Contract Gap**:
 A fail-closed condition in which a Contracted Strategy cannot determine one legal next transition because its contract is missing, invalid, unsupported, or does not define the observed provider outcome.
 _Avoid_: Adaptive fallback opportunity, provider failure by default, model recovery prompt

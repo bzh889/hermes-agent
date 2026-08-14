@@ -42,11 +42,52 @@ def get_hermes_home_override() -> str | None:
     return str(override)
 
 
+def _get_windows_local_appdata() -> Path | None:
+    """Return Windows LocalAppData without depending on home env variables."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        folder_id = _GUID(
+            0xF1B32785,
+            0x6FBA,
+            0x4FCF,
+            (ctypes.c_ubyte * 8)(0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91),
+        )
+        result = ctypes.c_wchar_p()
+        get_known_folder = ctypes.windll.shell32.SHGetKnownFolderPath
+        get_known_folder.argtypes = [
+            ctypes.POINTER(_GUID),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        get_known_folder.restype = ctypes.c_long
+        status = get_known_folder(ctypes.byref(folder_id), 0, None, ctypes.byref(result))
+        try:
+            return Path(result.value) if status == 0 and result.value else None
+        finally:
+            if result:
+                ctypes.windll.ole32.CoTaskMemFree(result)
+    except Exception:
+        return None
+
+
 def _get_platform_default_hermes_home() -> Path:
     """Return the platform-native default Hermes home path."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
-        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        base = Path(local_appdata) if local_appdata else _get_windows_local_appdata()
+        if base is None:
+            base = Path.home() / "AppData" / "Local"
         return base / "hermes"
     return Path.home() / ".hermes"
 

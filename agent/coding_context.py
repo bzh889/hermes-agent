@@ -402,6 +402,15 @@ def _home() -> Optional[Path]:
         return None
 
 
+def _workspace_git_root(cwd: Path) -> Optional[Path]:
+    """Return a project git root without inheriting a dotfiles-home repo."""
+    root = _git_root(cwd)
+    home = _home()
+    if root is not None and home is not None and home.is_relative_to(root):
+        return None
+    return root
+
+
 def _marker_root(cwd: Path) -> Optional[Path]:
     """Nearest ancestor that looks like a project root, or ``None``.
 
@@ -424,7 +433,7 @@ def _marker_root(cwd: Path) -> Optional[Path]:
         if depth > 6:
             break
         if parent == home or (temp_root is not None and parent == temp_root):
-            continue
+            break
         for marker in _PROJECT_MARKERS:
             if (parent / marker).exists():
                 return parent
@@ -458,9 +467,7 @@ def _detect_profile_name(mode: str, platform: str, cwd_str: str) -> str:
     # workspace on its own — cheap stat checks, no scan.
     if _marker_root(cwd) is not None:
         return CODING_PROFILE.name
-    git_root = _git_root(cwd)
-    if git_root is not None and git_root == _home():
-        git_root = None  # dotfiles repo at $HOME — not a code workspace
+    git_root = _workspace_git_root(cwd)
     # A bare git repo only counts when it actually holds code, so `git init` on a
     # notes/writing/research folder stays in the general posture.
     if git_root is not None and _has_code_files(git_root):
@@ -848,7 +855,7 @@ def project_facts_for(cwd: Optional[str | Path] = None) -> Optional[dict[str, An
     re-derive "are we coding?" or duplicate the verify-command sniffing.
     """
     resolved = _resolve_cwd(cwd)
-    root = _git_root(resolved) or _marker_root(resolved)
+    root = _workspace_git_root(resolved) or _marker_root(resolved)
     if root is None:
         return None
 
@@ -870,7 +877,7 @@ def build_coding_workspace_block(cwd: Optional[str | Path] = None) -> str:
     — so marker-only (non-git) projects still get a snapshot.
     """
     resolved = _resolve_cwd(cwd)
-    git_root = _git_root(resolved)
+    git_root = _workspace_git_root(resolved)
     root = git_root or _marker_root(resolved)
     if root is None:
         return ""

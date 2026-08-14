@@ -407,7 +407,7 @@ class TestSecondaryProfileConfigHandling:
             Platform.WEBHOOK: PlatformConfig(enabled=True, extra={"port": 8644}),
         }
         monkeypatch.setattr(
-            "gateway.config.load_gateway_config", lambda: reviewer_cfg
+            "gateway.run.load_gateway_config", lambda: reviewer_cfg
         )
 
         with pytest.raises(SecondaryPortBindingConfigError) as ei:
@@ -437,7 +437,7 @@ class TestSecondaryProfileConfigHandling:
             Platform.TELEGRAM: PlatformConfig(enabled=True, token="t"),
         }
         monkeypatch.setattr(
-            "gateway.config.load_gateway_config", lambda: reviewer_cfg
+            "gateway.run.load_gateway_config", lambda: reviewer_cfg
         )
 
         with pytest.raises(SecondaryPortBindingConfigError) as ei:
@@ -545,7 +545,7 @@ class TestSecondaryProfileConfigHandling:
                 extra={"dm_policy": "open"},
             ),
         }
-        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: unsafe_cfg)
+        monkeypatch.setattr("gateway.run.load_gateway_config", lambda: unsafe_cfg)
 
         with pytest.raises(MultiplexConfigError, match="open policy") as exc_info:
             await runner._start_one_profile_adapters("unsafe", "/tmp/unsafe", {})
@@ -567,7 +567,7 @@ class TestSecondaryProfileConfigHandling:
             Platform.TELEGRAM: PlatformConfig(enabled=True, token="t"),
         }
         monkeypatch.setattr(
-            "gateway.config.load_gateway_config", lambda: reviewer_cfg
+            "gateway.run.load_gateway_config", lambda: reviewer_cfg
         )
         # _create_adapter returns None here (no real telegram token wiring), so
         # the loop simply connects nothing — the key assertion is NO raise.
@@ -620,7 +620,7 @@ class TestSecondaryProfileConfigHandling:
             Platform.TELEGRAM: PlatformConfig(enabled=True, token="reviewer-token"),
         }
         monkeypatch.setattr(
-            "gateway.config.load_gateway_config", lambda: reviewer_cfg
+            "gateway.run.load_gateway_config", lambda: reviewer_cfg
         )
 
         direct = _DirectAdapter()
@@ -639,7 +639,7 @@ class TestSecondaryProfileConfigHandling:
             return True
 
         monkeypatch.setattr(runner, "_create_adapter", _create_adapter)
-        monkeypatch.setattr(runner, "_connect_adapter_with_timeout", _connect)
+        monkeypatch.setattr(runner, "_connect_initial_adapter_with_timeout", _connect)
 
         connected = await runner._start_one_profile_adapters(
             "reviewer", "/tmp/x", {}
@@ -692,7 +692,7 @@ class TestSecondaryProfileConfigHandling:
         profile_cfg.platforms = {
             Platform.RELAY: PlatformConfig(enabled=True),
         }
-        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: profile_cfg)
+        monkeypatch.setattr("gateway.run.load_gateway_config", lambda: profile_cfg)
 
         relay = _RelayAdapter()
         factory_calls = []
@@ -707,7 +707,7 @@ class TestSecondaryProfileConfigHandling:
             return True
 
         monkeypatch.setattr(runner, "_create_adapter", _create_adapter)
-        monkeypatch.setattr(runner, "_connect_adapter_with_timeout", _connect)
+        monkeypatch.setattr(runner, "_connect_initial_adapter_with_timeout", _connect)
 
         connected = await runner._start_one_profile_adapters(
             "reviewer", "/tmp/x", {}
@@ -752,7 +752,7 @@ class TestSecondaryProfileConfigHandling:
         }
 
         monkeypatch.setattr(
-            "gateway.config.load_gateway_config", lambda: reviewer_cfg
+            "gateway.run.load_gateway_config", lambda: reviewer_cfg
         )
         monkeypatch.setattr(runner, "_create_adapter", lambda p, c: duplicate)
         monkeypatch.setattr(runner, "_adapter_disconnect_timeout_secs", lambda: 0)
@@ -803,7 +803,7 @@ class TestFeishuPortBindingConditional:
                 extra={"app_id": "cli_xxx", "app_secret": "sec", "connection_mode": "websocket"},
             ),
         }
-        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: reviewer_cfg)
+        monkeypatch.setattr("gateway.run.load_gateway_config", lambda: reviewer_cfg)
         monkeypatch.setattr(runner, "_create_adapter", lambda p, c: None)
 
         connected = await runner._start_one_profile_adapters("reviewer", "/tmp/x", {})
@@ -826,7 +826,7 @@ class TestFeishuPortBindingConditional:
                 extra={"app_id": "cli_xxx", "app_secret": "sec", "connection_mode": "webhook"},
             ),
         }
-        monkeypatch.setattr("gateway.config.load_gateway_config", lambda: reviewer_cfg)
+        monkeypatch.setattr("gateway.run.load_gateway_config", lambda: reviewer_cfg)
 
         with pytest.raises(MultiplexConfigError) as ei:
             await runner._start_one_profile_adapters("reviewer", "/tmp/x", {})

@@ -17,15 +17,21 @@ import {
   createSshProbeConnection,
   forwardSpec,
   hostArgs,
+  SshConnection as NativeSshConnection,
   redactSecrets,
   runSsh,
   SSH_ERROR,
-  SshConnection,
   sshErrorMessage,
   stopTunnelChild,
   target,
   validateSshTarget
 } from './ssh-connection'
+
+class SshConnection extends NativeSshConnection {
+  constructor(cfg: any, opts: any = {}) {
+    super(cfg, { mux: true, ...opts })
+  }
+}
 
 test('redactSecrets scrubs the spawn-time session token env var', () => {
   const line = 'setsid env HERMES_DASHBOARD_SESSION_TOKEN=abc123deadbeef HERMES_DESKTOP=1 hermes dashboard'
@@ -63,7 +69,7 @@ test('controlSocketPath is stable, short, and host-distinct', () => {
   assert.equal(a, a2, 'same triple → same socket (ControlMaster reuse)')
   assert.notEqual(a, b, 'different host → different socket')
   // 16 hex chars + .sock keeps the basename short for sun_path 104-byte limit
-  assert.match(a, /\/[0-9a-f]{16}\.sock$/)
+  assert.match(a, /[\\/][0-9a-f]{16}\.sock$/)
 })
 
 test('controlSocketPath default base stays under sun_path even with the temp-listener suffix', () => {
@@ -718,6 +724,10 @@ test('runSsh delivers stdinData to the child and does not log it', async () => {
 })
 
 test('open() rejects a control-dir that is a symlink', async () => {
+  if (process.platform === 'win32') {
+    return
+  }
+
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-test-'))
   const real = path.join(tmp, 'real')
   const link = path.join(tmp, 'link')

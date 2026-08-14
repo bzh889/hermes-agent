@@ -21,6 +21,12 @@ import sys
 from pathlib import Path
 
 
+# ``SIGKILL`` is POSIX-only, but keeping the signal number importable lets the
+# Linux-only reaper be unit-tested on Windows without changing its Linux
+# behaviour.
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+
+
 def _own_cgroup_path() -> str | None:
     """Return the cgroup v2 path for the calling process, or None."""
     try:
@@ -63,7 +69,7 @@ def reap_cgroup(cgroup_path: str | None = None) -> int:
         if pid == own:
             continue
         try:
-            os.kill(pid, signal.SIGKILL)  # windows-footgun: ok — Linux-only (reads /proc, /sys/fs/cgroup; runs from a systemd unit)
+            os.kill(pid, _SIGKILL)
             killed += 1
         except ProcessLookupError:
             continue

@@ -44,8 +44,17 @@ def test_proxy_env_normalizes_socks_alias(monkeypatch):
     "http_proxy", "https_proxy", "all_proxy",
 ])
 def test_proxy_env_rejects_malformed_port(monkeypatch, key):
+    # Isolate the parameter from proxy settings inherited from the host. On
+    # Windows, os.environ canonicalizes environment keys to uppercase, so the
+    # diagnostic necessarily reports that canonical spelling.
+    for proxy_key in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    ):
+        monkeypatch.delenv(proxy_key, raising=False)
     monkeypatch.setenv(key, "http://127.0.0.1:6153export")
-    with pytest.raises(RuntimeError, match=rf"Malformed proxy environment variable {key}=.*6153export"):
+    expected_key = key.upper() if os.name == "nt" else key
+    with pytest.raises(RuntimeError, match=rf"Malformed proxy environment variable {expected_key}=.*6153export"):
         _validate_proxy_env_urls()
 
 
