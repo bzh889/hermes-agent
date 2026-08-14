@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 
 import pytest
 
@@ -16,6 +17,7 @@ def test_notify_without_notify_socket_is_a_noop(monkeypatch):
     assert notify("READY=1") is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd notify is POSIX-only")
 def test_notify_sends_real_unix_datagram(tmp_path, monkeypatch):
     address = str(tmp_path / "notify.sock")
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -49,6 +51,7 @@ def test_notify_supports_systemd_abstract_socket(monkeypatch):
         receiver.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd notify is POSIX-only")
 def test_notify_uses_nonblocking_datagram_send(monkeypatch):
     calls: list[object] = []
 
@@ -92,6 +95,7 @@ def test_watchdog_interval_is_disabled_for_missing_invalid_or_nonpositive_values
     assert watchdog_interval_seconds() is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd watchdog is POSIX-only")
 def test_watchdog_latches_when_loop_progress_is_late(monkeypatch):
     calls: list[str] = []
     monkeypatch.setenv("NOTIFY_SOCKET", "/tmp/hermes-test-notify")
@@ -112,6 +116,7 @@ def test_watchdog_latches_when_loop_progress_is_late(monkeypatch):
     assert watchdog.record_tick(scheduled_at=10.0, now=10.3) is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd watchdog is POSIX-only")
 @pytest.mark.asyncio
 async def test_watchdog_sends_ready_heartbeat_and_stopping(monkeypatch):
     calls: list[str] = []

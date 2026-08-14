@@ -286,6 +286,7 @@ class PluginManifest:
     description: str = ""
     author: str = ""
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
+    optional_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
     platforms: List[str] = field(default_factory=list)
@@ -1639,6 +1640,7 @@ class PluginManager:
                 description=data.get("description", ""),
                 author=data.get("author", ""),
                 requires_env=data.get("requires_env", []),
+                optional_env=data.get("optional_env", []),
                 provides_tools=data.get("provides_tools", []),
                 provides_hooks=data.get("provides_hooks", []),
                 platforms=data.get("platforms", []),
@@ -1732,6 +1734,16 @@ class PluginManager:
             for item in manifest.requires_env
         )
         required_env = tuple(name for name in required_env if name)
+        optional_env = tuple(
+            item if isinstance(item, str) else item.get("name", "")
+            for item in manifest.optional_env
+        )
+        # Deferred envs are activation hints, not a declaration that every
+        # variable is required. Optional transport-specific settings must also
+        # materialise the plugin so its config bridge and validation can run.
+        activation_env = tuple(
+            dict.fromkeys((*required_env, *(name for name in optional_env if name)))
+        )
 
         # Record an enabled placeholder for introspection (`hermes plugins
         # list`). The real module load swaps in a fully-populated LoadedPlugin
@@ -1750,7 +1762,7 @@ class PluginManager:
                 platform_registry.register_deferred(
                     platform_name,
                     _loader,
-                    required_env=required_env,
+                    required_env=activation_env,
                 )
             logger.debug(
                 "Registered deferred platform loader: %s (plugin=%s)",

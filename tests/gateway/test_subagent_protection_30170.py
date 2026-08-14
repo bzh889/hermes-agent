@@ -218,6 +218,10 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         event = _make_event(text="follow up while subagent runs")
         sk = build_session_key(event.source)
         parent = _make_parent_with_subagents()
+        # Exercise the safe queue fallback when active-run steering is
+        # unavailable. A bare MagicMock otherwise returns a truthy value from
+        # steer(), correctly taking the newer successful-steer path.
+        parent.steer.return_value = False
         runner._running_agents[sk] = parent
         runner.adapters[event.source.platform] = adapter
 
@@ -239,6 +243,7 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         event = _make_event(text="hi mid-delegation")
         sk = build_session_key(event.source)
         parent = _make_parent_with_subagents()
+        parent.steer.return_value = False
         runner._running_agents[sk] = parent
         runner._running_agents_ts[sk] = time.time() - 120
         runner.adapters[event.source.platform] = adapter

@@ -3686,9 +3686,7 @@ def register(ctx) -> None:
         check_fn=_check_for_registry,
         validate_config=_validate_config,
         is_connected=_is_connected,
-        required_env=[
-            "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
-        ],
+        required_env=["GOOGLE_CHAT_SERVICE_ACCOUNT_JSON"],
         install_hint="Run `hermes setup` to install Google Chat support.",
         setup_fn=interactive_setup,
         # Env-driven auto-configuration — the core env-populator hook calls

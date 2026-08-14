@@ -33,7 +33,7 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled():
+async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled(tmp_path):
     from gateway.run import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
@@ -47,12 +47,13 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
         "gateway.run._probe_audio_duration",
         new=AsyncMock(return_value="0:12"),
     ):
+        audio_path = tmp_path / "voice.ogg"
         result, transcripts = await runner._enrich_message_with_transcription(
             "caption",
-            ["/tmp/voice.ogg"],
+            [str(audio_path)],
         )
 
-    assert "/tmp/voice.ogg" in result
+    assert str(audio_path) in result
     assert "voice message" in result.lower()
     assert "(duration: 0:12)" in result
     assert "caption" in result
@@ -60,7 +61,7 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
 
 
 @pytest.mark.asyncio
-async def test_enrich_message_with_transcription_omits_duration_on_probe_failure():
+async def test_enrich_message_with_transcription_omits_duration_on_probe_failure(tmp_path):
     from gateway.run import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
@@ -70,12 +71,13 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
         "gateway.run._probe_audio_duration",
         new=AsyncMock(return_value=None),
     ):
+        audio_path = tmp_path / "voice.ogg"
         result, transcripts = await runner._enrich_message_with_transcription(
             "",
-            ["/tmp/voice.ogg"],
+            [str(audio_path)],
         )
 
-    assert "/tmp/voice.ogg" in result
+    assert str(audio_path) in result
     assert "duration" not in result.lower()
     assert transcripts == []
 

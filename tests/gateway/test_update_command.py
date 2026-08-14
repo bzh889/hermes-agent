@@ -6,6 +6,7 @@ the _send_update_notification startup hook (sends results after restart).
 
 import json
 from pathlib import Path
+import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -238,6 +239,7 @@ class TestHandleUpdateCommand:
         assert data["thread_id"] == "777"
         assert data["message_id"] == "m-update-thread"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="setsid is POSIX-only")
     @pytest.mark.asyncio
     async def test_spawns_setsid(self, tmp_path):
         """Uses setsid when available."""
@@ -267,6 +269,7 @@ class TestHandleUpdateCommand:
         assert ".update_exit_code" in call_args[-1]
         assert "Starting Hermes update" in result
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX bash fallback contract")
     @pytest.mark.asyncio
     async def test_fallback_when_no_setsid(self, tmp_path):
         """Falls back to start_new_session=True when setsid is not available."""

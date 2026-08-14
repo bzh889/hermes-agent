@@ -24483,6 +24483,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # Direct gateway launches bypass the CLI startup path, but still need the
+    # same revision-guarded bundled-skill sync.  Keep this best-effort: a sync
+    # failure must not prevent messaging platforms from starting.
+    try:
+        from hermes_cli.main import _sync_bundled_skills_for_startup
+
+        _sync_bundled_skills_for_startup()
+    except Exception:
+        logger.debug("Bundled skill startup sync failed", exc_info=True)
+
     # Snapshot the checkout revision now, while sys.modules still matches disk,
     # so a later `git pull` under this long-lived process can be detected (and
     # risky work like model switching refused) instead of crashing on a stale
