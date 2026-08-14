@@ -131,7 +131,12 @@ def _check_teams_mtk():
             if item.strip()
         ]
 
-    token_ready = (Path.home() / ".teams-tokens" / "token_cache.json").exists()
+    try:
+        from gateway.platforms.teams_mtk import check_teams_mtk_requirements
+
+        token_ready = check_teams_mtk_requirements()
+    except Exception:
+        token_ready = False
     configured = bool(conversation_ids and token_ready)
     if configured:
         count = len(conversation_ids)

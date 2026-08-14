@@ -3,6 +3,24 @@ from types import SimpleNamespace
 from hermes_cli.status import show_status
 
 
+def test_teams_mtk_status_accepts_silent_wam_auth(monkeypatch):
+    from gateway.platforms import teams_mtk
+    from hermes_cli import status as status_mod
+
+    monkeypatch.setattr(
+        status_mod,
+        "load_config",
+        lambda: {
+            "platforms": {
+                "teams_mtk": {"conversation_ids": ["19:owner@unq.gbl.spaces"]}
+            }
+        },
+    )
+    monkeypatch.setattr(teams_mtk, "check_teams_mtk_requirements", lambda: True)
+
+    assert status_mod._check_teams_mtk() == (True, "1 conversation")
+
+
 def test_show_status_all_does_not_print_tavily_key_value(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     sentinel = "NONSECRET_SENTINEL_VALUE_DO_NOT_PRINT_123456"

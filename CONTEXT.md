@@ -60,6 +60,34 @@ _Avoid_: Provider logic, Buganizer special case
 The per-turn upper bound on operations and side effects derived from the current execution surface, conversation, and immutable sender identity. A strategy may narrow this authority but can never expand or semantically inherit it.
 _Avoid_: Skill permission, Intent Thread trust, cached session role
 
+**Capability Descriptor**:
+The registration-time semantic declaration that names and versions an operation and defines its action, resource and data class, effect class, target scope, and authority domain. Every descriptor uses the fixed Core semantic envelope; namespaced typed extensions may add detail but cannot omit or redefine the envelope. A descriptor is owned by the executable boundary and is independent of whether a model can currently see or call that boundary.
+_Avoid_: Tool name, toolset membership, prompt description, provider-defined permission string
+
+**Capability Request**:
+The structured, per-operation authorization fact produced from a Capability Descriptor, normalized target and typed runtime attributes, and trusted policy, origin, principal, task, and parent-operation context. A Restricted Group Policy matches selectors against this request before the operation can execute; tool and provider names are evidence, not the authorization vocabulary.
+_Avoid_: Tool call, model-supplied permission, session-wide grant, opaque capability string
+
+**Capability Grant**:
+An owner-approved policy entry that permits a declared operation and resource scope only for one exact Restricted Group Policy and its bound Teams group. A grant never applies to another group, policy, profile, or the global Hermes installation.
+_Avoid_: Global tool enablement, plugin approval, user role, session permission
+
+**Capability Effect**:
+One security-relevant consequence of a Capability Request. Core effects are `read`, `compute`, `ephemeral_write`, `durable_internal_write`, `external_mutation`, `egress`, `authority_spawn`, `credential_use`, `credential_maintenance`, `policy_admin`, and `secret_exposure`. Effects are orthogonal and composable: every effect on a request must be authorized, any denied effect denies the operation, and any unclassified effect makes the request unknown rather than allowing a primary read or low-risk label to mask it. Secret exposure is never grantable, while policy administration always requires owner authority.
+_Avoid_: Primary effect, linear risk score, tool risk level
+
+**Data Provenance Label**:
+An orthogonal classification attached to data observed or produced during restricted execution. Derived values and artifacts inherit the union of every input label plus producer labels; model reasoning, summarization, transformation, or format conversion never lowers classification. Removing a label requires a separately registered and authorized declassifier.
+_Avoid_: Single highest-sensitivity level, file-extension policy, model-assigned privacy guess
+
+**Optimization Record**:
+A de-identified structured record of restricted-group capability use, outcome, failure, correction, or feedback that can inform later skill and provider improvement without retaining raw prompts, Teams or CQ content, PII, NDA text, credentials, or attachments. Creating a record does not grant the originating group turn write authority over skills, source code, providers, or the owner's PKB.
+_Avoid_: Conversation transcript, automatic skill edit, content archive, user telemetry dump
+
+**Shared Knowledge Candidate**:
+A content-bearing, provenance-preserving proposal derived from restricted-group work for explicit owner review. It is not part of the owner's PKB until the owner approves that exact candidate through an owner-authorized surface.
+_Avoid_: Automatic PKB ingest, de-identified optimization record, group memory
+
 **Restricted Group Policy**:
 A reusable, fail-closed authorization contract bound to an exact group conversation that narrows every member's turn authority across tools, providers, data sources, execution environments, and outbound destinations. Mention gating or a toolset blocklist alone is not a Restricted Group Policy.
 _Avoid_: Group whitelist, blocked toolsets, prompt rule

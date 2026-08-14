@@ -108,6 +108,20 @@ class TestConfigYamlRouting:
         assert "docker" in config
         assert "terminal" not in _read_env(_isolated_hermes_home)
 
+    def test_known_mapping_value_is_parsed_as_yaml(self, _isolated_hermes_home):
+        import yaml
+
+        conversation_id = "19:owner_dm@unq.gbl.spaces"
+        set_config_value(
+            "gateway.teams_mtk.control_conversations",
+            '{"19:owner_dm@unq.gbl.spaces":{"owner_user_ids":["owner-oid"]}}',
+        )
+
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["gateway"]["teams_mtk"]["control_conversations"] == {
+            conversation_id: {"owner_user_ids": ["owner-oid"]}
+        }
+
     def test_terminal_image_goes_to_config(self, _isolated_hermes_home):
         """TERMINAL_DOCKER_IMAGE doesn't match _API_KEY or _TOKEN, so config.yaml."""
         set_config_value("terminal.docker_image", "python:3.12")
