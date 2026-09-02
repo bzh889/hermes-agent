@@ -1555,6 +1555,14 @@ class GatewaySlashCommandsMixin:
                     # Offload blocking provider-listing (can fall through to a
                     # synchronous urllib HTTP fetch on a stale cache) off the
                     # event loop so the gateway doesn't freeze. See #41289.
+                    #
+                    # include_unconfigured=True matches the TUI/Dashboard picker
+                    # which shows the full provider universe (including
+                    # unconfigured canonical providers). No max_models cap so
+                    # the gateway shows the same model count as TUI.
+                    # probe_current_custom_provider=True keeps the active
+                    # provider's model list live without blocking on offline
+                    # AIDE endpoints.
                     providers = await asyncio.to_thread(
                         list_picker_providers,
                         current_provider=current_provider,
@@ -1562,9 +1570,10 @@ class GatewaySlashCommandsMixin:
                         current_model=current_model,
                         user_providers=user_provs,
                         custom_providers=custom_provs,
-                        max_models=50,
                         include_moa=True,
                         excluded_providers=excluded_provs,
+                        include_unconfigured=True,
+                        probe_current_custom_provider=True,
                     )
                 except Exception:
                     providers = []

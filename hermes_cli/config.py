@@ -3276,6 +3276,28 @@ DEFAULT_CONFIG = {
                 "enabled": False,
             },
         },
+
+        # Restricted Group Policy — per-conversation enforcement of origin-bound
+        # egress, CQ read brokering, model-routing gates, and audit chains.
+        # See openspec/changes/restricted-group-policy/spec.md.
+        #
+        # Each policy entry defines capability grants and an exact conv_id
+        # binding. An entry is active only when ``active: true`` AND the
+        # gateway's authenticated account matches ``account_id``.
+        #
+        #   restricted_group:
+        #     policies:
+        #       "rgp-test-v1":
+        #         version: "rev-001"
+        #         capabilities:
+        #           - cq_read
+        #           - egress_reply
+        #         conv_id: "19:cbdcf6224c48469ea048147752ed92d9@thread.v2"
+        #         account_id: "acct-test-001"
+        #         active: false
+        "restricted_group": {
+            "policies": {},
+        },
     },
 
     # Real-time token streaming to messaging platforms (Telegram, Discord,
@@ -5314,7 +5336,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
-        "discover_models", "extra_body", "default_headers", "extra_headers",
+        "discover_models", "always_discover_models", "extra_body", "default_headers", "extra_headers",
         "api_key_helper",
         "ssl_ca_cert", "ssl_verify",
     }
@@ -5441,6 +5463,10 @@ def _normalize_custom_provider_entry(
     if isinstance(discover_models, bool):
         normalized["discover_models"] = discover_models
 
+    always_discover_models = entry.get("always_discover_models")
+    if isinstance(always_discover_models, bool):
+        normalized["always_discover_models"] = always_discover_models
+
     extra_body = entry.get("extra_body")
     if isinstance(extra_body, dict):
         normalized["extra_body"] = dict(extra_body)
@@ -5493,6 +5519,7 @@ def _custom_provider_entry_to_provider_config(
         "context_length",
         "rate_limit_delay",
         "discover_models",
+        "always_discover_models",
         "extra_body",
         "extra_headers",
         "ssl_ca_cert",
@@ -5857,7 +5884,7 @@ _KNOWN_ROOT_KEYS = frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
 # Valid fields inside a custom_providers list entry
 _VALID_CUSTOM_PROVIDER_FIELDS = {
     "name", "base_url", "api_key", "api_mode", "model", "models",
-    "context_length", "rate_limit_delay", "extra_body", "default_headers",
+    "context_length", "rate_limit_delay", "discover_models", "always_discover_models", "extra_body", "default_headers",
     "extra_headers", "ssl_ca_cert", "ssl_verify",
     # key_env is read at runtime by runtime_provider.py and auxiliary_client.py
     # — include it here so the set accurately describes the supported schema.

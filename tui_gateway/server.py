@@ -5757,12 +5757,19 @@ def _make_agent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
+        requested_provider=runtime.get("requested_provider"),
         base_url=runtime.get("base_url"),
         api_key=runtime.get("api_key"),
         api_mode=runtime.get("api_mode"),
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
         credential_pool=runtime.get("credential_pool"),
+        # Identity headers resolved from providers.<name>.default_headers, e.g.
+        # x-user-id for MTK AIDE service accounts — the gateway answers 403
+        # "missing UID in logging context" without it. The classic CLI passes
+        # these through (hermes_cli/cli_agent_setup_mixin.py); the TUI/desktop
+        # build must too or a session 403s on its first turn.
+        default_headers=runtime.get("default_headers"),
         quiet_mode=True,
         # verbose_logging controls DEBUG-level agent logging; it is intentionally
         # independent of tool_progress_mode (which only controls per-tool
@@ -16062,11 +16069,19 @@ def _(rid, params: dict) -> dict:
         # agent attributes must NOT clobber disk config (with_overrides
         # is truthy-only).
         ctx = _model_picker_context(agent)
+        # TUI picker opens should NOT probe every custom endpoint —
+        # ``always_discover_models`` on multiple AIDE providers triggers
+        # sequential 5s-timeout HTTP calls that block the picker for up to
+        # 30s. The current provider is probed so its model list stays live;
+        # others show their curated/configured models immediately. An
+        # explicit --refresh (picker refresh button) still forces all
+        # probes.
         payload = build_model_options_payload(
             ctx,
             explicit_only=bool(params.get("explicit_only")),
             include_unconfigured=bool(params.get("include_unconfigured")),
             refresh=bool(params.get("refresh")),
+            for_picker=True,
         )
         return _ok(rid, payload)
     except Exception as e:

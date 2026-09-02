@@ -276,6 +276,7 @@ def build_model_options_payload(
     explicit_only: bool = False,
     include_unconfigured: bool = False,
     refresh: bool = False,
+    for_picker: bool = False,
 ) -> dict:
     """Build the shared API-server/dashboard/TUI model-options payload.
 
@@ -286,6 +287,10 @@ def build_model_options_payload(
       endpoints do not block the picker
     - explicit refresh: probe every custom provider while busting the model
       cache so live catalogs repopulate fully
+
+    ``for_picker`` forwards :func:`build_models_payload`'s interactive-picker
+    visibility (keeps rate-limit-exhausted providers listed). Set it for
+    surfaces a human picks from; leave it false for programmatic listings.
     """
     refresh = bool(refresh)
     return build_models_payload(
@@ -299,6 +304,7 @@ def build_model_options_payload(
         refresh=refresh,
         probe_custom_providers=refresh,
         probe_current_custom_provider=not refresh,
+        for_picker=bool(for_picker),
     )
 
 

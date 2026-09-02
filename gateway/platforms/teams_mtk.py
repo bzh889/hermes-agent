@@ -40,14 +40,9 @@ from gateway.platforms.base import BasePlatformAdapter
 
 # SDK pure-function HTML stripper (no auth/instance required)
 #
-# NOTE: the package's installed top-level module is ``teams_skype_sdk``
-# (see lib/teams_skype_sdk/pyproject.toml — [tool.setuptools.packages.find]
-# include = ["teams_skype_sdk*"]), not ``src``. The original "src.api.*"
-# imports below silently failed on every machine (ModuleNotFoundError,
-# swallowed by the bare except ImportError), so _SDK_AVAILABLE was always
-# False and every code path that branches on it fell through to the regex/
-# aiohttp fallback — functionally safe, but the SDK integration from the
-# "Phase1 SDK integration" commit was never actually exercised.
+# NOTE: the package's installed top-level module is ``teams_skype_sdk``.
+# It is vendored as a first-class Hermes package so clean installs do not rely
+# on the developer-only ``lib/teams_skype_sdk`` checkout.
 try:
     from teams_skype_sdk.api._http import strip_teams_html as _strip_teams_html
 except ImportError:
@@ -65,6 +60,12 @@ try:
         VALID_REACTIONS as _VALID_REACTIONS,
     )
     from teams_skype_sdk.api._activity import ActivityService as _SDKActivity
+    from teams_skype_sdk.api._loops import LoopsService as _SDKLoops
+    from teams_skype_sdk.api._loops import (
+        create_table_loop_component as _sdk_create_table_loop_component,
+    )
+    from teams_skype_sdk.api import GraphAPI as _SDKGraph
+    from teams_skype_sdk.graph import GraphToken as _SDKGraphToken
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
@@ -74,6 +75,10 @@ except ImportError:
     _SDKConvs = None
     _SDKReactions = None
     _SDKActivity = None
+    _SDKLoops = None
+    _sdk_create_table_loop_component = None
+    _SDKGraph = None
+    _SDKGraphToken = None
     _VALID_REACTIONS = {"like", "heart", "laugh", "surprised", "sad", "angry"}
     _REACTION_EMOJI = {
         "like": "👍",
@@ -1233,6 +1238,19 @@ class _SDKAuthAdapter:
 
     def get_access_token(self) -> str:
         return self._gw.access_token()
+
+    def _force_refresh(self) -> None:
+        """Let SDK 401 retry refresh the gateway's shared token state."""
+        self._gw._force_refresh()
+
+    @property
+    def msg_base(self) -> str:
+        """Expose the live regional MSG endpoint to the vendored SDK."""
+        return self._gw.msg_base
+
+    def exchange_for_scope(self, scope: str) -> dict:
+        """Exchange the gateway's delegated identity for a resource scope."""
+        return self._gw.exchange_for_scope(scope)
 
 
 if _SDK_AVAILABLE:
@@ -3921,6 +3939,161 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             logger.error("TeamsMTK: forward_message error: %s", _log_error(e))
             return {"status": "error", "error": str(e)}
 
+    # ---- Native Microsoft Loop components ----
+
+    def _call_sdk_loop(self, operation: str, **kwargs) -> dict:
+        """Run one Loop message operation through the shared SDK transport."""
+        if _SDKLoops is None:
+            raise RuntimeError("teams_skype_sdk Loop support is unavailable")
+        lock = getattr(self, "_sdk_fetch_lock", None)
+        if lock is None:
+            lock = self._sdk_fetch_lock = threading.Lock()
+        with lock:
+            try:
+                http_layer = self._get_sdk_http_layer_locked()
+                service = _SDKLoops(http_layer)
+                return getattr(service, operation)(**kwargs)
+            except Exception:
+                self._close_sdk_http_layer_locked()
+                raise
+
+    async def send_loop_component(
+        self,
+        chat_id: str,
+        component_url: str,
+    ) -> dict:
+        """Send an existing native Loop component without a raw fallback."""
+        if not _SDK_AVAILABLE or _SDKLoops is None:
+            return {
+                "status": "error",
+                "stage": "send_loop_component",
+                "error": "teams_skype_sdk Loop support is unavailable",
+            }
+        try:
+            message = await asyncio.to_thread(
+                self._call_sdk_loop,
+                "send_existing",
+                conversation_id=chat_id,
+                component_url=component_url,
+            )
+            message_id = _sent_message_id(message)
+            if message_id:
+                self._remember_sent_message(chat_id, str(message_id))
+            return {"status": "ok", "message": message}
+        except Exception as exc:
+            logger.error(
+                "TeamsMTK: Loop send failed for conv=%s (%s); raw fallback suppressed",
+                _log_ref(chat_id),
+                _log_error(exc),
+            )
+            return {
+                "status": "error",
+                "stage": "send_loop_component",
+                "error": str(exc),
+            }
+
+    def _create_loop_table_sync(
+        self,
+        chat_id: str,
+        template_url: str,
+        name: str,
+        headers: List[str],
+        rows: List[List[str]],
+        *,
+        scope: str = "organization",
+        locale: str = "en-US",
+    ) -> dict:
+        """Author, verify, then send one table-backed Loop component."""
+        if (
+            _SDKGraph is None
+            or _SDKGraphToken is None
+            or _sdk_create_table_loop_component is None
+        ):
+            raise RuntimeError("teams_skype_sdk Loop authoring is unavailable")
+
+        auth_adapter = _SDKAuthAdapter(self._auth)
+        graph_api = _SDKGraph(_SDKGraphToken(auth_adapter), verify_ssl=True)
+        try:
+            component = _sdk_create_table_loop_component(
+                graph_api,
+                template_url,
+                name,
+                headers,
+                rows,
+                scope=scope,
+                locale=locale,
+            )
+        finally:
+            graph_api._session.close()
+
+        try:
+            message = self._call_sdk_loop(
+                "send_existing",
+                conversation_id=chat_id,
+                component_url=component["component_url"],
+            )
+        except Exception as exc:
+            return {
+                "status": "error",
+                "stage": "send_loop_component",
+                "error": str(exc),
+                "component": component,
+            }
+        return {"component": component, "message": message}
+
+    async def create_loop_table(
+        self,
+        chat_id: str,
+        template_url: str,
+        name: str,
+        headers: List[str],
+        rows: List[List[str]],
+        *,
+        scope: str = "organization",
+        locale: str = "en-US",
+    ) -> dict:
+        """Create a verified table Loop and send it to one Teams conversation."""
+        if scope not in {"organization", "users"}:
+            return {
+                "status": "error",
+                "stage": "validation",
+                "error": "Loop scope must be 'organization' or 'users'",
+            }
+        if not _SDK_AVAILABLE:
+            return {
+                "status": "error",
+                "stage": "create_loop_table",
+                "error": "teams_skype_sdk Loop support is unavailable",
+            }
+        try:
+            result = await asyncio.to_thread(
+                self._create_loop_table_sync,
+                chat_id,
+                template_url,
+                name,
+                headers,
+                rows,
+                scope=scope,
+                locale=locale,
+            )
+            if result.get("status") == "error":
+                return result
+            message_id = _sent_message_id(result.get("message") or {})
+            if message_id:
+                self._remember_sent_message(chat_id, str(message_id))
+            return {"status": "ok", **result}
+        except Exception as exc:
+            logger.error(
+                "TeamsMTK: Loop table create failed for conv=%s (%s)",
+                _log_ref(chat_id),
+                _log_error(exc),
+            )
+            return {
+                "status": "error",
+                "stage": "create_loop_table",
+                "error": str(exc),
+            }
+
     # ---- S7-3 / S9-2~3: PLATFORM_HINTS injection ----
 
     def get_platform_hints(self) -> str:
@@ -3939,6 +4112,7 @@ class TeamsMTKAdapter(BasePlatformAdapter):
             "  - get_activity (spaces/notes/call_logs/threads/saved)",
             "  - get_call_logs, list_conversations",
             "  - send_image_file, send_document, send_image",
+            "  - create_loop_table, send_loop_component (native Microsoft Loop)",
             "  - Users: _search_users, _get_schedule, _find_common_availability",
             "Mention gating: groups require @hermes unless require_mention=false",
             "Short-msg gating: ≤2 chars ignored in non-mention groups (no ?/!/mention)",
@@ -5030,6 +5204,59 @@ class TeamsMTKAdapter(BasePlatformAdapter):
 
         executor.shutdown(wait=False)
 
+    _sp_token_cache: Dict[str, tuple] = {}  # host -> (token, expires_at)
+
+    def _sharepoint_token(self, hostname: str) -> str:
+        """Return a SharePoint-scoped access token for the given host.
+
+        The Teams access_token (api.spaces.skype.com scope) is rejected by
+        SharePoint with 401.  We exchange the shared refresh token / WAM
+        identity for a SharePoint .default scope and cache it briefly.
+        """
+        import time as _time
+        cached = self.__class__._sp_token_cache.get(hostname)
+        if cached and cached[1] > _time.time() + 60:
+            return cached[0]
+        # The SharePoint scope uses the tenant URL: https://<host>/.default
+        scope = f"https://{hostname}/.default"
+        result = self._auth.exchange_for_scope(scope)
+        token = result["access_token"]
+        expires_in = result.get("expires_in", 3600)
+        self.__class__._sp_token_cache[hostname] = (token, _time.time() + expires_in)
+        return token
+
+    def _sharepoint_download_url(self, original_url: str) -> Optional[str]:
+        """Rewrite a SharePoint direct URL to the REST API download endpoint.
+
+        SharePoint personal site URLs look like:
+          https://<host>/personal/<user>/Documents/<path>/<filename>
+
+        The SharePoint REST API can serve the file by GUID:
+          https://<host>/personal/<user>/_api/web/GetFileById('<guid>')/$value
+
+        But we don't have the GUID from the URL alone.  Instead we use the
+        SharePoint REST ``GetFileByServerRelativeUrl`` endpoint:
+          https://<host>/personal/<user>/_api/web/GetFileByServerRelativeUrl('/personal/<user>/Documents/<path>')/$value
+        """
+        from urllib.parse import urlparse, quote, unquote
+        parsed = urlparse(original_url)
+        path = parsed.path or ""
+        # Must be a personal SharePoint site: /personal/<user>/Documents/...
+        if "/personal/" not in path or "/Documents/" not in path:
+            return None
+        # Extract the server-relative path to the file
+        # path = /personal/<user>/Documents/<rest>
+        # Normalize encoding: unquote then re-quote so both raw-spaces and
+        # already-%20-encoded paths produce a single consistent encoding
+        # (SharePoint REST rejects literal spaces in the URL).
+        personal_user = path.split("/personal/")[1].split("/")[0]
+        encoded = quote(unquote(path), safe="/")
+        sp_api = (
+            f"{parsed.scheme}://{parsed.hostname}/personal/{personal_user}"
+            f"/_api/web/GetFileByServerRelativeUrl('{encoded}')/$value"
+        )
+        return sp_api
+
     async def _download_attachment(self, url: str, kind: str, filename: str) -> Optional[str]:
         """Download a Teams attachment and cache it locally.
 
@@ -5049,114 +5276,144 @@ class TeamsMTKAdapter(BasePlatformAdapter):
         )
         from tools.url_safety import async_is_safe_url
 
-        def _headers_for(candidate_url: str) -> Dict[str, str]:
+        def _resolve_url_and_headers(
+            candidate_url: str, filename: str
+        ) -> tuple[str, Dict[str, str]]:
+            """Resolve a candidate URL + auth headers for download.
+
+            For SharePoint/OneDrive URLs the direct download URL is rewritten
+            to the SharePoint REST API endpoint and paired with a
+            SharePoint-scoped token. For all other hosts the original URL is
+            used with the appropriate Skype/Teams credential.
+            """
             hostname = (urlparse(candidate_url).hostname or "").lower().rstrip(".")
             auth_kind = _attachment_auth_kind(hostname)
             if auth_kind == "skype_authorization":
-                return {"Authorization": f"skype_token {self._auth.skype_token()}"}
+                return candidate_url, {"Authorization": f"skype_token {self._auth.skype_token()}"}
             if auth_kind == "skype_authentication":
-                return {"Authentication": f"skypetoken={self._auth.skype_token()}"}
+                return candidate_url, {"Authentication": f"skypetoken={self._auth.skype_token()}"}
             if auth_kind == "azure_bearer":
-                return {"Authorization": f"Bearer {self._auth.access_token()}"}
-            return {}
+                # SharePoint/OneDrive direct URLs return 401 with the Teams
+                # access_token (api.spaces.skype.com scope). We rewrite to the
+                # SharePoint REST API and use a SharePoint-scoped token.
+                sp_url = self._sharepoint_download_url(candidate_url)
+                if sp_url:
+                    return sp_url, {"Authorization": f"Bearer {self._sharepoint_token(hostname)}"}
+                # Fall back to direct URL with Teams token
+                return candidate_url, {"Authorization": f"Bearer {self._auth.access_token()}"}
+            return candidate_url, {}
 
-        current_url = str(url or "").strip()
+        original_url = str(url or "").strip()
         max_bytes = get_inbound_media_max_bytes()
         data: Optional[bytes] = None
-        try:
-            initial = urlparse(current_url)
-            if (
-                initial.scheme.lower() != "https"
-                or not initial.hostname
-                or initial.username is not None
-                or initial.password is not None
-                or not await async_is_safe_url(current_url)
-            ):
-                logger.warning(
-                    "TeamsMTK: blocked unsafe attachment url=%s",
-                    _log_ref(current_url),
-                )
-                return None
+        for _auth_attempt in range(2):
+            current_url = original_url
+            try:
+                initial = urlparse(current_url)
+                if (
+                    initial.scheme.lower() != "https"
+                    or not initial.hostname
+                    or initial.username is not None
+                    or initial.password is not None
+                    or not await async_is_safe_url(current_url)
+                ):
+                    logger.warning(
+                        "TeamsMTK: blocked unsafe attachment url=%s",
+                        _log_ref(current_url),
+                    )
+                    return None
 
-            async with aiohttp.ClientSession() as sess:
-                for redirect_count in range(_ATTACHMENT_REDIRECT_LIMIT + 1):
-                    if redirect_count:
-                        parsed = urlparse(current_url)
-                        redirect_is_safe = (
-                            parsed.scheme.lower() == "https"
-                            and bool(parsed.hostname)
-                            and parsed.username is None
-                            and parsed.password is None
-                            and await async_is_safe_url(current_url)
-                        )
-                    else:
-                        redirect_is_safe = True
-                    if not redirect_is_safe:
-                        logger.warning(
-                            "TeamsMTK: blocked unsafe attachment url=%s",
-                            _log_ref(current_url),
-                        )
-                        return None
-
-                    async with sess.get(
-                        current_url,
-                        headers=_headers_for(current_url),
-                        timeout=aiohttp.ClientTimeout(total=30),
-                        ssl=True,
-                        allow_redirects=False,
-                    ) as resp:
-                        if 300 <= resp.status < 400:
-                            location = resp.headers.get("Location") or resp.headers.get("location")
-                            if not location or redirect_count >= _ATTACHMENT_REDIRECT_LIMIT:
-                                logger.warning(
-                                    "TeamsMTK: attachment redirect rejected status=%d url=%s",
-                                    resp.status,
-                                    _log_ref(current_url),
-                                )
-                                return None
-                            current_url = urljoin(current_url, location)
-                            continue
-
-                        if resp.status != 200:
+                async with aiohttp.ClientSession() as sess:
+                    for redirect_count in range(_ATTACHMENT_REDIRECT_LIMIT + 1):
+                        if redirect_count:
+                            parsed = urlparse(current_url)
+                            redirect_is_safe = (
+                                parsed.scheme.lower() == "https"
+                                and bool(parsed.hostname)
+                                and parsed.username is None
+                                and parsed.password is None
+                                and await async_is_safe_url(current_url)
+                            )
+                        else:
+                            redirect_is_safe = True
+                        if not redirect_is_safe:
                             logger.warning(
-                                "TeamsMTK: attachment download failed status=%d url=%s",
-                                resp.status,
+                                "TeamsMTK: blocked unsafe attachment url=%s",
                                 _log_ref(current_url),
                             )
                             return None
 
-                        content_length = resp.headers.get("Content-Length") or resp.headers.get("content-length")
-                        if content_length:
-                            try:
-                                declared_size = int(content_length)
-                            except (TypeError, ValueError):
-                                logger.debug("TeamsMTK: ignoring invalid attachment Content-Length")
-                            else:
+                        dl_url, dl_headers = _resolve_url_and_headers(current_url, filename or "")
+                        async with sess.get(
+                            current_url if dl_url == current_url else dl_url,
+                            headers=dl_headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                            ssl=True,
+                            allow_redirects=False,
+                        ) as resp:
+                            if 300 <= resp.status < 400:
+                                location = resp.headers.get("Location") or resp.headers.get("location")
+                                if not location or redirect_count >= _ATTACHMENT_REDIRECT_LIMIT:
+                                    logger.warning(
+                                        "TeamsMTK: attachment redirect rejected status=%d url=%s",
+                                        resp.status,
+                                        _log_ref(current_url),
+                                    )
+                                    return None
+                                current_url = urljoin(current_url, location)
+                                continue
+
+                            if resp.status == 401 and _auth_attempt == 0:
+                                logger.info(
+                                    "TeamsMTK: attachment download got 401 — "
+                                    "refreshing tokens and retrying once..."
+                                )
+                                await asyncio.to_thread(self._auth._force_refresh)
+                                break
+
+                            if resp.status != 200:
+                                logger.warning(
+                                    "TeamsMTK: attachment download failed status=%d url=%s",
+                                    resp.status,
+                                    _log_ref(current_url),
+                                )
+                                return None
+
+                            content_length = resp.headers.get("Content-Length") or resp.headers.get("content-length")
+                            if content_length:
+                                try:
+                                    declared_size = int(content_length)
+                                except (TypeError, ValueError):
+                                    logger.debug("TeamsMTK: ignoring invalid attachment Content-Length")
+                                else:
+                                    validate_inbound_media_size(
+                                        declared_size,
+                                        media_type=kind or "attachment",
+                                        max_bytes=max_bytes,
+                                    )
+
+                            chunks: List[bytes] = []
+                            total = 0
+                            async for chunk in resp.content.iter_chunked(64 * 1024):
+                                total += len(chunk)
                                 validate_inbound_media_size(
-                                    declared_size,
+                                    total,
                                     media_type=kind or "attachment",
                                     max_bytes=max_bytes,
                                 )
+                                chunks.append(chunk)
+                            data = b"".join(chunks)
+                            break
 
-                        chunks: List[bytes] = []
-                        total = 0
-                        async for chunk in resp.content.iter_chunked(64 * 1024):
-                            total += len(chunk)
-                            validate_inbound_media_size(
-                                total,
-                                media_type=kind or "attachment",
-                                max_bytes=max_bytes,
-                            )
-                            chunks.append(chunk)
-                        data = b"".join(chunks)
-                        break
-        except Exception as exc:
-            logger.warning(
-                "TeamsMTK: attachment download error: %s url=%s",
-                _log_error(exc),
-                _log_ref(current_url),
-            )
-            return None
+                if data is not None:
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "TeamsMTK: attachment download error: %s url=%s",
+                    _log_error(exc),
+                    _log_ref(current_url),
+                )
+                return None
 
         if data is None:
             return None
@@ -5498,38 +5755,13 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                         logger.error("TeamsMTK: failed to send blocked-keyword notice: %s", _log_error(e))
                     continue
 
-            logger.info(
-                "TeamsMTK: new message id=%s from sender=%s (chars=%d)",
-                _log_ref(msg_id), _log_ref(sender), len(text),
-            )
-
-            # ---- C-5 Short-message gating (BUG-5) ----
-            # In groups where require_mention=false, ultra-short casual
-            # messages (e.g. 「好」「OK」「嗯」) waste agent tokens.
-            # Ignore ≤2 chars unless they contain ?？！! or @hermes.
-            # Per-group config `short_message_ignore: false` disables.
-            if is_group and not effective_require_mention and not _is_control_cmd:
-                _short_ignore = _group_cfg.get("short_message_ignore", True)
-                if _short_ignore and len(text.strip()) <= 2:
-                    _has_punct = any(c in text for c in "?？！!？")
-                    _has_mention = self._MENTION_TAG.lower() in text.lower()
-                    if not _has_punct and not _has_mention:
-                        logger.debug(
-                            "TeamsMTK: ignoring short message id=%s (%d chars, no ?/!/mention)",
-                            _log_ref(msg_id), len(text.strip()),
-                        )
-                        self._advance_message_cursor(conv_id, msg_id)
-                        continue
-
-            # Resolve the immutable sender id before any adapter-local action.
-            # Model-picker replies never reach GatewayRunner authorization, so
-            # they must remain bound to the user whose authorized /model command
-            # created the picker.
+            # ---- Early picker interception ----
+            # Check picker state BEFORE short-message gating (C-5) so that
+            # single-digit picker replies (e.g. "4") are not silently dropped
+            # by the ≤2-char filter.  The picker state is per-conversation and
+            # only active after the user explicitly sent /model, so it is safe
+            # to bypass short-message gating for these replies.
             user_id = _teams_sender_id(msg.get("from"), sender)
-
-            # ---- Model picker interception (two-step) ----
-            # Per-conversation picker state so multiple conversations
-            # can each have an active picker independently.
             _picker = self._model_picker_states.get(conv_id)
             _picker_user_id = (_picker or {}).get("allowed_user_id")
             _picker_owner_matches = (
@@ -5591,6 +5823,30 @@ class TeamsMTKAdapter(BasePlatformAdapter):
                                     await self.send(conv_id, f"⚠ Model switch failed: {e}")
                             self._advance_message_cursor(conv_id, msg_id)
                             continue
+
+            logger.info(
+                "TeamsMTK: new message id=%s from sender=%s (chars=%d)",
+                _log_ref(msg_id), _log_ref(sender), len(text),
+            )
+
+            # ---- C-5 Short-message gating (BUG-5) ----
+            # In groups where require_mention=false, ultra-short casual
+            # messages (e.g. 「好」「OK」「嗯」) waste agent tokens.
+            # Ignore ≤2 chars unless they contain ?？！! or @hermes.
+            # Per-group config `short_message_ignore: false` disables.
+            # NOTE: Picker replies are already handled above before this gate.
+            if is_group and not effective_require_mention and not _is_control_cmd:
+                _short_ignore = _group_cfg.get("short_message_ignore", True)
+                if _short_ignore and len(text.strip()) <= 2:
+                    _has_punct = any(c in text for c in "?？！!？")
+                    _has_mention = self._MENTION_TAG.lower() in text.lower()
+                    if not _has_punct and not _has_mention:
+                        logger.debug(
+                            "TeamsMTK: ignoring short message id=%s (%d chars, no ?/!/mention)",
+                            _log_ref(msg_id), len(text.strip()),
+                        )
+                        self._advance_message_cursor(conv_id, msg_id)
+                        continue
 
             try:
                 from gateway.platforms.base import MessageEvent, MessageType

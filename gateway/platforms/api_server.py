@@ -174,11 +174,13 @@ _RUNTIME_AGENT_OVERRIDE_KEYS = (
     "api_key",
     "base_url",
     "provider",
+    "requested_provider",
     "api_mode",
     "command",
     "args",
     "credential_pool",
     "max_tokens",
+    "default_headers",
 )
 
 
@@ -285,11 +287,13 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
+        "requested_provider": runtime.get("requested_provider") or provider,
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
         "max_tokens": max_tokens,
+        "default_headers": runtime.get("default_headers"),
     }
 
 
@@ -1768,6 +1772,9 @@ class APIServerAdapter(BasePlatformAdapter):
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
+            # Backward-compatible alias used by Hermes Browser Extension builds
+            # that predate the generic /v1/capabilities contract.
+            ("GET", "/api/browser-extension/capabilities", self._handle_capabilities),
             ("GET", "/v1/skills", self._handle_skills),
             ("GET", "/v1/toolsets", self._handle_toolsets),
             ("GET", "/api/sessions", self._handle_list_sessions),
@@ -2469,13 +2476,21 @@ class APIServerAdapter(BasePlatformAdapter):
         elif session_row_model and not confirmed_runtime_lock:
             # Session-persisted model (raw string that resolved to no route
             # alias).  Pins this session's turns ahead of per-request body
-            # values — a session's chosen model is a standing selection,
-            # matching the native gateway's session-model semantics.
-            current_provider = _clean_request_string(runtime_kwargs.get("provider"))
+            # model values — a session's chosen model is a standing selection,
+            # matching the native gateway's session-model semantics.  Provider
+            # identity is orthogonal: Browser sessions send it on every turn,
+            # and it must win over the runtime's normalized ``custom`` marker.
+            # Re-resolving that marker loses the named provider's key, endpoint,
+            # and headers and produces the misleading "No LLM provider" error.
+            current_provider = _clean_request_string(
+                runtime_kwargs.get("requested_provider")
+                or runtime_kwargs.get("provider")
+            )
+            effective_provider = request_provider or route_provider or current_provider
             provider_runtime = _resolve_provider_runtime(
-                current_provider,
+                effective_provider,
                 target_model=session_row_model,
-                required=False,
+                required=bool(request_provider or route_provider),
             )
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
@@ -2720,13 +2735,60 @@ class APIServerAdapter(BasePlatformAdapter):
             include_unconfigured=True,   # include all so /v1/models can filter
             picker_hints=True,
             canonical_order=True,
-            pricing=True,
-            capabilities=True,
-            refresh=force,
+            # API discovery must be deterministic and fast. Pricing and
+            # capability enrichment can perform network/provider probes and
+            # previously caused /v1/models to hang behind a dead provider.
+            pricing=False,
+            capabilities=False,
+            refresh=False,
+            probe_custom_providers=False,
+            probe_current_custom_provider=False,
         )
         self._models_payload_cache = payload
         self._models_payload_ts = now
         return payload
+
+    @staticmethod
+    def _static_models_payload() -> Dict[str, Any]:
+        """Build a catalog from local config without provider network probes.
+
+        API discovery is a control-plane request. It must remain responsive
+        when one configured provider's catalog/auth endpoint is unavailable.
+        The chat request still performs the authoritative provider check.
+        """
+        from hermes_cli.inventory import load_picker_context
+
+        ctx = load_picker_context()
+        rows: list[Dict[str, Any]] = []
+        for slug, raw in (ctx.user_providers or {}).items():
+            if not isinstance(raw, dict):
+                continue
+            models = raw.get("models") or []
+            if isinstance(models, str):
+                models = [models]
+            models = [str(model) for model in models if str(model).strip()]
+            if not models:
+                continue
+            rows.append({
+                "slug": str(slug),
+                "name": raw.get("name") or str(slug),
+                "models": models,
+                "total_models": len(models),
+                "authenticated": True,
+                "auth_type": "configured",
+            })
+        if ctx.current_provider and ctx.current_model and not any(
+            row["slug"].lower() == str(ctx.current_provider).lower() for row in rows
+        ):
+            rows.insert(0, {
+                "slug": str(ctx.current_provider),
+                "name": str(ctx.current_provider),
+                "models": [str(ctx.current_model)],
+                "total_models": 1,
+                "authenticated": True,
+                "auth_type": "configured",
+            })
+        return {"providers": rows, "model": ctx.current_model, "provider": ctx.current_provider}
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return available models and configured aliases.
@@ -2761,7 +2823,10 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         model_ids = [model_name]
         try:
-            payload = await asyncio.to_thread(self._get_cached_models_payload)
+            # The static path is intentionally the default. The full inventory
+            # builder may perform provider probes and is not suitable for a
+            # latency-sensitive OpenAI-compatible discovery endpoint.
+            payload = self._static_models_payload()
             providers = payload.get("providers", [])
             for prov in providers:
                 model_ids.extend(prov.get("models", []))
@@ -2809,18 +2874,44 @@ class APIServerAdapter(BasePlatformAdapter):
 
         refresh = _coerce_request_bool(request.query.get("refresh"), default=False)
         try:
-            from hermes_cli.inventory import build_model_options_payload, load_picker_context
+            from hermes_cli.inventory import (
+                build_model_options_payload,
+                build_models_payload,
+                load_picker_context,
+            )
 
             def _build_payload() -> Dict[str, Any]:
-                return build_model_options_payload(
+                if refresh:
+                    return build_model_options_payload(
+                        load_picker_context(),
+                        include_unconfigured=True,
+                        refresh=True,
+                    )
+                # Normal extension startup must not probe every provider,
+                # pricing endpoint, or stale custom endpoint. The static
+                # configured/canonical catalog is sufficient for selection;
+                # the actual chat request remains the authority on usability.
+                return build_models_payload(
                     load_picker_context(),
                     include_unconfigured=True,
-                    refresh=refresh,
+                    picker_hints=True,
+                    canonical_order=True,
+                    pricing=False,
+                    capabilities=False,
+                    refresh=False,
+                    probe_custom_providers=False,
+                    probe_current_custom_provider=False,
                 )
 
             # Inventory enrichment can fetch pricing and provider catalogs.
             # Keep all synchronous picker work off aiohttp's event loop.
-            payload = await asyncio.to_thread(_build_payload)
+            # Normal discovery is static and local-only. Explicit refresh keeps
+            # the richer live inventory behavior for callers that requested it.
+            payload = (
+                await asyncio.to_thread(_build_payload)
+                if refresh
+                else self._static_models_payload()
+            )
             return web.json_response(payload)
         except Exception:
             logger.exception("[%s] GET /api/model/options failed", self.name)

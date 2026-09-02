@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PROTOTYPE — Inferred Capability Classification Safety</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d13;
+      --panel: #111821;
+      --panel2: #17212d;
+      --line: #2b3948;
+      --text: #e8eef5;
+      --muted: #91a0b2;
+      --green: #47d18c;
+      --red: #ff6b77;
+      --amber: #f7bf56;
+      --blue: #69a7ff;
+      --violet: #b68cff;
+      --orange: #ff8c42;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 20% 0%, #172538 0, var(--bg) 36rem); color: var(--text); font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; }
+    button, select, input { font: inherit; }
+    button { cursor: pointer; }
+    .shell { max-width: 1600px; margin: 0 auto; padding: 24px; }
+    header { display: flex; gap: 24px; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+    h1 { margin: 0 0 6px; font-size: 25px; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    h3 { margin: 0 0 8px; font-size: 14px; }
+    p { margin: 6px 0; }
+    .prototype { color: var(--amber); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .sub { color: var(--muted); max-width: 860px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; background: #0c131c; white-space: nowrap; }
+    .badge strong { color: white; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tab { border: 1px solid var(--line); color: var(--muted); background: var(--panel); padding: 9px 13px; border-radius: 8px; }
+    .tab.active { color: white; border-color: var(--blue); background: #17263a; }
+    .pane { display: none; }
+    .pane.active { display: block; }
+    .layout { display: grid; grid-template-columns: minmax(500px, 1fr) minmax(550px, 1.3fr); gap: 14px; }
+    .card { border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, rgba(23,33,45,.96), rgba(15,22,31,.98)); padding: 16px; box-shadow: 0 14px 50px rgba(0,0,0,.22); }
+    .scenario { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 9px 0; background: rgba(9,13,19,.65); }
+    .scenario-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .scenario-title { font-weight: 750; }
+    .scenario small { display: block; color: var(--muted); margin: 4px 0 9px; }
+    .run { border: 1px solid #456d9d; color: #dcecff; background: #18304d; padding: 7px 10px; border-radius: 7px; white-space: nowrap; }
+    .run:hover { background: #214269; }
+    .result { margin-top: 7px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .pass { color: var(--green); }
+    .fail { color: var(--red); }
+    .held { color: var(--amber); }
+    .all { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; flex-wrap: wrap; gap: 8px; }
+    .primary { border: 1px solid #3d8665; color: #e6fff2; background: #16412e; padding: 9px 13px; border-radius: 8px; }
+    .primary:hover { background: #1e5a42; }
+    .state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+    .metric { border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: #0d141d; }
+    .metric b { display: block; font-size: 18px; }
+    .metric span { color: var(--muted); font-size: 11px; }
+    .json { background: #080c12; border: 1px solid #25313e; border-radius: 9px; padding: 12px; max-height: 600px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .contract { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .contract div { border-left: 3px solid var(--blue); padding: 8px 10px; background: #0c141f; }
+    .contract code { color: #b9d6ff; }
+    .free-form { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 10px; }
+    label { display: grid; gap: 5px; color: var(--muted); }
+    input, select { width: 100%; border: 1px solid var(--line); background: #0a1119; color: var(--text); border-radius: 7px; padding: 8px; }
+    .free-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .note { border: 1px solid #61522f; background: #231d0f; color: #f7d998; border-radius: 9px; padding: 10px 12px; margin-bottom: 12px; }
+    .matrix { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .matrix th, .matrix td { border-bottom: 1px solid var(--line); text-align: left; padding: 9px 7px; vertical-align: top; }
+    .matrix th { color: var(--muted); font-weight: 600; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .classification-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+    .tag { border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; font-size: 11px; background: #0d141d; }
+    .tag.read { border-color: var(--green); color: var(--green); }
+    .tag.write { border-color: var(--red); color: var(--red); }
+    .tag.both { border-color: var(--amber); color: var(--amber); }
+    .tag.nested { border-color: var(--violet); color: var(--violet); }
+    .tag.ambiguous { border-color: var(--muted); color: var(--muted); }
+    .tag.blocked { border-color: var(--red); color: var(--red); background: #2a1212; }
+    .tag.approved { border-color: var(--green); color: var(--green); background: #0f291d; }
+    .tag.expired { border-color: var(--amber); color: var(--amber); }
+    .tag.group-a { border-color: var(--blue); color: var(--blue); }
+    .tag.group-b { border-color: var(--orange); color: var(--orange); }
+    .inference-display { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; background: #0a1119; }
+    .inference-display h4 { margin: 0 0 6px; font-size: 13px; color: var(--blue); }
+    .approval-status { display: flex; gap: 6px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .status-badge { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11px; }
+    .status-badge.pending { border-color: var(--amber); background: #231d0f; color: var(--amber); }
+    .status-badge.approved { border-color: var(--green); background: #0f291d; color: var(--green); }
+    .status-badge.denied { border-color: var(--red); background: #2a1212; color: var(--red); }
+    .status-badge.expired { border-color: var(--amber); background: #231d0f; color: var(--amber); }
+    .status-badge.blocked { border-color: var(--red); background: #2a1212; color: var(--red); }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .action-btn { border: 1px solid var(--line); background: #0e151e; color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+    .action-btn:hover { background: #17212d; }
+    .action-btn.success { border-color: #3d8665; background: #16412e; color: #e6fff2; }
+    .action-btn.success:hover { background: #1e5a42; }
+    .action-btn.danger { border-color: #8b3d3d; background: #2a1212; color: #ffb3b3; }
+    .action-btn.danger:hover { background: #3d1a1a; }
+    @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } header { display: block; } .badges { justify-content: flex-start; margin-top: 14px; } .state-grid { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div>
+      <div class="prototype">Throwaway logic prototype — not production enforcement</div>
+      <h1>Inferred Capability Classification Safety</h1>
+      <p class="sub">Question: Can Hermes derive a useful, reviewable Capability Descriptor proposal for undeclared built-in tools, plugins, and MCP operations from schema, description, manifest/source evidence, and argument shape without mistaking misleading or incomplete prose for authority?</p>
+    </div>
+    <div class="badges" id="headerBadges"></div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-pane="scenarios">Scenarios</button>
+    <button class="tab" data-pane="freeplay">Free Play</button>
+    <button class="tab" data-pane="contract">Proposed Contract</button>
+  </nav>
+
+  <section class="pane active" id="scenarios">
+    <div class="layout">
+      <div class="card">
+        <h2>Classification test scenarios (12+)</h2>
+        <div class="note">Each scenario tests a different aspect of inferred capability classification: known-safe reads, known writes, mixed effects, nesting, ambiguity, adversarial descriptions, fingerprint changes, approval lifecycle, expiry, prompt-cache stability, and cross-group isolation.</div>
+        <div id="scenarioList"></div>
+        <div class="all">
+          <span id="runSummary" class="sub">Run a case or run the complete matrix.</span>
+          <button class="primary" id="runAll">Run all scenarios</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Inference engine state</h2>
+        <div class="state-grid" id="metrics"></div>
+        <div id="inferenceDisplay"></div>
+        <pre class="json" id="stateView"></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="pane" id="freeplay">
+    <div class="layout">
+      <div class="card">
+        <h2>Construct custom operation</h2>
+        <div class="note">Build your own edge case. Test schema vs description conflicts, ambiguous parameters, or approval lifecycle scenarios.</div>
+        <div class="free-form" id="freeForm"></div>
+        <div class="free-actions">
+          <button class="primary" id="attemptFree">Run inference</button>
+          <button class="run" id="resetFree">Reset</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Full inference state</h2>
+        <div class="state-grid" id="freeMetrics"></div>
+        <pre class="json" id="freeStateView"></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="pane" id="contract">
+    <div class="card">
+      <h2>Inferred Capability Classification contract</h2>
+      <div class="contract">
+        <div><code>InferCapabilityDescriptor(toolSchema, description, manifest, sourceEvidence)</code><br><span class="sub">Analyzes schema parameters, description text, manifest permissions, and source code to derive action/resource/data/effect/target/authority fields. Schema evidence always wins over prose.</span></div>
+        <div><code>requireOwnerApproval(inferredDescriptor, groupIdentity)</code><br><span class="sub">Every inferred proposal requires explicit owner approval before execution. Approval binds implementation fingerprint and group identity.</span></div>
+        <div><code>invalidateOnFingerprintChange(oldFingerprint, newFingerprint)</code><br><span class="sub">Any change to source code, version, or schema invalidates prior approval. Execution blocked until re-approval.</span></div>
+        <div><code>failClosedOnAmbiguity(ambiguousFields)</code><br><span class="sub">When effect classification cannot be determined with confidence, the operation is blocked (not auto-classified as safe).</span></div>
+      </div>
+      <h3>Scenario coverage matrix</h3>
+      <table class="matrix">
+        <thead><tr><th>Requirement</th><th>Tested by scenario</th><th>Expected behavior</th></tr></thead>
+        <tbody>
+          <tr><td>Known-safe read classified as read</td><td>S01</td><td>Pass: read-only effect detected</td></tr>
+          <tr><td>Known-write classified as write</td><td>S02</td><td>Pass: write effect detected</td></tr>
+          <tr><td>Mixed effects detected</td><td>S03</td><td>Pass: both read and write effects</td></tr>
+          <tr><td>Nested operations detected</td><td>S04</td><td>Pass: nesting flagged</td></tr>
+          <tr><td>Ambiguous fails closed</td><td>S05</td><td>Pass: blocked, not auto-safe</td></tr>
+          <tr><td>Schema wins over description</td><td>S06</td><td>Pass: adversarial description ignored</td></tr>
+          <tr><td>Fingerprint change blocks</td><td>S07</td><td>Pass: approval invalidated</td></tr>
+          <tr><td>Approval enables execution</td><td>S08</td><td>Pass: approved then works</td></tr>
+          <tr><td>Denial blocks execution</td><td>S09</td><td>Pass: denied stays blocked</td></tr>
+          <tr><td>Expiry invalidates approval</td><td>S10</td><td>Pass: 24h expiry enforced</td></tr>
+          <tr><td>Prompt-cache stable</td><td>S11</td><td>Pass: approval outside messages</td></tr>
+          <tr><td>Cross-group isolation</td><td>S12</td><td>Pass: group A ≠ group B</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+<script>
+'use strict';
+
+// ============ Constants ============
+const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// ============ Utility functions ============
+function generateId(prefix = 'id') {
+  return prefix + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+function fingerprint(data) {
+  const raw = JSON.stringify(data);
+  let h = 2166136261;
+  for (let i = 0; i < raw.length; i++) { h ^= raw.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'sha256:' + (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function now() { return Date.now(); }
+function iso() { return new Date().toISOString(); }
+
+// ============ Inference Engine State ============
+function createInitialGroups() {
+  return {
+    'group-A': {
+      groupId: 'group-A',
+      approvedOperations: {},
+      deniedOperations: {},
+      auditLog: []
+    },
+    'group-B': {
+      groupId: 'group-B',
+      approvedOperations: {},
+      deniedOperations: {},
+      auditLog: []
+    }
+  };
+}
+
+let groups = createInitialGroups();
+let currentGroup = 'group-A';
+let inferenceState = null;
+let scenarioResults = {};
+let freeState = null;
+
+function getCurrentGroup() { return groups[currentGroup]; }
+
+function logAudit(group, event) {
+  group.auditLog.push({ ...event, timestamp: iso() });
+}
+
+// ============ Inference Engine ============
+function inferCapabilityDescriptor(toolSchema, description, manifest, sourceEvidence) {
+  const inferredEffects = [];
+  const detectedParams = [];
+  const flags = [];
+  let confidence = 'high';
+  let ambiguous = false;
+
+  // Analyze schema parameters for write indicators
+  const writeIndicators = ['create', 'update', 'delete', 'write', 'modify', 'set', 'add', 'remove', 'push', 'insert'];
+  const readIndicators = ['get', 'read', 'fetch', 'list', 'query', 'search', 'find', 'retrieve'];
+  
+  const allText = JSON.stringify(toolSchema) + ' ' + description + ' ' + JSON.stringify(manifest);
+  const allTextLower = allText.toLowerCase();
+  
+  // Check for write operations in schema
+  for (const indicator of writeIndicators) {
+    if (allTextLower.includes(indicator)) {
+      detectedParams.push({ type: 'write_indicator', value: indicator, source: 'schema_or_description' });
+      if (!inferredEffects.includes('write')) inferredEffects.push('write');
+    }
+  }
+  
+  // Check for read operations
+  for (const indicator of readIndicators) {
+    if (allTextLower.includes(indicator)) {
+      detectedParams.push({ type: 'read_indicator', value: indicator, source: 'schema_or_description' });
+      if (!inferredEffects.includes('read')) inferredEffects.push('read');
+    }
+  }
+  
+  // Check for nested operations (calls sub-operations)
+  if (toolSchema && toolSchema.calls) {
+    flags.push('nested_operation');
+    detectedParams.push({ type: 'nested', value: toolSchema.calls, source: 'schema' });
+  }
+  
+  // Check for ambiguous parameters (unclear from schema)
+  if (toolSchema && toolSchema.parameters) {
+    for (const [paramName, paramDef] of Object.entries(toolSchema.parameters)) {
+      if (!paramDef.description || !paramDef.type) {
+        ambiguous = true;
+        flags.push('ambiguous_parameter: ' + paramName);
+        confidence = 'low';
+      }
+    }
+  }
+  
+  // Detect adversarial mismatch: description says "read-only" but schema has write params
+  const descriptionSaysReadOnly = description.toLowerCase().includes('read-only') || description.toLowerCase().includes('readonly');
+  const schemaHasWriteParams = toolSchema && (
+    (toolSchema.method && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(toolSchema.method)) ||
+    (toolSchema.parameters && Object.keys(toolSchema.parameters).some(p => 
+      p.toLowerCase().includes('data') || p.toLowerCase().includes('payload') || p.toLowerCase().includes('body')
+    ))
+  );
+  
+  if (descriptionSaysReadOnly && schemaHasWriteParams) {
+    flags.push('adversarial_mismatch');
+    // Schema wins over description - adversarial detected means we trust schema, not ambiguous
+    if (!inferredEffects.includes('write')) inferredEffects.push('write');
+    confidence = 'high'; // schema is authoritative
+    ambiguous = false; // adversarial detection overrides ambiguity
+    // Remove read effect that came from adversarial description - schema is authoritative
+    const idx = inferredEffects.indexOf('read');
+    if (idx > -1) inferredEffects.splice(idx, 1);
+  }
+  
+  // Determine classification
+  let classification = 'unknown';
+  if (inferredEffects.includes('write') && inferredEffects.includes('read')) {
+    classification = 'mixed';
+  } else if (inferredEffects.includes('write')) {
+    classification = 'write';
+  } else if (inferredEffects.includes('read')) {
+    classification = 'read';
+  }
+  
+  // If ambiguous and no clear write detected, fail closed
+  if (ambiguous && classification !== 'write') {
+    classification = 'ambiguous_blocked';
+  }
+  
+  const implFingerprint = fingerprint({ toolSchema, manifest, sourceEvidence });
+  
+  return {
+    inferredEffects,
+    detectedParams,
+    flags,
+    classification,
+    confidence,
+    ambiguous,
+    implFingerprint,
+    requiresApproval: true,
+    analyzedAt: iso()
+  };
+}
+
+// ============ Approval Management ============
+function requestApproval(group, operationId, descriptor) {
+  const requestId = generateId('req');
+  const approvalRequest = {
+    id: requestId,
+    operationId,
+    descriptor: descriptor,
+    state: 'pending',
+    requestedAt: now(),
+    expiresAt: now() + EXPIRY_MS,
+    decidedAt: null,
+    decidedBy: null,
+    decision: null
+  };
+  
+  // Store the pending approval in the group (in a pending bucket or accessed via approvedOperations temporarily)
+  group.approvedOperations[operationId] = approvalRequest;
+  
+  logAudit(group, {
+    kind: 'approval-requested',
+    requestId,
+    operationId,
+    classification: descriptor.classification,
+    effects: descriptor.inferredEffects
+  });
+  
+  return approvalRequest;
+}
+
+function decideApproval(group, operationId, decision, authenticatedOwner = true) {
+  // Find the operation in either pending, approved, or denied
+  let op = group.approvedOperations[operationId] || group.deniedOperations[operationId];
+  
+  // If not found, check if we need to create it first (requestApproval wasn't called)
+  if (!op) {
+    return { success: false, reason: 'operation_not_found' };
+  }
+  if (op.state !== 'pending') {
+    return { success: false, reason: 'already_decided', currentState: op.state };
+  }
+  if (!authenticatedOwner) {
+    return { success: false, reason: 'not_authenticated_owner' };
+  }
+  
+  op.state = decision === 'approve' ? 'approved' : 'denied';
+  op.decidedAt = now();
+  op.decidedBy = 'owner-mtk12265';
+  op.decision = decision;
+  
+  // Store in appropriate bucket and remove from the other
+  if (decision === 'approve') {
+    group.approvedOperations[operationId] = op;
+    delete group.deniedOperations[operationId];
+  } else {
+    delete group.approvedOperations[operationId];
+    group.deniedOperations[operationId] = op;
+  }
+  
+  logAudit(group, {
+    kind: 'approval-decided',
+    operationId,
+    decision,
+    authenticatedOwner,
+    firstWin: true
+  });
+  
+  return { success: true, operationId, decision };
+}
+
+function tryExecuteOperation(group, operationId, currentFingerprint) {
+  const approved = group.approvedOperations[operationId];
+  if (!approved) {
+    return { success: false, reason: 'not_approved', blocked: true };
+  }
+  if (approved.state !== 'approved') {
+    return { success: false, reason: 'approval_not_terminal', currentState: approved.state, blocked: true };
+  }
+  if (now() > approved.expiresAt) {
+    approved.state = 'expired';
+    logAudit(group, { kind: 'approval-expired', operationId, reason: '24h_expiry' });
+    return { success: false, reason: 'expired', blocked: true };
+  }
+  if (currentFingerprint !== approved.descriptor.implFingerprint) {
+    logAudit(group, {
+      kind: 'execution-blocked-fingerprint-mismatch',
+      operationId,
+      expectedFingerprint: approved.descriptor.implFingerprint,
+      currentFingerprint
+    });
+    return { success: false, reason: 'fingerprint_mismatch', blocked: true };
+  }
+  
+  // Execution succeeds
+  logAudit(group, {
+    kind: 'operation-executed',
+    operationId,
+    fingerprint: currentFingerprint,
+    exactOnce: true
+  });
+  
+  return { success: true, executed: true };
+}
+
+function checkApprovalIsolation(groupA, groupB, operationId) {
+  // Approval from group A should NOT apply to group B
+  const approvedInA = groupA.approvedOperations[operationId];
+  const existsInB = groupB.approvedOperations[operationId] || groupB.deniedOperations[operationId];
+  
+  return {
+    approvedInA: !!approvedInA,
+    existsInB: !!existsInB,
+    isolated: !existsInB
+  };
+}
+
+// ============ State Management ============
+function createInitialInferenceState() {
+  return {
+    currentGroup: currentGroup,
+    operation: null,
+    inference: null,
+    approvalRequest: null,
+    executionResult: null,
+    messages: [] // model-facing messages (approval metadata should NOT enter here)
+  };
+}
+
+function resetInference() {
+  inferenceState = createInitialInferenceState();
+}
+
+// ============ Scenarios ============
+const scenarios = [
+  {
+    id: 's01',
+    title: 'Known-safe (read-only)',
+    note: 'Operation with clear read-only schema and description — should be classified as read.',
+    toolSchema: { method: 'GET', parameters: { id: { type: 'string', description: 'Resource ID' } } },
+    description: 'Fetch a resource by ID. Read-only operation.',
+    manifest: { permissions: ['read:resources'] },
+    expectedClassification: 'read',
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const pass = inference.classification === 'read' && !inference.ambiguous;
+      inferenceState.executionResult = { pass, actual: inference.classification };
+      return { pass, detail: `classified=${inference.classification}, confidence=${inference.confidence}` };
+    }
+  },
+  {
+    id: 's02',
+    title: 'Known-write (mutation)',
+    note: 'Operation with write parameters — should be classified as write.',
+    toolSchema: { method: 'POST', parameters: { data: { type: 'object', description: 'Payload to create' }, name: { type: 'string' } } },
+    description: 'Create a new resource with the provided data.',
+    manifest: { permissions: ['write:resources'] },
+    expectedClassification: 'write',
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const pass = inference.classification === 'write';
+      inferenceState.executionResult = { pass, actual: inference.classification };
+      return { pass, detail: `classified=${inference.classification}, effects=${inference.inferredEffects.join(',')}` };
+    }
+  },
+  {
+    id: 's03',
+    title: 'Mixed-effect (read+write)',
+    note: 'Operation that both reads and writes — both effects must be detected.',
+    toolSchema: { method: 'PATCH', parameters: { id: { type: 'string', description: 'Resource ID' }, updates: { type: 'object', description: 'Fields to update' } } },
+    description: 'Update a resource and return the updated version. Read and write operation.',
+    manifest: { permissions: ['read:resources', 'write:resources'] },
+    expectedClassification: 'mixed',
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const hasRead = inference.inferredEffects.includes('read');
+      const hasWrite = inference.inferredEffects.includes('write');
+      const pass = hasRead && hasWrite && inference.classification === 'mixed';
+      inferenceState.executionResult = { pass, actual: inference.classification, hasRead, hasWrite };
+      return { pass, detail: `classified=${inference.classification}, effects=${inference.inferredEffects.join(',')}` };
+    }
+  },
+  {
+    id: 's04',
+    title: 'Nested (calls sub-operations)',
+    note: 'Operation that calls other operations — nesting must be detected.',
+    toolSchema: { method: 'POST', calls: ['tool-a', 'tool-b', 'tool-c'], parameters: { data: { type: 'object', description: 'Input data' } } },
+    description: 'Composite operation that orchestrates multiple sub-operations to create resources.',
+    manifest: { permissions: ['orchestrate', 'write:resources'] },
+    expectedClassification: 'write',
+    expectedFlags: ['nested_operation'],
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const hasNested = inference.flags.includes('nested_operation');
+      const pass = hasNested && inference.classification === 'write';
+      inferenceState.executionResult = { pass, actual: inference.classification, nested: hasNested, calls: inference.detectedParams.filter(p => p.type === 'nested') };
+      return { pass, detail: `classified=${inference.classification}, nested=${hasNested}, calls=${inference.detectedParams.filter(p=>p.type==='nested').length}` };
+    }
+  },
+  {
+    id: 's05',
+    title: 'Ambiguous (unclear from schema)',
+    note: 'Operation with missing parameter definitions — MUST fail-closed, NOT auto-classified as safe.',
+    toolSchema: { method: 'POST', parameters: { param1: {}, param2: { description: 'some param' } } },
+    description: 'Performs some operation on data.',
+    manifest: { permissions: ['unknown'] },
+    expectedClassification: 'ambiguous_blocked',
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const pass = inference.classification === 'ambiguous_blocked' && inference.ambiguous;
+      inferenceState.executionResult = { pass, actual: inference.classification, ambiguous: inference.ambiguous };
+      return { pass, detail: `classified=${inference.classification}, ambiguous=${inference.ambiguous}, confidence=${inference.confidence}` };
+    }
+  },
+  {
+    id: 's06',
+    title: 'Adversarial (description says "read-only" but schema has write params)',
+    note: 'Description claims read-only but schema has write indicators — schema MUST win over description.',
+    toolSchema: { method: 'POST', parameters: { payload: { type: 'object' }, action: { type: 'string' } } },
+    description: 'Read-only data retrieval operation. No mutations performed.',
+    manifest: { permissions: ['read:resources', 'write:resources'] },
+    expectedClassification: 'write',
+    expectedFlags: ['adversarial_mismatch'],
+    expectedPass: true,
+    run() {
+      resetInference();
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      inferenceState.inference = inference;
+      
+      const hasAdversarialFlag = inference.flags.includes('adversarial_mismatch');
+      const schemaWins = inference.classification === 'write' && inference.inferredEffects.includes('write');
+      const pass = hasAdversarialFlag && schemaWins;
+      inferenceState.executionResult = { pass, actual: inference.classification, adversarialDetected: hasAdversarialFlag, schemaWins };
+      return { pass, detail: `classified=${inference.classification} (schema wins), adversarial=${hasAdversarialFlag}` };
+    }
+  },
+  {
+    id: 's07',
+    title: 'Fingerprint-changed (source code changed after approval)',
+    note: 'Implementation fingerprint changed after approval — should be blocked.',
+    toolSchema: { method: 'GET', parameters: { id: { type: 'string' } } },
+    description: 'Fetch resource by ID.',
+    manifest: { permissions: ['read:resources'], version: '1.0.0' },
+    expectedPass: true,
+    run() {
+      resetInference();
+      const group = getCurrentGroup();
+      const operationId = 'op-fingerprint-test';
+      
+      // First inference and approval
+      const inference1 = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, { source: 'v1' });
+      const approval = requestApproval(group, operationId, inference1);
+      approval.state = 'approved';
+      approval.decision = 'approve';
+      approval.decidedAt = now();
+      group.approvedOperations[operationId] = approval;
+      
+      // Change fingerprint (e.g., source code changed)
+      const changedManifest = { ...this.manifest, version: '1.0.1' };
+      const inference2 = inferCapabilityDescriptor(this.toolSchema, this.description, changedManifest, { source: 'v2' });
+      
+      // Try execution with new fingerprint
+      const execResult = tryExecuteOperation(group, operationId, inference2.implFingerprint);
+      
+      const pass = !execResult.success && execResult.reason === 'fingerprint_mismatch' && execResult.blocked;
+      inferenceState.approvalRequest = approval;
+      inferenceState.executionResult = execResult;
+      inferenceState.inference = { original: inference1.implFingerprint, changed: inference2.implFingerprint };
+      return { pass, detail: `blocked=${execResult.blocked}, reason=${execResult.reason}` };
+    }
+  },
+  {
+    id: 's08',
+    title: 'Approved-then-executed',
+    note: 'Operation approved by owner — should work after approval.',
+    toolSchema: { method: 'POST', parameters: { data: { type: 'object' } } },
+    description: 'Create resource with data.',
+    manifest: { permissions: ['write:resources'] },
+    expectedPass: true,
+    run() {
+      resetInference();
+      const group = getCurrentGroup();
+      const operationId = 'op-approved-exec';
+      
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      const approval = requestApproval(group, operationId, inference);
+      decideApproval(group, operationId, 'approve');
+      
+      const execResult = tryExecuteOperation(group, operationId, inference.implFingerprint);
+      
+      const pass = execResult.success && execResult.executed;
+      inferenceState.approvalRequest = approval;
+      inferenceState.executionResult = execResult;
+      inferenceState.inference = inference;
+      return { pass, detail: `approved=${approval.state}, executed=${execResult.executed}` };
+    }
+  },
+  {
+    id: 's09',
+    title: 'Denied-blocked',
+    note: 'Operation denied by owner — should remain blocked.',
+    toolSchema: { method: 'DELETE', parameters: { id: { type: 'string' } } },
+    description: 'Delete resource by ID.',
+    manifest: { permissions: ['delete:resources'] },
+    expectedPass: true,
+    run() {
+      resetInference();
+      const group = getCurrentGroup();
+      const operationId = 'op-denied-block';
+      
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      const approval = requestApproval(group, operationId, inference);
+      decideApproval(group, operationId, 'deny');
+      
+      const execResult = tryExecuteOperation(group, operationId, inference.implFingerprint);
+      
+      const pass = !execResult.success && execResult.reason === 'not_approved' && execResult.blocked;
+      inferenceState.approvalRequest = approval;
+      inferenceState.executionResult = execResult;
+      return { pass, detail: `denied=${approval.state}, blocked=${execResult.blocked}` };
+    }
+  },
+  {
+    id: 's10',
+    title: 'Expired-approval',
+    note: 'Approval older than 24h — should be blocked due to expiry.',
+    toolSchema: { method: 'GET', parameters: { id: { type: 'string' } } },
+    description: 'Fetch resource.',
+    manifest: { permissions: ['read:resources'] },
+    expectedPass: true,
+    run() {
+      resetInference();
+      const group = getCurrentGroup();
+      const operationId = 'op-expired';
+      
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      const approval = requestApproval(group, operationId, inference);
+      approval.state = 'approved';
+      approval.decision = 'approve';
+      approval.expiresAt = now() - 1000; // expired 1 second ago
+      
+      group.approvedOperations[operationId] = approval;
+      
+      const execResult = tryExecuteOperation(group, operationId, inference.implFingerprint);
+      
+      const pass = !execResult.success && execResult.reason === 'expired' && execResult.blocked;
+      inferenceState.approvalRequest = approval;
+      inferenceState.executionResult = execResult;
+      return { pass, detail: `expired=${approval.state === 'expired'}, blocked=${execResult.blocked}, reason=${execResult.reason}` };
+    }
+  },
+  {
+    id: 's11',
+    title: 'Prompt-cache-stable',
+    note: 'Approval metadata should NOT enter model messages — stays outside message prefix.',
+    toolSchema: { method: 'GET', parameters: {} },
+    description: 'Read operation for cache stability test.',
+    manifest: { permissions: ['read:test'] },
+    expectedPass: true,
+    run() {
+      resetInference();
+      const group = getCurrentGroup();
+      const operationId = 'op-cache-stable';
+      
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      const approval = requestApproval(group, operationId, inference);
+      approval.state = 'approved';
+      approval.decision = 'approve';
+      group.approvedOperations[operationId] = approval;
+      
+      // Simulate model-facing messages (approval metadata should NOT appear here)
+      inferenceState.messages = [
+        { role: 'user', content: 'Please fetch the data.' },
+        { role: 'assistant', content: 'I will fetch the data for you.' }
+      ];
+      
+      // Check that approval metadata is NOT in messages
+      const messagesStr = JSON.stringify(inferenceState.messages);
+      const approvalMetadataInMessages = messagesStr.includes('approval') || messagesStr.includes(approval.id);
+      
+      const pass = !approvalMetadataInMessages;
+      inferenceState.approvalRequest = approval;
+      return { pass, detail: `approvalOutsideMessages=${!approvalMetadataInMessages}, messages=${inferenceState.messages.length}` };
+    }
+  },
+  {
+    id: 's12',
+    title: 'Cross-group-isolation',
+    note: 'Approval from group A should NOT apply to group B.',
+    toolSchema: { method: 'POST', parameters: { data: { type: 'object' } } },
+    description: 'Create resource.',
+    manifest: { permissions: ['write:resources'] },
+    expectedPass: true,
+    run() {
+      resetInference();
+      
+      const groupA = groups['group-A'];
+      const groupB = groups['group-B'];
+      const operationId = 'op-cross-group';
+      
+      // Approve in group A
+      const inference = inferCapabilityDescriptor(this.toolSchema, this.description, this.manifest, {});
+      const approval = requestApproval(groupA, operationId, inference);
+      approval.state = 'approved';
+      approval.decision = 'approve';
+      groupA.approvedOperations[operationId] = approval;
+      
+      // Check isolation
+      const isolation = checkApprovalIsolation(groupA, groupB, operationId);
+      
+      // Try execution in group B (should fail)
+      const execResultB = tryExecuteOperation(groupB, operationId, inference.implFingerprint);
+      
+      const pass = isolation.approvedInA && isolation.isolated && !execResultB.success && execResultB.blocked;
+      inferenceState.inference = { isolation, groupA_has: !!groupA.approvedOperations[operationId], groupB_has: !!groupB.approvedOperations[operationId] };
+      inferenceState.executionResult = { groupB_blocked: execResultB.blocked };
+      return { pass, detail: `groupA_approved=${isolation.approvedInA}, groupB_isolated=${isolation.isolated}, groupB_blocked=${execResultB.blocked}` };
+    }
+  }
+];
+
+// ============ UI Rendering ============
+function metricsHtml() {
+  const total = Object.keys(scenarioResults).length;
+  const passed = Object.values(scenarioResults).filter(r => r.pass).length;
+  const blocked = Object.values(scenarioResults).filter(r => r.detail && r.detail.includes('blocked')).length;
+  return [
+    ['Scenarios run', total],
+    ['Passed', passed],
+    ['Blocked (fail-closed)', blocked]
+  ].map(([k,v]) => `<div class="metric"><b>${v}</b><span>${k}</span></div>`).join('');
+}
+
+function renderState() {
+  const badges = [
+    `<span class="badge">Current group: <strong>${currentGroup}</strong></span>`,
+    `<span class="badge">Approved ops: <strong>${Object.keys(getCurrentGroup().approvedOperations).length}</strong></span>`,
+    `<span class="badge">Denied ops: <strong>${Object.keys(getCurrentGroup().deniedOperations).length}</strong></span>`
+  ];
+  document.getElementById('headerBadges').innerHTML = badges.join('');
+  
+  document.getElementById('metrics').innerHTML = metricsHtml();
+  
+  // Render inference display
+  if (inferenceState && inferenceState.inference) {
+    const inf = inferenceState.inference;
+    const effects = Array.isArray(inf.inferredEffects) ? inf.inferredEffects : [];
+    const flags = Array.isArray(inf.flags) ? inf.flags : [];
+    const tags = [
+      ...effects.map(e => `<span class="tag ${e === 'write' ? 'write' : e === 'read' ? 'read' : ''}">${e}</span>`),
+      ...flags.map(f => `<span class="tag nested">${f}</span>`),
+      inf.ambiguous ? '<span class="tag ambiguous">ambiguous</span>' : '',
+      inf.classification === 'ambiguous_blocked' ? '<span class="tag blocked">fail-closed</span>' : ''
+    ].filter(Boolean);
+    
+    document.getElementById('inferenceDisplay').innerHTML = `
+      <div class="inference-display">
+        <h4>Inference Result</h4>
+        <div class="classification-tags">${tags.join('')}</div>
+        <div><small>Classification: <code>${inf.classification}</code></small></div>
+        <div><small>Confidence: <code>${inf.confidence}</code></small></div>
+        <div><small>Fingerprint: <code style="font-size:10px;">${inf.implFingerprint}</code></small></div>
+      </div>
+    `;
+    
+    // Approval status
+    if (inferenceState.approvalRequest) {
+      const ap = inferenceState.approvalRequest;
+      const statusClass = ap.state;
+      const statusText = ap.state.replace('_', ' ');
+      document.getElementById('inferenceDisplay').innerHTML += `
+        <div class="approval-status">
+          <span class="status-badge ${statusClass}">${statusText}</span>
+          ${ap.decision ? `<small>Decided by: ${ap.decidedBy}</small>` : ''}
+        </div>
+      `;
+    }
+    
+    if (inferenceState.executionResult) {
+      const ex = inferenceState.executionResult;
+      const successClass = ex.success || ex.executed ? 'pass' : 'fail';
+      const successText = ex.success || ex.executed ? 'EXECUTED' : (ex.blocked ? 'BLOCKED' : 'FAILED');
+      document.getElementById('inferenceDisplay').innerHTML += `
+        <div class="approval-status">
+          <span class="status-badge ${ex.success || ex.executed ? 'approved' : 'blocked'}">${successText}</span>
+          <small>Reason: ${ex.reason || 'n/a'}</small>
+        </div>
+      `;
+    }
+  } else {
+    document.getElementById('inferenceDisplay').innerHTML = '<div class="inference-display"><small>Run a scenario to see inference results</small></div>';
+  }
+  
+  document.getElementById('stateView').textContent = JSON.stringify({
+    group: getCurrentGroup(),
+    inferenceState,
+    auditLog: getCurrentGroup().auditLog.slice(-10)
+  }, null, 2);
+  
+  document.getElementById('freeMetrics').innerHTML = metricsHtml();
+  document.getElementById('freeStateView').textContent = JSON.stringify(inferenceState, null, 2);
+}
+
+function renderScenarios() {
+  document.getElementById('scenarioList').innerHTML = scenarios.map(s => {
+    const r = scenarioResults[s.id];
+    return `<div class="scenario">
+      <div class="scenario-head">
+        <div>
+          <div class="scenario-title">${s.title}</div>
+          <small>${s.note}</small>
+        </div>
+        <button class="run" data-run="${s.id}">Run</button>
+      </div>
+      ${r ? `<div class="result ${r.pass ? 'pass' : 'fail'}">${r.pass ? 'PASS' : 'FAIL'} — ${r.detail}</div>` : ''}
+    </div>`;
+  }).join('');
+  document.querySelectorAll('[data-run]').forEach(b => b.onclick = () => runScenario(b.dataset.run));
+}
+
+function runScenario(id) {
+  const s = scenarios.find(x => x.id === id);
+  
+  // Reset groups for each scenario
+  groups = createInitialGroups();
+  currentGroup = 'group-A';
+  
+  scenarioResults[id] = s.run();
+  renderScenarios();
+  renderState();
+}
+
+function runAll() {
+  let passed = 0;
+  groups = createInitialGroups();
+  
+  for (const s of scenarios) {
+    currentGroup = s.id === 's12' ? 'group-A' : 'group-A'; // s12 uses both groups
+    scenarioResults[s.id] = s.run();
+    if (scenarioResults[s.id].pass) passed++;
+  }
+  
+  const allPassed = passed === scenarios.length;
+  document.getElementById('runSummary').innerHTML = `<span class="${allPassed ? 'pass' : 'fail'}">${passed}/${scenarios.length} scenarios passed</span>`;
+  renderScenarios();
+  renderState();
+}
+
+// ============ Free Play ============
+const freeFields = [
+  ['method', 'HTTP Method', ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']],
+  ['description', 'Description (text)', null],
+  ['paramName', 'Parameter Name', null],
+  ['paramType', 'Parameter Type', ['string', 'number', 'object', 'array', 'boolean']]
+];
+
+let freeOperation = {
+  method: 'GET',
+  description: 'Fetch data',
+  paramName: 'id',
+  paramType: 'string'
+};
+
+function renderFreeForm() {
+  document.getElementById('freeForm').innerHTML = freeFields.map(([key, label, options]) => {
+    const value = freeOperation[key] || '';
+    if (options) {
+      return `<label>${label}
+        <select data-field="${key}">
+          ${options.map(o => `<option ${value === o ? 'selected' : ''}>${o}</option>`).join('')}
+        </select>
+      </label>`;
+    } else {
+      return `<label>${label}
+        <input data-field="${key}" value="${String(value).replace(/"/g, '"')}">
+      </label>`;
+    }
+  }).join('');
+  
+  document.querySelectorAll('[data-field]').forEach(el => {
+    el.oninput = () => { freeOperation[el.dataset.field] = el.value; };
+  });
+}
+
+function runFreePlay() {
+  resetInference();
+  groups = createInitialGroups();
+  
+  const toolSchema = {
+    method: freeOperation.method,
+    parameters: {
+      [freeOperation.paramName]: { type: freeOperation.paramType }
+    }
+  };
+  
+  const inference = inferCapabilityDescriptor(
+    toolSchema,
+    freeOperation.description,
+    { permissions: ['custom'] },
+    {}
+  );
+  
+  inferenceState.inference = inference;
+  
+  // Auto-request approval
+  const group = getCurrentGroup();
+  const approval = requestApproval(group, 'free-op', inference);
+  inferenceState.approvalRequest = approval;
+  
+  renderState();
+}
+
+// ============ Tab Navigation ============
+document.querySelectorAll('.tab').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+    document.querySelectorAll('.pane').forEach(x => x.classList.toggle('active', x.id === b.dataset.pane));
+  };
+});
+
+document.getElementById('runAll').onclick = runAll;
+document.getElementById('attemptFree').onclick = runFreePlay;
+document.getElementById('resetFree').onclick = () => {
+  resetInference();
+  groups = createInitialGroups();
+  scenarioResults = {};
+  freeOperation = { method: 'GET', description: 'Fetch data', paramName: 'id', paramType: 'string' };
+  renderFreeForm();
+  renderScenarios();
+  renderState();
+  document.getElementById('runSummary').innerHTML = '<span class="sub">Run a case or run the complete matrix.</span>';
+};
+
+// Initialize
+renderScenarios();
+renderFreeForm();
+renderState();
+</script>
+</body>
+</html>

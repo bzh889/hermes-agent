@@ -159,6 +159,14 @@ def get_aide_context_length(
     return None
 
 
+def fetch_aide_catalog(
+    base_url: str, api_key: str, user_id: str
+) -> List[AideModel]:
+    """Fetch the live AIDE model catalog with context metadata."""
+    v1_data, v3_data = fetch_aide_models(base_url, api_key, user_id)
+    return merge_aide_models(v1_data, v3_data)
+
+
 def detect_aide_environment() -> dict:
     """Auto-detect MTK AIDE environment (CCH, user_id, network).
 

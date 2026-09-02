@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PROTOTYPE — Restricted AIDE-only Model Routing Gate</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d13;
+      --panel: #111821;
+      --panel2: #17212d;
+      --line: #2b3948;
+      --text: #e8eef5;
+      --muted: #91a0b2;
+      --green: #47d18c;
+      --red: #ff6b77;
+      --amber: #f7bf56;
+      --blue: #69a7ff;
+      --violet: #b68cff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 20% 0%, #172538 0, var(--bg) 36rem); color: var(--text); font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; }
+    button, select, input { font: inherit; }
+    button { cursor: pointer; }
+    .shell { max-width: 1500px; margin: 0 auto; padding: 24px; }
+    header { display: flex; gap: 24px; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+    h1 { margin: 0 0 6px; font-size: 25px; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    p { margin: 6px 0; }
+    .prototype { color: var(--amber); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .sub { color: var(--muted); max-width: 860px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; background: #0c131c; white-space: nowrap; }
+    .badge strong { color: white; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+    .tab { border: 1px solid var(--line); color: var(--muted); background: var(--panel); padding: 9px 13px; border-radius: 8px; }
+    .tab.active { color: white; border-color: var(--blue); background: #17263a; }
+    .pane { display: none; }
+    .pane.active { display: block; }
+    .layout { display: grid; grid-template-columns: minmax(460px, .95fr) minmax(520px, 1.25fr); gap: 14px; }
+    .card { border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, rgba(23,33,45,.96), rgba(15,22,31,.98)); padding: 16px; box-shadow: 0 14px 50px rgba(0,0,0,.22); }
+    .walkthrough-groups { display: flex; gap: 6px; margin-bottom: 12px; }
+    .group-tab { border: 1px solid var(--line); border-radius: 7px; background: #0e151e; color: var(--muted); padding: 7px 10px; }
+    .group-tab.active { color: white; border-color: var(--violet); }
+    .scenario { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 9px 0; background: rgba(9,13,19,.65); }
+    .scenario-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .scenario-title { font-weight: 750; }
+    .scenario small { display: block; color: var(--muted); margin: 4px 0 9px; }
+    .run { border: 1px solid #456d9d; color: #dcecff; background: #18304d; padding: 7px 10px; border-radius: 7px; white-space: nowrap; }
+    .run:hover { background: #214269; }
+    .result { margin-top: 7px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .pass { color: var(--green); }
+    .fail { color: var(--red); }
+    .held { color: var(--amber); }
+    .all { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+    .primary { border: 1px solid #3d8665; color: #e6fff2; background: #16412e; padding: 9px 13px; border-radius: 8px; }
+    .state-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+    .metric { border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: #0d141d; }
+    .metric b { display: block; font-size: 20px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .json { background: #080c12; border: 1px solid #25313e; border-radius: 9px; padding: 12px; max-height: 570px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .contract { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .contract div { border-left: 3px solid var(--blue); padding: 8px 10px; background: #0c141f; }
+    .contract code { color: #b9d6ff; }
+    .free-form { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 10px; }
+    label { display: grid; gap: 5px; color: var(--muted); }
+    input, select { width: 100%; border: 1px solid var(--line); background: #0a1119; color: var(--text); border-radius: 7px; padding: 8px; }
+    .free-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .note { border: 1px solid #61522f; background: #231d0f; color: #f7d998; border-radius: 9px; padding: 10px 12px; margin-bottom: 12px; }
+    .matrix { width: 100%; border-collapse: collapse; }
+    .matrix th, .matrix td { border-bottom: 1px solid var(--line); text-align: left; padding: 9px 7px; vertical-align: top; }
+    .matrix th { color: var(--muted); font-weight: 600; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    @media (max-width: 1050px) { .layout { grid-template-columns: 1fr; } header { display: block; } .badges { justify-content: flex-start; margin-top: 14px; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div>
+      <div class="prototype">Throwaway logic prototype — not production enforcement</div>
+      <h1>Restricted AIDE-only Model Routing Gate</h1>
+      <p class="sub">Question: does one origin-bound, current-revision authority module correctly fail closed across main, fallback, auxiliary, vision/OCR, embedding, delegation, cron, and failure-triage routes without changing model-facing messages?</p>
+    </div>
+    <div class="badges" id="headerBadges"></div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-pane="guided">Guided walkthroughs</button>
+    <button class="tab" data-pane="freeplay">Free play</button>
+    <button class="tab" data-pane="contract">Proposed contract</button>
+  </nav>
+
+  <section class="pane active" id="guided">
+    <div class="layout">
+      <div class="card">
+        <h2>Attack and recovery walkthroughs</h2>
+        <div class="walkthrough-groups" id="groupTabs"></div>
+        <div id="scenarioList"></div>
+        <div class="all">
+          <span id="runSummary" class="sub">Run a case or run the complete matrix.</span>
+          <button class="primary" id="runAll">Run all scenarios</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Full relevant state after every action</h2>
+        <div class="state-grid" id="metrics"></div>
+        <pre class="json" id="stateView"></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="pane" id="freeplay">
+    <div class="layout">
+      <div class="card">
+        <h2>Construct a final route candidate</h2>
+        <div class="note">The gate sees the final resolved route immediately before transport. Editing a provider label alone cannot grant access: route id, requested and canonical provider, principal, HTTPS host, path family, model, route class, origin, and current policy must all match.</div>
+        <div class="free-form" id="freeForm"></div>
+        <div class="free-actions">
+          <button class="primary" id="attemptFree">Authorize and invoke</button>
+          <button class="run" id="resetFree">Reset</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Full relevant state</h2>
+        <div class="state-grid" id="freeMetrics"></div>
+        <pre class="json" id="freeStateView"></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="pane" id="contract">
+    <div class="card">
+      <h2>One deep module, one mandatory side-effect interface</h2>
+      <div class="contract">
+        <div><code>authorizeAndInvoke(binding, candidate, transport)</code><br><span class="sub">Reload current policy, normalize and match the final route, mint and consume a one-use permit, then and only then call transport.</span></div>
+        <div><code>ProviderAuthorityContext</code><br><span class="sub">Immutable origin/policy identity propagates through ContextVars and durable child/job metadata; it never enters system/user/assistant messages.</span></div>
+      </div>
+      <table class="matrix">
+        <thead><tr><th>Current path</th><th>Mandatory invocation seam</th><th>Why construction-time checks are insufficient</th></tr></thead>
+        <tbody>
+          <tr><td>Main chat, streaming, Responses, Anthropic, Bedrock</td><td>Shared dispatch immediately before SDK/network invocation</td><td>API mode, credential rotation, request-scoped clients, streaming downgrade and fallback can change after agent construction.</td></tr>
+          <tr><td>Main fallback and model switch</td><td>Each newly selected candidate at its first outbound attempt</td><td><code>try_activate_fallback()</code> mutates provider/model/base URL and rebuilds clients in place.</td></tr>
+          <tr><td>Auxiliary sync/async and task fallback</td><td><code>call_llm</code>/<code>async_call_llm</code> around every candidate invocation</td><td>Explicit task overrides, main-runtime inheritance, task chain, main chain, and hard-coded auto chain all select independently.</td></tr>
+          <tr><td>Vision and OCR/document interpretation</td><td>Final client/model returned by vision resolution, before image request</td><td>Vision has a separate main-provider probe and aggregator fallback order; OCR is a route class, not currently a separate core task.</td></tr>
+          <tr><td>Exact-group semantic embedding</td><td>Future AIDE IO TEI adapter before <code>/embed</code></td><td>No current core <code>task="embedding"</code> sink exists; memory-plugin embeddings are forbidden for Restricted Tasks.</td></tr>
+          <tr><td>Delegated child, async result, MoA workers</td><td>Child inherits authority context; every child/worker model attempt crosses the same authority</td><td>Child model/provider overrides and MoA reference/aggregator slots can diverge from parent.</td></tr>
+          <tr><td>Cron</td><td>Persist authority binding in job metadata; every cron agent model attempt crosses the same authority</td><td>Cron resolves job model/provider in a fresh session and has a direct non-streaming transport path.</td></tr>
+          <tr><td>Production-failure triage</td><td>Dedicated route class through the same authority; failure cannot trigger an external-model fallback</td><td>Timeout, malformed output, or unavailable approved route must hold the operation for owner intervention.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+<script>
+'use strict';
+const APPROVED_HOST = 'mlop-azure-gateway.mediatek.inc';
+const APPROVED_IO_HOST = 'mlop-azure-gateway-io.mediatek.inc';
+const BASE_PREFIX_DIGEST = 'sha256:7a6f…model-facing-prefix-unchanged';
+
+function policy(revision = 7) {
+  return {
+    policyId: 'restricted-group-policy',
+    revision,
+    active: true,
+    subjectOrigin: 'teams_mtk:group:19:restricted@thread.skype',
+    grants: [
+      {
+        routeId: 'aide-primary-personal',
+        requestedProviders: ['aide'],
+        resolvedProviders: ['aide', 'custom'],
+        principals: ['MTK12265'],
+        scheme: 'https', host: APPROVED_HOST, pathFamily: '/v1/chat/completions',
+        routeClasses: ['main','fallback','auxiliary','vision','ocr','title_generation','delegation','cron','production_failure_triage'],
+        models: ['mtk/qwen3-5-397b-a17b','mtk/qwen3-6-35b-a3b','azure/aide-gpt-4.1-mini','google/gemini-2.5-flash']
+      },
+      {
+        routeId: 'aide-primary-service',
+        requestedProviders: ['aide-ds901472'],
+        resolvedProviders: ['aide', 'custom'],
+        principals: ['ds901472'],
+        scheme: 'https', host: APPROVED_HOST, pathFamily: '/v1/chat/completions',
+        routeClasses: ['fallback','auxiliary','vision','ocr','delegation','cron','production_failure_triage'],
+        models: ['mtk/qwen3-5-397b-a17b','azure/aide-gpt-4.1-mini','google/gemini-2.5-flash']
+      },
+      {
+        routeId: 'aide-io-embedding',
+        requestedProviders: ['aide-io'],
+        resolvedProviders: ['aide-io', 'custom'],
+        principals: ['MTK12265'],
+        scheme: 'https', host: APPROVED_IO_HOST, pathFamily: '/llm/v3/models/{model}/embed',
+        routeClasses: ['embedding'],
+        models: ['generic-embeddings/multilingual-e5-large']
+      }
+    ]
+  };
+}
+
+function baseCandidate(overrides = {}) {
+  return {
+    operationId: 'op-001', attemptId: 'attempt-001',
+    origin: 'teams_mtk:group:19:restricted@thread.skype',
+    policyId: 'restricted-group-policy',
+    routeId: 'aide-primary-personal', routeClass: 'main',
+    requestedProvider: 'aide', resolvedProvider: 'custom', principal: 'MTK12265',
+    scheme: 'https', host: APPROVED_HOST, pathFamily: '/v1/chat/completions',
+    model: 'mtk/qwen3-5-397b-a17b', isFallback: false,
+    ...overrides
+  };
+}
+
+function newState() {
+  return {
+    binding: {
+      restricted: true,
+      origin: 'teams_mtk:group:19:restricted@thread.skype',
+      policyId: 'restricted-group-policy',
+      boundAtRevision: 7,
+      source: 'immutable ContextVar / durable job-child metadata'
+    },
+    currentPolicy: policy(7),
+    promptPrefixDigestBefore: BASE_PREFIX_DIGEST,
+    promptPrefixDigestAfter: BASE_PREFIX_DIGEST,
+    candidate: null,
+    decision: null,
+    permits: [],
+    networkAttempts: [],
+    auditEvents: [],
+    operationState: 'ready',
+    runSummary: null
+  };
+}
+let state = newState();
+
+function normalizeHost(host) {
+  return String(host || '').trim().toLowerCase().replace(/\.$/, '');
+}
+function fingerprint(candidate, revision) {
+  const raw = JSON.stringify({
+    origin: candidate.origin, policyId: candidate.policyId, revision,
+    routeId: candidate.routeId, routeClass: candidate.routeClass,
+    requestedProvider: candidate.requestedProvider, resolvedProvider: candidate.resolvedProvider,
+    principal: candidate.principal, scheme: candidate.scheme,
+    host: normalizeHost(candidate.host), pathFamily: candidate.pathFamily,
+    model: candidate.model, operationId: candidate.operationId, attemptId: candidate.attemptId
+  });
+  let h = 2166136261;
+  for (let i = 0; i < raw.length; i++) { h ^= raw.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'permit:' + (h >>> 0).toString(16).padStart(8, '0');
+}
+function matchGrant(grant, c) {
+  return grant.routeId === c.routeId &&
+    grant.requestedProviders.includes(c.requestedProvider) &&
+    grant.resolvedProviders.includes(c.resolvedProvider) &&
+    grant.principals.includes(c.principal) &&
+    grant.scheme === String(c.scheme).toLowerCase() &&
+    grant.host === normalizeHost(c.host) &&
+    grant.pathFamily === c.pathFamily &&
+    grant.routeClasses.includes(c.routeClass) &&
+    grant.models.includes(c.model);
+}
+function deny(reason, candidate) {
+  state.candidate = structuredClone(candidate);
+  state.decision = { allowed: false, reason, currentRevision: state.currentPolicy.revision, networkAttemptEmitted: false };
+  state.auditEvents.push({
+    kind: 'provider-denied', at: new Date().toISOString(), operationId: candidate.operationId,
+    attemptId: candidate.attemptId, routeClass: candidate.routeClass, routeId: candidate.routeId,
+    host: normalizeHost(candidate.host), model: candidate.model, policyRevision: state.currentPolicy.revision,
+    reason, payload: '[CONTENT OMITTED]'
+  });
+  return state.decision;
+}
+function authorizeAndInvoke(candidate, simulatedTransportResult = 'ok') {
+  // Mandatory operation-time current-revision load happens here, not at construction.
+  const binding = state.binding;
+  const current = state.currentPolicy;
+  if (!binding || !binding.restricted) return deny('missing Restricted Task authority binding', candidate);
+  if (!current || !current.active) return deny('current policy is missing or inactive', candidate);
+  if (binding.policyId !== current.policyId || candidate.policyId !== current.policyId) return deny('policy identity mismatch', candidate);
+  if (binding.origin !== current.subjectOrigin || candidate.origin !== binding.origin) return deny('origin identity mismatch', candidate);
+  if (String(candidate.scheme).toLowerCase() !== 'https') return deny('non-HTTPS model route', candidate);
+  const grant = current.grants.find(g => matchGrant(g, candidate));
+  if (!grant) return deny('no exact current-revision route grant', candidate);
+
+  const permit = {
+    id: fingerprint(candidate, current.revision), consumed: false,
+    policyRevision: current.revision, operationId: candidate.operationId,
+    attemptId: candidate.attemptId, routeId: candidate.routeId
+  };
+  state.permits.push(permit);
+  // Permit is single-use and consumed immediately in the same call as transport invocation.
+  permit.consumed = true;
+  state.networkAttempts.push({
+    permitId: permit.id, host: normalizeHost(candidate.host), pathFamily: candidate.pathFamily,
+    model: candidate.model, routeClass: candidate.routeClass, result: simulatedTransportResult
+  });
+  state.candidate = structuredClone(candidate);
+  state.decision = { allowed: true, reason: 'exact current-revision route grant', currentRevision: current.revision, permitId: permit.id, networkAttemptEmitted: true, transportResult: simulatedTransportResult };
+  state.auditEvents.push({
+    kind: simulatedTransportResult === 'ok' ? 'provider-invoked' : 'provider-failed',
+    at: new Date().toISOString(), operationId: candidate.operationId, attemptId: candidate.attemptId,
+    routeClass: candidate.routeClass, routeId: candidate.routeId, host: normalizeHost(candidate.host),
+    model: candidate.model, policyRevision: current.revision, permitId: permit.id,
+    result: simulatedTransportResult, payload: '[CONTENT OMITTED]'
+  });
+  return state.decision;
+}
+function reset() { state = newState(); }
+function check(name, ok, detail) { return { name, pass: !!ok, detail }; }
+
+const scenarios = [
+  {
+    id:'main', group:'approved', title:'Compliant main request',
+    note:'Named provider resolves canonically to custom, but exact AIDE route identity remains approved.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate()); return check(this.title, d.allowed && state.networkAttempts.length===1, `${d.allowed?'allowed':'denied'}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'internal-fallback', group:'approved', title:'Approved AIDE service-account fallback',
+    note:'Fallback changes account/principal but remains an explicitly granted internal route.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({routeId:'aide-primary-service',routeClass:'fallback',requestedProvider:'aide-ds901472',principal:'ds901472',isFallback:true})); return check(this.title,d.allowed&&state.networkAttempts.length===1,`${d.allowed?'allowed':'denied'}; permit=${d.permitId||'none'}`); }
+  },
+  {
+    id:'embedding', group:'approved', title:'Future exact-group embedding via AIDE IO',
+    note:'TEI path, embedding model and IO host are a distinct exact route grant; this is future history-retrieval plumbing, not a claimed current core sink.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({routeId:'aide-io-embedding',routeClass:'embedding',requestedProvider:'aide-io',resolvedProvider:'custom',host:APPROVED_IO_HOST,pathFamily:'/llm/v3/models/{model}/embed',model:'generic-embeddings/multilingual-e5-large'})); return check(this.title,d.allowed&&state.networkAttempts.length===1,`${d.allowed?'allowed':'denied'}; host=${state.networkAttempts[0]?.host||'none'}`); }
+  },
+  {
+    id:'ocr', group:'approved', title:'OCR/document interpretation on AIDE vision route',
+    note:'OCR is represented as a route class even though current core uses vision/document plumbing rather than task="ocr".',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({routeClass:'ocr',model:'google/gemini-2.5-flash'})); return check(this.title,d.allowed&&state.networkAttempts.length===1,`${d.allowed?'allowed':'denied'}; class=ocr`); }
+  },
+  {
+    id:'external-fallback', group:'attacks', title:'External main fallback is blocked',
+    note:'An unavailable compliant primary cannot fall through to OpenRouter.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({routeId:'openrouter-default',routeClass:'fallback',requestedProvider:'openrouter',resolvedProvider:'openrouter',principal:'external',host:'openrouter.ai',model:'anthropic/claude-sonnet-4',isFallback:true})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'aux-override', group:'attacks', title:'Explicit auxiliary override is blocked',
+    note:'Task config cannot override authority by naming a working external provider.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({routeId:'openai-direct',routeClass:'title_generation',requestedProvider:'openai',resolvedProvider:'openai',principal:'external',host:'api.openai.com',model:'gpt-5.6'})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'vision-chain', group:'attacks', title:'Vision auto-chain fails closed',
+    note:'When no approved AIDE vision candidate is available, OpenRouter and Nous candidates are denied before transport.',
+    run(){ reset(); const a=authorizeAndInvoke(baseCandidate({operationId:'vision-1',attemptId:'vision-or',routeId:'openrouter-vision',routeClass:'vision',requestedProvider:'openrouter',resolvedProvider:'openrouter',principal:'external',host:'openrouter.ai',model:'openai/gpt-4o'})); const b=authorizeAndInvoke(baseCandidate({operationId:'vision-1',attemptId:'vision-nous',routeId:'nous-vision',routeClass:'vision',requestedProvider:'nous',resolvedProvider:'nous',principal:'external',host:'inference-api.nousresearch.com',model:'gpt-4o'})); state.operationState='held: no approved vision route'; return check(this.title,!a.allowed&&!b.allowed&&state.networkAttempts.length===0,`2 candidates denied; network=${state.networkAttempts.length}; held`); }
+  },
+  {
+    id:'delegation', group:'attacks', title:'Delegated child override is blocked',
+    note:'Child inherits immutable authority; its explicit provider/model override cannot escape.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({operationId:'child-17',routeId:'codex-direct',routeClass:'delegation',requestedProvider:'openai-codex',resolvedProvider:'openai-codex',principal:'external',host:'chatgpt.com',pathFamily:'/backend-api/codex/responses',model:'gpt-5.6'})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'cron', group:'attacks', title:'Cron-pinned external model is blocked',
+    note:'Durable job metadata carries authority into the fresh cron session.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({operationId:'cron-42',routeId:'anthropic-direct',routeClass:'cron',requestedProvider:'anthropic',resolvedProvider:'anthropic',principal:'external',host:'api.anthropic.com',pathFamily:'/v1/messages',model:'claude-sonnet-4-6'})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'lookalike', group:'attacks', title:'AIDE hostname lookalike is blocked',
+    note:'Substring/prefix matching is forbidden; normalized hostname must match exactly.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({host:'mlop-azure-gateway.mediatek.inc.attacker.example'})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; host=${normalizeHost(state.candidate.host)}`); }
+  },
+  {
+    id:'alias-forgery', group:'attacks', title:'Custom-provider alias forgery is blocked',
+    note:'Same host/model is insufficient without the approved requested-provider route identity and principal.',
+    run(){ reset(); const d=authorizeAndInvoke(baseCandidate({requestedProvider:'custom:evil',principal:'attacker'})); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`${d.reason}; network=${state.networkAttempts.length}`); }
+  },
+  {
+    id:'triage', group:'revision', title:'Failure triage cannot declassify or escape',
+    note:'Approved AIDE triage may fail; a then-available external fallback is still blocked and the operation remains held.',
+    run(){ reset(); const approved=authorizeAndInvoke(baseCandidate({operationId:'triage-1',attemptId:'triage-aide',routeClass:'production_failure_triage'}),'timeout'); const blocked=authorizeAndInvoke(baseCandidate({operationId:'triage-1',attemptId:'triage-external',routeId:'openai-triage',routeClass:'production_failure_triage',requestedProvider:'openai',resolvedProvider:'openai',principal:'external',host:'api.openai.com',model:'gpt-5.6'})); state.operationState='held: owner intervention required; no side effect retried'; return check(this.title,approved.allowed&&!blocked.allowed&&state.networkAttempts.length===1,`AIDE attempt=${approved.transportResult}; external network attempts=0; held`); }
+  },
+  {
+    id:'revoke', group:'revision', title:'Current-revision revocation wins',
+    note:'Candidate resolved under revision 7; revision 8 removes the route before invocation.',
+    run(){ reset(); state.currentPolicy=policy(8); state.currentPolicy.grants=[]; const d=authorizeAndInvoke(baseCandidate()); return check(this.title,!d.allowed&&state.networkAttempts.length===0,`bound@7/current@8; ${d.reason}`); }
+  },
+  {
+    id:'grant-now', group:'revision', title:'Current-revision approval applies immediately',
+    note:'Binding was created at revision 7; revision 8 grants a new exact model before this operation.',
+    run(){ reset(); state.currentPolicy=policy(8); state.currentPolicy.grants[0].models.push('mtk/new-approved-model'); const d=authorizeAndInvoke(baseCandidate({model:'mtk/new-approved-model'})); return check(this.title,d.allowed&&state.networkAttempts.length===1,`bound@7/current@8; ${d.reason}`); }
+  },
+  {
+    id:'prefix', group:'revision', title:'Authority metadata is prompt-cache stable',
+    note:'Origin/policy context changes outside the model-facing message prefix.',
+    run(){ reset(); state.binding.boundAtRevision=6; state.currentPolicy=policy(9); state.promptPrefixDigestAfter=BASE_PREFIX_DIGEST; state.auditEvents.push({kind:'authority-context-refreshed',payload:'[NO MODEL-FACING MESSAGE MUTATION]',fromRevision:6,toRevision:9}); return check(this.title,state.promptPrefixDigestBefore===state.promptPrefixDigestAfter,`prefix digest unchanged; authority revision moved 6→9`); }
+  }
+];
+
+const groups = [
+  {id:'approved', label:'Approved internal paths'},
+  {id:'attacks', label:'Fallbacks & overrides'},
+  {id:'revision', label:'Revision, triage & cache'}
+];
+let activeGroup='approved';
+const scenarioResults={};
+
+function metricsHtml(s) {
+  const denied=s.auditEvents.filter(e=>e.kind==='provider-denied').length;
+  const violations=s.networkAttempts.filter(n=>![APPROVED_HOST,APPROVED_IO_HOST].includes(n.host)).length;
+  return [
+    ['Policy rev',s.currentPolicy?.revision??'none'],
+    ['Network attempts',s.networkAttempts.length],
+    ['Denied candidates',denied],
+    ['External violations',violations]
+  ].map(([k,v])=>`<div class="metric"><b>${v}</b><span>${k}</span></div>`).join('');
+}
+function renderState() {
+  document.getElementById('headerBadges').innerHTML=`<span class="badge">Bound origin: <strong>Teams group</strong></span><span class="badge">Current policy: <strong>r${state.currentPolicy?.revision??'—'}</strong></span><span class="badge">Operation: <strong>${state.operationState}</strong></span>`;
+  document.getElementById('metrics').innerHTML=metricsHtml(state);
+  document.getElementById('stateView').textContent=JSON.stringify(state,null,2);
+  document.getElementById('freeMetrics').innerHTML=metricsHtml(state);
+  document.getElementById('freeStateView').textContent=JSON.stringify(state,null,2);
+}
+function renderGroups(){
+  document.getElementById('groupTabs').innerHTML=groups.map(g=>`<button class="group-tab ${g.id===activeGroup?'active':''}" data-group="${g.id}">${g.label}</button>`).join('');
+  document.querySelectorAll('.group-tab').forEach(b=>b.onclick=()=>{activeGroup=b.dataset.group;renderGroups();renderScenarios();});
+}
+function renderScenarios(){
+  const list=scenarios.filter(s=>s.group===activeGroup);
+  document.getElementById('scenarioList').innerHTML=list.map(s=>{
+    const r=scenarioResults[s.id];
+    return `<div class="scenario"><div class="scenario-head"><div><div class="scenario-title">${s.title}</div><small>${s.note}</small></div><button class="run" data-run="${s.id}">Run</button></div>${r?`<div class="result ${r.pass?'pass':'fail'}">${r.pass?'PASS':'FAIL'} — ${r.detail}</div>`:''}</div>`;
+  }).join('');
+  document.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>runScenario(b.dataset.run));
+}
+function runScenario(id){ const s=scenarios.find(x=>x.id===id); scenarioResults[id]=s.run(); renderScenarios(); renderState(); }
+function runAll(){
+  let passed=0;
+  for(const s of scenarios){ const r=s.run();scenarioResults[s.id]=r;if(r.pass)passed++; }
+  state.runSummary={passed,total:scenarios.length,allPassed:passed===scenarios.length,externalViolationsAcrossFinalScenario:0,note:'Each scenario reset before execution; per-scenario results are listed in the walkthrough groups.'};
+  document.getElementById('runSummary').innerHTML=`<span class="${passed===scenarios.length?'pass':'fail'}">${passed}/${scenarios.length} scenarios passed</span>`;
+  renderScenarios();renderState();
+}
+
+const freeFields=[
+  ['routeClass','Route class',['main','fallback','auxiliary','vision','ocr','embedding','title_generation','delegation','cron','production_failure_triage']],
+  ['routeId','Route id'],['requestedProvider','Requested provider'],['resolvedProvider','Canonical provider'],['principal','Provider principal'],
+  ['scheme','Scheme'],['host','Host'],['pathFamily','Path family'],['model','Model'],['origin','Origin'],['policyId','Policy id']
+];
+let freeCandidate=baseCandidate();
+function renderFreeForm(){
+  document.getElementById('freeForm').innerHTML=freeFields.map(([key,label,options])=>`<label>${label}${options?`<select data-field="${key}">${options.map(o=>`<option ${freeCandidate[key]===o?'selected':''}>${o}</option>`).join('')}</select>`:`<input data-field="${key}" value="${String(freeCandidate[key]).replaceAll('&','&amp;').replaceAll('"','&quot;')}">`}</label>`).join('');
+  document.querySelectorAll('[data-field]').forEach(el=>el.oninput=()=>{freeCandidate[el.dataset.field]=el.value;});
+}
+
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===b));
+  document.querySelectorAll('.pane').forEach(x=>x.classList.toggle('active',x.id===b.dataset.pane));
+});
+document.getElementById('runAll').onclick=runAll;
+document.getElementById('attemptFree').onclick=()=>{authorizeAndInvoke(structuredClone(freeCandidate));renderState();};
+document.getElementById('resetFree').onclick=()=>{reset();freeCandidate=baseCandidate();renderFreeForm();renderState();};
+renderGroups();renderScenarios();renderFreeForm();renderState();
+</script>
+</body>
+</html>

@@ -1734,6 +1734,82 @@ def _extra_headers_from_config(entry: Any) -> dict[str, str]:
     return headers
 
 
+def _truthy_config_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _model_probe_api_key_from_config(entry: Any) -> str:
+    """Resolve the API key used for a user-defined provider /models probe.
+
+    Mirrors runtime provider resolution closely enough for discovery: inline
+    ``api_key`` first, then ``key_env`` with .env precedence, then
+    ``api_key_helper``.  The helper path is required for endpoints such as the
+    MTK AIDE account whose key is minted on demand rather than stored in .env.
+    """
+    if not isinstance(entry, dict):
+        return ""
+
+    api_key = str(entry.get("api_key", "") or "").strip()
+    if api_key:
+        return api_key
+
+    key_env = str(entry.get("key_env", "") or "").strip()
+    if key_env:
+        try:
+            from hermes_cli.config import get_env_value_prefer_dotenv
+
+            value = (get_env_value_prefer_dotenv(key_env) or "").strip()
+        except Exception:
+            import os
+
+            value = os.environ.get(key_env, "").strip()
+        if value:
+            return value
+
+    helper = str(entry.get("api_key_helper", "") or "").strip()
+    if helper:
+        try:
+            from hermes_cli.runtime_provider import run_api_key_helper
+
+            return (run_api_key_helper(helper) or "").strip()
+        except Exception:
+            return ""
+
+    return ""
+
+
+def _model_probe_headers_from_config(entry: Any, api_key: str) -> dict[str, str]:
+    headers = _extra_headers_from_config(entry)
+    if api_key:
+        headers = {k: v.replace("${_API_KEY}", api_key) for k, v in headers.items()}
+    return headers
+
+
+def _fetch_aide_live_catalog(api_url: str, api_key: str, entry: Any) -> tuple[list[str], dict[str, int]] | None:
+    """Fetch AIDE model IDs and authoritative max_model_len together."""
+    if "mlop-azure-gateway" not in str(api_url or "").lower() or not api_key:
+        return None
+    headers = _model_probe_headers_from_config(entry, api_key)
+    user_id = headers.get("x-user-id", "").strip()
+    if not user_id:
+        return None
+    try:
+        from hermes_cli.aide_models import fetch_aide_catalog
+
+        models = fetch_aide_catalog(api_url, api_key, user_id)
+        return (
+            [m.id for m in models],
+            {m.id: int(m.max_model_len) for m in models if m.max_model_len},
+        )
+    except Exception:
+        logger.debug("AIDE live catalog lookup failed", exc_info=True)
+        return None
+
+
 def prewarm_picker_cache_async() -> Optional["_threading.Thread"]:
     """Warm the provider-models disk cache in a background daemon thread.
 
@@ -2503,6 +2579,7 @@ def list_authenticated_providers(
             display_name = grp["name"]
             api_url = grp["api_url"]
             models_list = list(grp["models"])
+            model_context_lengths: dict[str, int] = {}
 
             # Official OpenAI API rows in providers: often have base_url but no
             # explicit models: dict — avoid a misleading zero count in /model.
@@ -2522,10 +2599,7 @@ def list_authenticated_providers(
             # - Without an api_key AND no explicit models: probe anyway so
             #   bare-endpoint providers (local llama.cpp / Ollama servers)
             #   still show their full model catalog.
-            api_key = str(ep_cfg.get("api_key", "") or "").strip()
-            if not api_key:
-                key_env = str(ep_cfg.get("key_env", "") or "").strip()
-                api_key = os.environ.get(key_env, "").strip() if key_env else ""
+            api_key = _model_probe_api_key_from_config(ep_cfg)
             _probe_api_mode = str(
                 ep_cfg.get("api_mode") or ep_cfg.get("transport") or ""
             ).strip().lower()
@@ -2561,22 +2635,40 @@ def list_authenticated_providers(
                     and _ep_url_norm == _current_base_url_norm
                 )
             )
-            should_probe = _can_probe_custom_provider(row_is_current=_ep_is_current) and bool(api_url) and discover and (
-                bool(api_key) or not has_explicit_models
+            force_probe = _truthy_config_flag(ep_cfg.get("always_discover_models"))
+            should_probe = (
+                (force_probe or _can_probe_custom_provider(row_is_current=_ep_is_current))
+                and bool(api_url)
+                and discover
+                and (bool(api_key) or not has_explicit_models)
             )
             if should_probe:
                 try:
-                    from hermes_cli.models import fetch_api_models
-                    live_models = fetch_api_models(
-                        api_key,
-                        api_url,
-                        api_mode=_probe_api_mode or None,
-                        headers=_extra_headers_from_config(ep_cfg) or None,
-                    )
-                    if live_models:
-                        models_list = live_models
+                    aide_catalog = _fetch_aide_live_catalog(api_url, api_key, ep_cfg)
+                    if aide_catalog is not None:
+                        models_list, model_context_lengths = aide_catalog
+                    else:
+                        from hermes_cli.models import fetch_api_models
+                        live_models = fetch_api_models(
+                            api_key,
+                            api_url,
+                            api_mode=_probe_api_mode or None,
+                            headers=_model_probe_headers_from_config(ep_cfg, api_key) or None,
+                        )
+                        if live_models:
+                            models_list = live_models
                 except Exception:
                     pass
+
+            # Apply per-provider excluded_models filter from config.yaml.
+            # This filters out known-broken models (403/404) from the
+            # picker without a live probe — the user lists them under
+            # providers.<slug>.excluded_models in config.yaml.
+            _excluded_models = ep_cfg.get("excluded_models")
+            if isinstance(_excluded_models, list) and _excluded_models:
+                _excl_lower = {m.lower() for m in _excluded_models if isinstance(m, str)}
+                if _excl_lower:
+                    models_list = [m for m in (models_list or []) if m.lower() not in _excl_lower]
 
             results.append({
                 "slug": ep_name,
@@ -2584,6 +2676,7 @@ def list_authenticated_providers(
                 "is_current": _ep_is_current,
                 "is_user_defined": True,
                 "models": models_list,
+                "model_context_lengths": model_context_lengths,
                 "total_models": len(models_list) if models_list else 0,
                 "source": "user-config",
                 "api_url": api_url,
@@ -2880,6 +2973,18 @@ def list_authenticated_providers(
                         )
                 except Exception:
                     pass
+            # Apply per-provider excluded_models filter (same as section 3).
+            _excl_models_s4 = None
+            if isinstance(user_providers, dict):
+                _ep_cfg_s4 = user_providers.get(slug, {})
+                if isinstance(_ep_cfg_s4, dict):
+                    _excl_models_s4 = _ep_cfg_s4.get("excluded_models")
+            if isinstance(_excl_models_s4, list) and _excl_models_s4:
+                _excl_lower_s4 = {m.lower() for m in _excl_models_s4 if isinstance(m, str)}
+                if _excl_lower_s4:
+                    grp["models"] = [m for m in (grp["models"] or []) if m.lower() not in _excl_lower_s4]
+                    grp["total_models"] = len(grp["models"])
+
             results.append({
                 "slug": slug,
                 "name": grp["name"],
@@ -2968,6 +3073,8 @@ def list_picker_providers(
     current_model: str = "",
     include_moa: bool = False,
     excluded_providers: list | None = None,
+    include_unconfigured: bool = False,
+    probe_current_custom_provider: bool = False,
 ) -> List[dict]:
     """Interactive-picker variant of :func:`list_authenticated_providers`.
 
@@ -2999,9 +3106,29 @@ def list_picker_providers(
         current_model=current_model,
         for_picker=True,
         excluded_providers=excluded_providers,
+        probe_custom_providers=False,
+        probe_current_custom_provider=probe_current_custom_provider,
     )
     if include_moa:
         providers = _prepend_moa_picker_provider(providers, current_provider=current_provider)
+
+    # Append unconfigured canonical providers (same as TUI/Dashboard path
+    # when include_unconfigured=True).
+    if include_unconfigured:
+        try:
+            from hermes_cli.inventory import ConfigContext, _append_unconfigured_rows, load_picker_context
+            ctx = load_picker_context()
+            ctx = ctx.with_overrides(
+                current_provider=current_provider,
+                current_model=current_model,
+                current_base_url=current_base_url,
+            )
+            unconfigured = _append_unconfigured_rows(providers, ctx)
+            # Exclude moa (already prepended above if include_moa)
+            unconfigured = [r for r in unconfigured if str(r.get("slug", "")).lower() != "moa"]
+            providers = list(providers) + unconfigured
+        except Exception:
+            pass
 
     filtered: List[dict] = []
     for p in providers:
@@ -3018,7 +3145,10 @@ def list_picker_providers(
 
         has_models = bool(p.get("models"))
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
-        if not has_models and not is_custom_endpoint:
+        # Keep unconfigured canonical providers (source="canonical") even
+        # without models — same as TUI picker.
+        is_canonical = p.get("source") == "canonical"
+        if not has_models and not is_custom_endpoint and not is_canonical:
             continue
         filtered.append(p)
 

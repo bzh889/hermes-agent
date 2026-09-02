@@ -302,18 +302,22 @@ export function parseOscColor(data: string): string | undefined {
 
 // Terminals known to correctly implement the Kitty keyboard protocol
 // (CSI >1u) and/or xterm modifyOtherKeys (CSI >4;2m) for ctrl+shift+<letter>
-// disambiguation. We previously enabled unconditionally (#23350), assuming
-// terminals silently ignore unknown CSI — but some terminals honor the enable
-// and emit codepoints our input parser doesn't handle (notably over SSH and
-// in xterm.js-based terminals like VS Code). tmux is allowlisted because it
+// disambiguation. Windows Terminal is intentionally excluded: its Kitty
+// keyboard path can swallow single-character CJK IME commits before they
+// reach the PTY (xterm.js/xterm.js#6112). This is particularly visible after
+// a crash because the next TUI startup re-enables CSI-u in the same tab.
+// We previously enabled unconditionally (#23350), assuming terminals
+// silently ignore unknown CSI — but some terminals honor the enable and emit
+// codepoints our input parser doesn't handle (notably over SSH and in
+// xterm.js-based terminals like VS Code). tmux is allowlisted because it
 // accepts modifyOtherKeys and doesn't forward the kitty sequence to the outer
 // terminal.
-const EXTENDED_KEYS_TERMINALS = ['iTerm.app', 'kitty', 'WezTerm', 'ghostty', 'tmux', 'windows-terminal', 'vscode']
+const EXTENDED_KEYS_TERMINALS = ['iTerm.app', 'kitty', 'WezTerm', 'ghostty', 'tmux', 'vscode']
 
 /** True if this terminal correctly handles extended key reporting
  *  (Kitty keyboard protocol + xterm modifyOtherKeys). */
-export function supportsExtendedKeys(): boolean {
-  return EXTENDED_KEYS_TERMINALS.includes(env.terminal ?? '')
+export function supportsExtendedKeys(terminal: string | null = env.terminal): boolean {
+  return EXTENDED_KEYS_TERMINALS.includes(terminal ?? '')
 }
 
 /** True if the terminal scrolls the viewport when it receives cursor-up

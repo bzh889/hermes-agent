@@ -2051,9 +2051,22 @@ def _resolve_switch_default_headers(agent, new_provider: str) -> dict:
       3. built-in ProviderProfile (rare, but covers registered profiles)
 
     Returns an empty dict when no headers are declared.
+
+    ``new_provider`` is the *resolved* provider name, which for every named
+    custom provider is ``custom`` (or ``custom:<slug>``) — the entry slug lives
+    on ``agent.requested_provider``. Both are tried, slug first, or a switch on
+    e.g. an MTK AIDE service account silently drops ``x-user-id`` and every
+    later request fails 403 "missing UID in logging context".
     """
-    _prov_norm = (new_provider or "").strip().lower()
-    if not _prov_norm:
+    _candidates = []
+    for _name in (getattr(agent, "requested_provider", None), new_provider):
+        _norm = (_name or "").strip().lower()
+        # "custom" names no config entry on its own — it would only ever match
+        # a provider literally called "custom" and shadow the real slug.
+        for _cand in (_norm, _norm.replace("custom:", "")):
+            if _cand and _cand != "custom" and _cand not in _candidates:
+                _candidates.append(_cand)
+    if not _candidates:
         return {}
 
     # 1. providers: dict
@@ -2061,11 +2074,12 @@ def _resolve_switch_default_headers(agent, new_provider: str) -> dict:
         from hermes_cli.config import load_config
         _cfg = load_config()
         _up = _cfg.get("providers") or {}
-        _entry = _up.get(_prov_norm, {})
-        if isinstance(_entry, dict):
-            _dh = _entry.get("default_headers")
-            if isinstance(_dh, dict) and _dh:
-                return dict(_dh)
+        for _cand in _candidates:
+            _entry = _up.get(_cand, {})
+            if isinstance(_entry, dict):
+                _dh = _entry.get("default_headers")
+                if isinstance(_dh, dict) and _dh:
+                    return dict(_dh)
     except Exception:
         pass
 
@@ -2076,7 +2090,7 @@ def _resolve_switch_default_headers(agent, new_provider: str) -> dict:
         _cfg2 = load_config()
         for _cp in (get_compatible_custom_providers(_cfg2) or []):
             _cpn = _normalize_custom_provider_name(str(_cp.get("name", "")))
-            if _cpn == _prov_norm or _cpn == _prov_norm.replace("custom:", ""):
+            if _cpn in _candidates:
                 _dh2 = _cp.get("default_headers")
                 if isinstance(_dh2, dict) and _dh2:
                     return dict(_dh2)
@@ -2171,7 +2185,26 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         # ── Swap core runtime fields ──
         agent.model = new_model
         agent.provider = new_provider
-        agent.requested_provider = new_provider
+        # ``new_provider`` is the resolved billing class, which for every named
+        # providers:/custom_providers: entry is the bare string "custom" — not a
+        # routable identity. Overwriting requested_provider with it discards the
+        # only handle back to the entry, so anything resolving per-entry config
+        # after the switch (default_headers / x-user-id, extra_headers) finds
+        # nothing. Recover the durable custom:<name> key the same way the
+        # session-restore paths do.
+        if (new_provider or "").strip().lower() == "custom":
+            from hermes_cli.runtime_provider import canonical_custom_identity
+
+            agent.requested_provider = (
+                canonical_custom_identity(
+                    base_url=base_url or agent.base_url or None,
+                    model=new_model or None,
+                )
+                or getattr(agent, "requested_provider", None)
+                or new_provider
+            )
+        else:
+            agent.requested_provider = new_provider
         # Use the new base_url when provided. When it's empty AND the
         # provider is actually changing, do NOT fall back to the current
         # (old provider's) URL — that silently pairs the new provider label

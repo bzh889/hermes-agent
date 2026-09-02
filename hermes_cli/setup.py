@@ -2002,8 +2002,8 @@ def setup_gateway(config: dict):
         if not _tmk_sdk:
             print()
             print_warning("teams_mtk adapter is enabled but teams_skype_sdk is not installed.")
-            print_info("  Install it with:  pip install -e lib/teams_skype_sdk")
-            print_info("  (This enables reactions, activity streams, call logs, forwarding, etc.)")
+            print_info("  Update/reinstall Hermes; for a source checkout run: uv sync --extra teams")
+            print_info("  (This enables Loop, reactions, activity streams, call logs, forwarding, etc.)")
     except Exception:
         pass  # Non-fatal
 

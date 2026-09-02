@@ -88,6 +88,15 @@ describe('supportsOsc52Clipboard', () => {
   })
 })
 
+describe('extended-key terminal compatibility', () => {
+  it('does not enable extended keyboard reporting in Windows Terminal', async () => {
+    const { supportsExtendedKeys } = await import('../terminal.js')
+
+    expect(supportsExtendedKeys('windows-terminal')).toBe(false)
+    expect(supportsExtendedKeys('kitty')).toBe(true)
+  })
+})
+
 // shouldUseNativeClipboard() encodes the gating logic that setClipboard()
 // uses to decide whether to fire copyNative(). Testing it directly (rather
 // than mocking copyNative inside setClipboard) matches the package's

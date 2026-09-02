@@ -124,36 +124,43 @@ export const sessionCommands: SlashCommand[] = [
             session_id: ctx.sid,
             value: modelValueForConfigSet(arg)
           })
-          .then(
-            ctx.guarded<ConfigSetResponse>(r => {
-              if (r.confirm_required) {
-                patchOverlayState({
-                  confirm: {
-                    cancelLabel: 'Cancel',
-                    confirmLabel: 'Switch anyway',
-                    danger: true,
-                    detail: r.confirm_message || r.warning || 'This model has unusually high known pricing.',
-                    onConfirm: () => switchModel(true),
-                    title: 'Expensive model selection'
-                  }
-                })
+          .then(r => {
+            if (ctx.stale()) {
+              return
+            }
 
-                return
-              }
+            if (!r) {
+              return ctx.transcript.sys('error: model switch failed — see messages above')
+            }
 
-              if (!r.value) {
-                return ctx.transcript.sys('error: invalid response: model switch')
-              }
+            if (r.confirm_required) {
+              patchOverlayState({
+                confirm: {
+                  cancelLabel: 'Cancel',
+                  confirmLabel: 'Switch anyway',
+                  danger: true,
+                  detail: r.confirm_message || r.warning || 'This model has unusually high known pricing.',
+                  onConfirm: () => switchModel(true),
+                  title: 'Expensive model selection'
+                }
+              })
 
-              ctx.transcript.sys(`model → ${r.value}`)
-              ctx.local.maybeWarn(r)
+              return
+            }
 
-              patchUiState(state => ({
-                ...state,
-                info: state.info ? { ...state.info, model: r.value! } : { model: r.value!, skills: {}, tools: {} }
-              }))
-            })
-          )
+            if (!r.value) {
+              return ctx.transcript.sys('error: invalid response: model switch')
+            }
+
+            ctx.transcript.sys(`model → ${r.value}`)
+            ctx.local.maybeWarn(r)
+
+            patchUiState(state => ({
+              ...state,
+              info: state.info ? { ...state.info, model: r.value! } : { model: r.value!, skills: {}, tools: {} }
+            }))
+          })
+          .catch(ctx.guardedErr)
 
       switchModel()
     }

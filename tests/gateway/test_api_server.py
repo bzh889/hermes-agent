@@ -5709,3 +5709,75 @@ class TestCreateAgentModelRecovery:
         )
 
         assert captured["model"] == "session-row/model"
+
+    def test_create_agent_session_model_keeps_explicit_request_provider_runtime(
+        self, monkeypatch
+    ):
+        """A persisted Browser model must not discard its provider credentials.
+
+        Browser sessions store the selected model on the session row and send
+        the provider again on each chat request.  The persisted model still
+        wins over a conflicting request model, but its execution runtime must
+        come from the explicit provider rather than re-resolving the internal
+        ``custom`` marker as an unauthenticated OpenRouter endpoint.
+        """
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "custom",
+                "requested_provider": "aide-crlogai001-responses",
+                "api_key": "sk-global",
+                "base_url": "https://primary.example/openai",
+                "api_mode": "codex_responses",
+                "default_headers": {"x-user-id": "srv_cr_log_ai001"},
+            },
+        )
+
+        def fake_resolve_runtime_provider(*, requested=None, target_model=None, **_kwargs):
+            if requested == "aide":
+                return {
+                    "api_key": "sk-aide",
+                    "base_url": "https://aide.example/v1",
+                    "provider": "custom",
+                    "api_mode": "chat_completions",
+                    "default_headers": {"x-user-id": "MTK12265"},
+                    "requested_provider": "aide",
+                }
+            return {
+                "api_key": "",
+                "base_url": "https://openrouter.ai/api/v1",
+                "provider": "custom",
+                "api_mode": "chat_completions",
+                "requested_provider": str(requested or ""),
+            }
+
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        monkeypatch.setattr("hermes_cli.runtime_provider._get_model_config", lambda: {})
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+
+        adapter._create_agent(
+            session_id="browser-session",
+            session_model="azure/gpt-5.6-luna",
+            requested_model="request/model-that-must-not-win",
+            requested_provider="aide",
+        )
+
+        assert captured["model"] == "azure/gpt-5.6-luna"
+        assert captured["provider"] == "custom"
+        assert captured["requested_provider"] == "aide"
+        assert captured["api_key"] == "sk-aide"
+        assert captured["base_url"] == "https://aide.example/v1"
+        assert captured["default_headers"] == {"x-user-id": "MTK12265"}

@@ -13394,6 +13394,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # Set session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
+
+        # Resolve and set the Restricted Group Policy origin binding (ticket 25).
+        # For unbound groups this is a no-op (no binding set).
+        _session_env_tokens = self._resolve_and_set_origin_binding(context, _session_env_tokens)
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -17835,6 +17839,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Returns a list of reset tokens; pass them to ``_clear_session_env``
         in a ``finally`` block.
+
+        Also resolves and sets the Restricted Group Policy origin binding
+        (ticket 25) when the inbound conversation has an active restricted
+        policy. The binding is appended to the token list so
+        ``_clear_session_env`` resets it on handler exit.
         """
         from gateway.session_context import set_session_vars
         # Propagate the adapter's async-delivery capability so async tools
@@ -17860,11 +17869,67 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             async_delivery=_async_delivery,
         )
 
+    def _resolve_and_set_origin_binding(self, context: SessionContext, tokens: list) -> list:
+        """Resolve and set the Restricted Group Policy origin binding (ticket 25).
+
+        Called after :meth:`_set_session_env`. If the inbound conversation has
+        an active restricted policy, an :class:`OriginEgressBinding` is created
+        and set via :func:`set_origin_binding`; the reset token is appended to
+        *tokens* so :meth:`_clear_session_env` resets it on handler exit.
+
+        For unbound groups (no active policy), no binding is set — downstream
+        sees ``None`` and passes through with existing whitelist behavior.
+        """
+        try:
+            from gateway.restricted_group_gate import resolve_origin_binding
+            from gateway.restricted_origin import set_origin_binding
+
+            _adapters = getattr(self, "adapters", None) or {}
+            _adapter = _adapters.get(context.source.platform)
+            _adapter_identity = (
+                type(_adapter).__name__ if _adapter is not None
+                else context.source.platform.value
+            )
+
+            binding = resolve_origin_binding(
+                conv_id=context.source.chat_id,
+                platform=context.source.platform.value,
+                adapter_identity=_adapter_identity,
+                account_id=getattr(context.source, "profile", "") or "",
+                profile=getattr(context.source, "profile", "") or "",
+                thread_id=str(context.source.thread_id) if context.source.thread_id else "",
+            )
+            if binding is not None:
+                origin_token = set_origin_binding(binding)
+                tokens.append(origin_token)
+        except Exception:
+            logger.debug("origin binding resolution failed — fail closed", exc_info=True)
+        return tokens
+
     def _clear_session_env(self, tokens: list | None) -> None:
-        """Restore session vars, tolerating legacy binders that did no work."""
+        """Restore session vars, tolerating legacy binders that did no work.
+
+        Also resets the Restricted Group Policy origin binding if one was
+        set (the token was appended to *tokens* by
+        :meth:`_resolve_and_set_origin_binding`).
+        """
         if tokens is None:
             return
         from gateway.session_context import clear_session_vars
+
+        # Pop and reset origin-binding token from the tail (if present).
+        # clear_session_vars only reads indices [0..len(_SESSION_BIND_VARS)+1]
+        # so the appended origin token is never touched by it.
+        from gateway.session_context import _SESSION_BIND_VARS
+
+        if len(tokens) > len(_SESSION_BIND_VARS) + 1:
+            from gateway.restricted_origin import reset_origin_binding
+
+            origin_token = tokens.pop()
+            try:
+                reset_origin_binding(origin_token)
+            except Exception:
+                pass
         clear_session_vars(tokens)
 
     async def _run_in_executor_with_context(self, func, *args):

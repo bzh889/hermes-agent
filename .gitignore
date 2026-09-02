@@ -64,6 +64,8 @@ agent-browser/
 privvy*
 images/
 __pycache__/
+# Runtime member cache may contain Teams names, emails, and MRI/OID identifiers.
+teams_skype_sdk/cache.json
 hermes_agent.egg-info/
 wandb/
 testlogs

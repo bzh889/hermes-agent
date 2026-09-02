@@ -213,8 +213,8 @@ SEND_MESSAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["send", "list", "react", "unreact"],
-                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms. 'react' attaches an emoji reaction to a message (platforms that support it, e.g. photon/iMessage tapbacks). 'unreact' retracts a previously-added reaction."
+                "enum": ["send", "list", "react", "unreact", "loop"],
+                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms. 'react' attaches an emoji reaction to a message (platforms that support it, e.g. photon/iMessage tapbacks). 'unreact' retracts a previously-added reaction. 'loop' sends an existing Microsoft Loop component or creates a verified table Loop on teams_mtk; call it only after the user explicitly approves the target and content."
             },
             "target": {
                 "type": "string",
@@ -231,6 +231,40 @@ SEND_MESSAGE_SCHEMA = {
             "message_id": {
                 "type": "string",
                 "description": "For action='react'/'unreact': id of the message to react to. Omit to target the most recent message received in that chat (usually the one being replied to)."
+            },
+            "component_url": {
+                "type": "string",
+                "description": "For action='loop': HTTPS sharing URL of an existing Loop component to send. Omit this to create a new table Loop."
+            },
+            "template_url": {
+                "type": "string",
+                "description": "For action='loop' table creation: HTTPS sharing URL of an existing table Loop used only as the Fluid schema template."
+            },
+            "name": {
+                "type": "string",
+                "description": "For action='loop' table creation: filename/title for the new component (the .loop suffix is optional)."
+            },
+            "headers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For action='loop' table creation: non-empty table header strings."
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "description": "For action='loop' table creation: rectangular rows with the same number of cells as headers."
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["organization", "users"],
+                "description": "For action='loop' table creation: edit-link scope. Defaults to organization; do not use organization for restricted content."
+            },
+            "locale": {
+                "type": "string",
+                "description": "For action='loop' table creation: Fluid locale such as en-US or zh-TW. Defaults to en-US."
             }
         },
         "required": []
@@ -250,6 +284,9 @@ def send_message_tool(args, **kw):
 
     if action == "unreact":
         return _handle_react(args, remove=True)
+
+    if action == "loop":
+        return _handle_loop(args)
 
     return _handle_send(args)
 
@@ -351,6 +388,126 @@ def _handle_react(args, remove=False):
     except Exception as e:
         return json.dumps(_error(f"Reaction failed: {e}"))
     if isinstance(result, dict):
+        return json.dumps(result)
+    return json.dumps({"success": bool(result)})
+
+
+def _handle_loop(args):
+    """Create or send a native Microsoft Loop through a live TeamsMTK adapter."""
+    target = (args.get("target") or "").strip()
+    if not target:
+        return tool_error("'target' is required when action='loop'")
+
+    parts = target.split(":", 1)
+    platform_name = parts[0].strip().lower()
+    if platform_name != "teams_mtk":
+        return tool_error("action='loop' is only supported for teams_mtk")
+    target_ref = parts[1].strip() if len(parts) > 1 else None
+
+    chat_id = None
+    if target_ref:
+        chat_id, _thread_id, explicit = _parse_target_ref(platform_name, target_ref)
+        if not explicit:
+            try:
+                from gateway.channel_directory import resolve_channel_name
+                chat_id = resolve_channel_name(platform_name, target_ref)
+            except Exception:
+                chat_id = None
+        if not chat_id:
+            return tool_error(
+                f"Could not resolve '{target_ref}' on teams_mtk. "
+                "Use send_message(action='list') to see available targets."
+            )
+
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return tool_error("Interrupted")
+
+    try:
+        from gateway.config import Platform, load_gateway_config
+        platform = Platform.TEAMS_MTK
+    except (ValueError, KeyError):
+        return tool_error("teams_mtk platform is unavailable")
+
+    if not chat_id:
+        try:
+            home = load_gateway_config().get_home_channel(platform)
+        except Exception:
+            home = None
+        if not home:
+            return tool_error(
+                "No TeamsMTK chat specified and no home channel is configured. "
+                "Use 'teams_mtk:conversation_id'."
+            )
+        chat_id = home.chat_id
+
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+    adapter = runner.adapters.get(platform) if runner is not None else None
+    if adapter is None:
+        return tool_error(
+            "Microsoft Loop requires a live teams_mtk adapter in the running "
+            "gateway (not available from cron/standalone contexts)."
+        )
+
+    component_url = (args.get("component_url") or "").strip()
+    try:
+        from model_tools import _run_async
+        if component_url:
+            send_loop = getattr(adapter, "send_loop_component", None)
+            if not callable(send_loop):
+                return tool_error("The live teams_mtk adapter has no Loop support")
+            result = _run_async(
+                send_loop(chat_id=chat_id, component_url=component_url)
+            )
+        else:
+            template_url = (args.get("template_url") or "").strip()
+            name = (args.get("name") or "").strip()
+            headers = args.get("headers")
+            rows = args.get("rows")
+            if not template_url or not name or not isinstance(headers, list) or not headers:
+                return tool_error(
+                    "action='loop' table creation requires template_url, name, "
+                    "and non-empty headers"
+                )
+            if not isinstance(rows, list) or not rows:
+                return tool_error(
+                    "action='loop' table creation requires non-empty rows"
+                )
+            if not all(isinstance(value, str) for value in headers):
+                return tool_error("Loop table headers must all be strings")
+            if not all(isinstance(row, list) for row in rows):
+                return tool_error("Loop table rows must be arrays")
+            if any(len(row) != len(headers) for row in rows):
+                return tool_error(
+                    "Every Loop table row must have the same number of columns as headers"
+                )
+            if not all(isinstance(value, str) for row in rows for value in row):
+                return tool_error("Loop table cells must all be strings")
+
+            create_loop = getattr(adapter, "create_loop_table", None)
+            if not callable(create_loop):
+                return tool_error("The live teams_mtk adapter has no Loop authoring support")
+            result = _run_async(
+                create_loop(
+                    chat_id=chat_id,
+                    template_url=template_url,
+                    name=name,
+                    headers=headers,
+                    rows=rows,
+                    scope=(args.get("scope") or "organization").strip(),
+                    locale=(args.get("locale") or "en-US").strip(),
+                )
+            )
+    except Exception as exc:
+        return json.dumps(_error(f"Loop operation failed: {exc}"))
+
+    if isinstance(result, dict):
+        if "error" in result:
+            result["error"] = _sanitize_error_text(result["error"])
         return json.dumps(result)
     return json.dumps({"success": bool(result)})
 

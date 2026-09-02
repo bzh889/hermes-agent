@@ -18,14 +18,57 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 
-def _reasoning_config_for_model(model: str, reasoning_config: dict | None) -> dict | None:
-    """Return the model's wire-compatible reasoning config."""
+def _reasoning_config_for_model(
+    model: str,
+    reasoning_config: dict | None,
+    *,
+    has_tools: bool = False,
+) -> dict | None:
+    """Return the model's wire-compatible reasoning config.
+
+    An ``azure/``-deployed gpt-5.6 reached over an OpenAI-compatible
+    ``/v1/chat/completions`` route (MTK AIDE) constrains the top-level
+    ``reasoning_effort`` field in two ways that both surface as non-retryable
+    HTTP 400s:
+
+    - with ``tools`` present, only ``none`` is accepted ("Function tools with
+      reasoning_effort are not supported ... use /v1/responses or set
+      reasoning_effort to 'none'"). We drop the field entirely rather than
+      forcing ``none``, so the endpoint applies its own default instead of us
+      silently disabling reasoning on a reasoning model.
+    - ``max`` is not a valid level ("Supported values are: 'none', 'low',
+      'medium', 'high', and 'xhigh'"), so ``max``/``ultra`` clamp to ``xhigh``.
+
+    Both quirks are scoped to the Azure deployment prefix, which is where they
+    were observed. Older families on the same gateway (gpt-5.5, gpt-5.4,
+    gpt-5.2) and its non-OpenAI models accept tools together with ``max``, and
+    OpenAI's own gpt-5.6 route takes ``max`` (hence the unprefixed
+    ``ultra`` → ``max`` mapping below). The native Codex/Responses transport
+    has its own path and is unaffected.
+    """
     if not isinstance(reasoning_config, dict):
         return reasoning_config
-    if (
-        "gpt-5.6" in (model or "").lower()
-        and str(reasoning_config.get("effort") or "").strip().lower() == "ultra"
-    ):
+
+    model_lower = (model or "").lower()
+    if "gpt-5.6" not in model_lower:
+        return reasoning_config
+
+    effort = str(reasoning_config.get("effort") or "").strip().lower()
+
+    if model_lower.startswith("azure/"):
+        # Tool-using requests: only "none" survives. An explicit "none" is
+        # kept — the user asked for reasoning off.
+        if has_tools and effort and effort != "none":
+            normalized = dict(reasoning_config)
+            normalized.pop("effort", None)
+            return normalized
+        if effort in {"max", "ultra"}:
+            normalized = dict(reasoning_config)
+            normalized["effort"] = "xhigh"
+            return normalized
+        return reasoning_config
+
+    if effort == "ultra":
         normalized = dict(reasoning_config)
         normalized["effort"] = "max"
         return normalized
@@ -381,7 +424,9 @@ class ChatCompletionsTransport(ProviderTransport):
         is_nvidia_nim = params.get("is_nvidia_nim", False)
         is_kimi = params.get("is_kimi", False)
         is_tokenhub = params.get("is_tokenhub", False)
-        reasoning_config = _reasoning_config_for_model(model, params.get("reasoning_config"))
+        reasoning_config = _reasoning_config_for_model(
+            model, params.get("reasoning_config"), has_tools=bool(tools)
+        )
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
@@ -580,7 +625,9 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs["max_tokens"] = anthropic_max
 
         # Provider-specific api_kwargs extras (reasoning_effort, metadata, etc.)
-        reasoning_config = _reasoning_config_for_model(model, params.get("reasoning_config"))
+        reasoning_config = _reasoning_config_for_model(
+            model, params.get("reasoning_config"), has_tools=bool(tools)
+        )
         extra_body_from_profile, top_level_from_profile = (
             profile.build_api_kwargs_extras(
                 reasoning_config=reasoning_config,

@@ -417,6 +417,8 @@ export interface ModelOptionProvider {
   is_current?: boolean
   key_env?: string
   models?: string[]
+  /** Realtime context windows keyed by the exact model ID. */
+  model_context_lengths?: Record<string, number>
   name: string
   slug: string
   total_models?: number

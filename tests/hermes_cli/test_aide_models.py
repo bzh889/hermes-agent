@@ -6,6 +6,7 @@ from hermes_cli.aide_models import (
     merge_aide_models,
     resolve_aide_alias,
     format_aide_model_list,
+    fetch_aide_catalog,
 )
 
 V1_MODELS_RESPONSE = {
@@ -103,6 +104,22 @@ def test_aide_context_length_inhouse():
     from hermes_cli.aide_models import get_aide_context_length
     length = get_aide_context_length("mtk/deepseek-v32", models)
     assert length == 163840
+
+
+def test_fetch_aide_catalog_keeps_live_names_and_context_together(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.aide_models.fetch_aide_models",
+        lambda base_url, api_key, user_id: (V1_MODELS_RESPONSE, V3_MODELS_RESPONSE),
+    )
+
+    catalog = fetch_aide_catalog("https://aide.test/v1", "key", "user")
+
+    assert [m.id for m in catalog if m.max_model_len] == [
+        "mtk/deepseek-v32",
+        "mtk/qwen3-vl-235b-a22b-instruct-fp8",
+        "mtk/wfm-pro-glm5-744b",
+    ]
+    assert next(m for m in catalog if m.id == "mtk/deepseek-v32").max_model_len == 163840
 
 
 def test_aide_context_length_commercial_returns_none():

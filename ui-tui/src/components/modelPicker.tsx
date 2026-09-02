@@ -16,6 +16,17 @@ const VISIBLE = 12
 const MIN_WIDTH = 40
 const MAX_WIDTH = 90
 
+const formatContextLength = (tokens: number | undefined): string => {
+  if (!tokens || tokens <= 0) {
+    return ''
+  }
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+  }
+  return `${Math.round(tokens / 1_024)}K`
+}
+
 type Stage = 'provider' | 'key' | 'model' | 'disconnect'
 
 type ProviderRow = { name: string; provider: ModelOptionProvider }
@@ -140,6 +151,7 @@ export function ModelPicker({
   }, [allModels, filter, stage])
 
   const models = filteredModels
+  const modelContextLengths = provider?.model_context_lengths ?? {}
 
   // Keep the active selection within the (possibly filtered) list bounds.
   useEffect(() => {
@@ -666,6 +678,7 @@ export function ModelPicker({
         }
 
         const prefix = modelIdx === idx ? '▸ ' : row === currentModel ? '* ' : '  '
+        const context = formatContextLength(modelContextLengths[row])
 
         return (
           <Text
@@ -675,7 +688,7 @@ export function ModelPicker({
             wrap="truncate-end"
           >
             {prefix}
-            {idx + 1}. {row}
+            {idx + 1}. {row}{context ? ` · ${context}` : ''}
           </Text>
         )
       })}
