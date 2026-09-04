@@ -137,7 +137,7 @@ def test_build_gateway_argv_uses_light_gateway_runtime_entry(monkeypatch, tmp_pa
     argv, cwd, env_overlay = gateway_windows._build_gateway_argv()
 
     assert argv == [
-        str(base_python),
+        str(venv_python),
         "-m",
         "hermes_cli.gateway_runtime_entry",
     ]
@@ -147,8 +147,8 @@ def test_build_gateway_argv_uses_light_gateway_runtime_entry(monkeypatch, tmp_pa
     assert env_overlay["HERMES_VENV_PREFIX"] == str(project / "venv")
     pythonpath = env_overlay["PYTHONPATH"].split(gateway_windows.os.pathsep)
     assert str(project) in pythonpath
-    assert str(site_packages) in pythonpath
-
+    assert str(site_packages) not in pythonpath
+    assert env_overlay["HERMES_VENV_PYTHON"] == str(venv_python)
 
 class TestStableWindowsGatewayWorkingDir:
     def test_stable_gateway_working_dir_uses_hermes_home(self, tmp_path, monkeypatch):

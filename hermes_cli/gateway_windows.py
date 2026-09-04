@@ -765,23 +765,14 @@ def _prepend_pythonpath(env_overlay: dict[str, str], entries: list[str]) -> None
 
 
 def _resolve_gateway_python(venv_python: str) -> tuple[str, Path, list[str]]:
+    """Use the selected virtualenv interpreter for detached gateway runs.
+
+    Do not replace the venv executable with its base interpreter and inject
+    site-packages manually. That creates a split runtime where ``sys.executable``
+    and subprocesses use system Python while imports come from the venv, which
+    can make provider HTTP behavior differ between the gateway and CLI.
+    """
     venv_dir = Path(venv_python).parent.parent
-    try:
-        lines = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return venv_python, venv_dir, []
-
-    base_home = ""
-    for line in lines:
-        key, separator, value = line.partition("=")
-        if separator and key.strip().lower() == "home":
-            base_home = value.strip()
-            break
-
-    base_python = Path(base_home) / "python.exe"
-    site_packages = venv_dir / "Lib" / "site-packages"
-    if base_python.is_file() and site_packages.is_dir():
-        return str(base_python), venv_dir, [str(site_packages)]
     return venv_python, venv_dir, []
 
 

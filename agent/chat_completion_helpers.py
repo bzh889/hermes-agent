@@ -2310,6 +2310,14 @@ def _build_partial_stream_stub(
     )
 
 
+def _stream_chunk_finish_reason(chunk) -> Optional[str]:
+    """Read finish_reason without indexing provider metadata-only chunks."""
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return None
+    return getattr(choices[0], "finish_reason", None)
+
+
 def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
     """Streaming variant of _interruptible_api_call for real-time token delivery.
 
@@ -3047,8 +3055,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # discarding the attempted action.
                         result["partial_tool_names"].append(name)
 
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+            if _stream_chunk_finish_reason(chunk):
+                finish_reason = _stream_chunk_finish_reason(chunk)
 
             # Usage in the final chunk
             if hasattr(chunk, "usage") and chunk.usage:
