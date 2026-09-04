@@ -400,6 +400,12 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
 
+    def test_502_aide_glm_is_retryable_server_error(self):
+        e = MockAPIError("Error code: 502", status_code=502)
+        result = classify_api_error(e, provider="aide", model="mtk/glm-5-2")
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+
     def test_503_overloaded(self):
         e = MockAPIError("Service Unavailable", status_code=503)
         result = classify_api_error(e)

@@ -18,7 +18,7 @@ from unittest.mock import patch
 # scope. Under the test runner argv (`pytest …`) it's a no-op, but we import
 # at file scope so individual tests don't race the import side-effect with
 # their `patch("os.write")` context.
-from hermes_cli.main import _suppress_mouse_residue_early
+from hermes_cli.main import _reset_tui_terminal_modes, _suppress_mouse_residue_early
 
 EXPECTED = (
     b"\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l"
@@ -90,3 +90,27 @@ class TestEarlyMouseDisable:
         with patch("os.isatty", return_value=True), patch("os.write", side_effect=boom):
             # Must not propagate — startup hot path can never break.
             _suppress_mouse_residue_early()
+
+
+class TestFinalTerminalReset:
+    def test_resets_all_sticky_modes_after_child_exit(self):
+        with patch("os.isatty", return_value=True), patch("os.write") as mock_write:
+            _reset_tui_terminal_modes()
+
+        mock_write.assert_called_once()
+        written = mock_write.call_args.args[1]
+        for mode in (
+            b"\x1b[?1006l",
+            b"\x1b[?1003l",
+            b"\x1b[?1000l",
+            b"\x1b[?2004l",
+            b"\x1b[?1049l",
+            b"\x1b[?25h",
+        ):
+            assert mode in written
+
+    def test_ignores_closed_stdout(self):
+        with patch("os.isatty", return_value=True), patch(
+            "os.write", side_effect=OSError("stdout closed")
+        ):
+            _reset_tui_terminal_modes()

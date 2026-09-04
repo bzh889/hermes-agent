@@ -329,6 +329,28 @@ def _wants_tui_early(argv: "list[str] | None" = None) -> bool:
 # ``^[[<…M`` text. The TUI itself runs `resetTerminalModes()` again in
 # `entry.tsx`; this is just the earlier cousin. ``HERMES_TUI_NO_EARLY_DISABLE``
 # escapes the behaviour for diagnostics.
+_TUI_MOUSE_DISABLE = (
+    b"\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l"
+    b"\x1b[?1006l\x1b[?1005l\x1b[?1015l\x1b[?1016l\x1b[?2029l"
+)
+_TUI_TERMINAL_MODE_RESET = (
+    b"\x1b[0'z\x1b[0'{\x1b[?2029l\x1b[?1016l\x1b[?1015l"
+    + _TUI_MOUSE_DISABLE
+    + b"\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[<u\x1b[>4m\x1b[0m\x1b[?25h"
+)
+
+
+def _reset_tui_terminal_modes() -> None:
+    """Restore terminal modes after the Node TUI child exits, including hard aborts."""
+    try:
+        if not os.isatty(1):
+            return
+        os.write(1, _TUI_TERMINAL_MODE_RESET)
+    except OSError:
+        # The terminal may already be closed or detached; cleanup is best-effort.
+        pass
+
+
 def _suppress_mouse_residue_early() -> None:
     if os.environ.get("HERMES_TUI_NO_EARLY_DISABLE") == "1":
         return
@@ -342,11 +364,7 @@ def _suppress_mouse_residue_early() -> None:
             return
         # Disable every mouse-tracking variant we know about. Idempotent and
         # safe to send even when no tracking is currently asserted.
-        os.write(
-            1,
-            b"\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l"
-            b"\x1b[?1006l\x1b[?1005l\x1b[?1015l\x1b[?1016l\x1b[?2029l",
-        )
+        os.write(1, _TUI_MOUSE_DISABLE)
     except OSError:
         pass
 
@@ -2380,6 +2398,10 @@ def _launch_tui(
         if code in {0, 130}:
             _print_tui_exit_summary(resume_session_id, active_session_file)
     finally:
+        # The Node process has its own synchronous exit handler, but native
+        # Windows aborts/console failures can bypass it. Reset from the Python
+        # parent before anything prints to the shell or the wrapper exits.
+        _reset_tui_terminal_modes()
         try:
             os.unlink(active_session_file)
         except OSError:

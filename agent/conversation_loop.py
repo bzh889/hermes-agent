@@ -4018,11 +4018,20 @@ def run_conversation(
                 _is_zai_coding_overload = is_zai_coding_overload_error(
                     base_url=str(_base), model=_model, error=api_error
                 )
-                if _is_zai_coding_overload:
-                    max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+                # AIDE GLM-5.2 can return a transient 502 after a long
+                # reasoning/prefill pause. Retry within the configured budget,
+                # then fail over instead of replaying the same request forever.
+                _is_aide_glm502 = (
+                    status_code == 502
+                    and str(_provider).lower().startswith("aide")
+                    and "glm-5-2" in str(_model).lower()
+                )
+                if _is_zai_coding_overload or _is_aide_glm502:
+                    max_retries = max(max_retries, 3)
                 _should_fallback = (
                     is_rate_limited
                     or (_is_transport_failure and retry_count >= 2)
+                    or (_is_aide_glm502 and retry_count >= max_retries)
                 )
                 if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
                     # Don't eagerly fallback if credential pool rotation may

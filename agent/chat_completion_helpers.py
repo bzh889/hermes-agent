@@ -1588,15 +1588,21 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
     Platform/provider policy (mirrors ``_has_pending_fallback``):
     - Gateway (any platform except "tui"/"cli"): always allow fallback.
-    - TUI/CLI: only allow fallback when the current provider starts
-      with ``aide``. Non-AIDE local sessions should fail fast rather
-      than silently degrading to a different backend.
+    - TUI/CLI: only allow fallback when the runtime or requested provider
+      identity is an AIDE route. Named custom AIDE entries resolve to
+      ``provider="custom"`` but preserve an ``aide-*`` requested identity.
+      Non-AIDE local sessions should fail fast rather than silently degrading
+      to a different backend.
     """
     # ── Policy gate: skip fallback entirely for non-AIDE TUI/CLI ──
     _platform = (getattr(agent, "platform", "") or "").strip().lower()
     if _platform in ("tui", "cli"):
         _provider = (getattr(agent, "provider", "") or "").strip().lower()
-        if not _provider.startswith("aide"):
+        from agent.agent_runtime_helpers import is_aide_provider_identity
+        if not is_aide_provider_identity(
+            _provider,
+            getattr(agent, "requested_provider", ""),
+        ):
             return False
 
     if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:

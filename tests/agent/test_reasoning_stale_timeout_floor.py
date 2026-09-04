@@ -54,7 +54,12 @@ import pytest
     ("deepseek/deepseek-reasoner", 600.0),
     ("deepseek/deepseek-v4-flash", 600.0),
     ("deepseek/deepseek-v4-pro", 600.0),
-    ("deepseek-v4-flash-free", 600.0),   # catalog -free variant inherits via separator anchor
+    ("deepseek-v4-flash-free", 600.0),
+    # MTK GLM-5.2 reasoning model behind the AIDE gateway — same 600s
+    # floor as DeepSeek V4 (both emit reasoning_content before final
+    # content and routinely exceed the 90s non-stream default).
+    ("mtk/glm-5-2", 600.0),
+    ("glm-5-2", 600.0),
     # Qwen QwQ + Qwen3 thinking variants (qwen3 family entry matches all).
     ("qwen/qwq-32b-preview", 300.0),
     ("qwen/qwen3-235b-a22b-thinking", 180.0),

@@ -1,6 +1,7 @@
 # Restricted Group Policy
 
 Labels: ready-for-agent, wayfinder:map
+Status: closed — spec published, all 12 implementation tickets (24-35) closed
 
 ## Spec
 

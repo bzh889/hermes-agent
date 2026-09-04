@@ -1,9 +1,23 @@
 # Implement the origin-bound Egress Broker
 
 Type: task
-Status: claimed
+Status: closed
 Parent: [Design and launch reusable Restricted Group Policy](../map.md)
 Blocked by: 09, 11
+
+## Resolution — 2026-09-03
+
+**Superseded by tracer-bullet tickets 24–28.**
+
+The origin-bound Egress Broker scope defined in this ticket is fully implemented across five tracer-bullet tickets:
+
+- **24** — `OriginEgressBinding` frozen dataclass + ContextVar (`gateway/restricted_origin.py`)
+- **25** — Restricted Group policy config + activation gate (`gateway/restricted_group_gate.py`)
+- **26** — Egress Broker core: permit/deny/intent (`gateway/egress_broker.py`)
+- **27** — Audit chain: HMAC-SHA256-linked SQLite WAL (`gateway/audit_chain.py`)
+- **28** — All emitter paths wired through Broker (`gateway/egress_wiring.py`)
+
+285 tests across 12 test files, all passing.
 
 ## Question
 

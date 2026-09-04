@@ -1737,6 +1737,24 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert env["NODE_ENV"] == "production"
 
 
+def test_launch_tui_resets_terminal_after_abnormal_child_exit(monkeypatch, main_mod):
+    resets = []
+
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(main_mod.subprocess, "call", lambda *args, **kwargs: 3221225786)
+    monkeypatch.setattr(main_mod, "_reset_tui_terminal_modes", lambda: resets.append(True))
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._launch_tui()
+
+    assert exc.value.code == 3221225786
+    assert resets == [True]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows venv launcher optimization")
 def test_apply_tui_python_env_exposes_fast_base_python_without_losing_venv(
     main_mod,

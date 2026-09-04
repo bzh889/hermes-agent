@@ -7,7 +7,7 @@ import type { FrameEvent } from '@hermes/ink'
 
 import { DASHBOARD_TUI_MODE, TERMUX_TUI_MODE } from './config/env.js'
 import { GatewayClient } from './gatewayClient.js'
-import { setupGracefulExit } from './lib/gracefulExit.js'
+import { classifyTerminalStreamError, setupGracefulExit } from './lib/gracefulExit.js'
 import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.js'
 import { type MemorySnapshot, startMemoryMonitor } from './lib/memoryMonitor.js'
 import { openExternalUrl } from './lib/openExternalUrl.js'
@@ -75,9 +75,20 @@ setupGracefulExit({
     // a zombie: Ink's render loop throws once a second, each throw lands back
     // in this handler, and the crash log fills with `write EIO` forever while
     // the gateway child keeps running. Bail out for real after a few in a row.
-    const code = (err as NodeJS.ErrnoException)?.code
+    const streamKind = classifyTerminalStreamError(err)
 
-    if (code === 'EIO' || code === 'EPIPE') {
+    if (streamKind === 'input') {
+      recordParentLifecycle(`dead input stream → exiting: ${message.split('\n')[0]?.slice(0, 400) ?? ''}`)
+      resetTerminalModes()
+      void gw.kill('dead-input-stream')
+      process.exit(1)
+
+      return
+    }
+
+    if (streamKind === 'output') {
+      const code = (err as NodeJS.ErrnoException)?.code
+
       if (++consecutiveDeadStreamErrors >= 5) {
         recordParentLifecycle(`dead output stream (${code} x${consecutiveDeadStreamErrors}) → exiting`)
         void gw.kill('dead-output-stream')

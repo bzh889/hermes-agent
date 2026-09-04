@@ -5602,10 +5602,12 @@ class AIAgent:
 
         Platform/provider policy:
         - Gateway (any platform except "tui"/"cli"): always allow fallback.
-        - TUI/CLI: only allow fallback when the current provider starts
-          with ``aide`` (MTK AIDE gateways that degrade gracefully on quota
-          exhaustion).  Non-AIDE providers in a local session should fail
-          fast rather than silently degrading to a different backend.
+        - TUI/CLI: only allow fallback when the runtime or requested provider
+          identity is an AIDE route (MTK AIDE gateways that degrade gracefully
+          on quota exhaustion). Named custom AIDE entries resolve to
+          ``provider="custom"`` but preserve an ``aide-*`` requested identity.
+          Non-AIDE providers in a local session should fail fast rather than
+          silently degrading to a different backend.
         """
         chain = getattr(self, "_fallback_chain", None) or []
         index = getattr(self, "_fallback_index", 0)
@@ -5617,7 +5619,11 @@ class AIAgent:
             # Gateway sessions: always allow fallback regardless of provider.
             return True
         provider = (getattr(self, "provider", "") or "").strip().lower()
-        if not provider.startswith("aide"):
+        from agent.agent_runtime_helpers import is_aide_provider_identity
+        if not is_aide_provider_identity(
+            provider,
+            getattr(self, "requested_provider", ""),
+        ):
             # Non-AIDE TUI/CLI sessions: skip fallback entirely.
             return False
         return True

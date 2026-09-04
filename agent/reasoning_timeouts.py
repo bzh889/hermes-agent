@@ -73,6 +73,11 @@ _REASONING_STALE_TIMEOUT_FLOORS: tuple[tuple[str, int], ...] = (
     ("deepseek-reasoner", 600),
     ("deepseek-v4-flash", 600),
     ("deepseek-v4-pro", 600),
+    # GLM-5 — GLM-5.2 reasoning model (reasoning_effort=max) behind the
+    # MTK AIDE gateway. The upstream idle timeout (~30s) 502s before the
+    # 90s non-stream default fires, but a longer stale floor also protects
+    # against Hermes-side stale detectors killing healthy prefill at scale.
+    ("glm-5", 600),
     # Qwen — QwQ reasoning + Qwen3 thinking variants.  QwQ-32B
     # preview is the stable slug; ``qwen3`` covers the family of
     # thinking-mode Qwen3 models (qwen3-235b-a22b, qwen3-32b, etc.)

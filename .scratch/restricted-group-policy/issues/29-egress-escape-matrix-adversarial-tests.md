@@ -4,7 +4,7 @@
 
 **Blocked by:** 28 — Wire all emitter paths through the Egress Broker
 
-**Status:** ready-for-agent
+**Status:** closed
 
 - [ ] Row 1: final reply — exact origin ALLOW (readback confirms delivery)
 - [ ] Row 2: streamed commentary — exact origin ALLOW

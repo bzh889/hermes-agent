@@ -4,7 +4,7 @@
 
 **Blocked by:** 29 — Egress escape matrix adversarial tests, 30 — CQ Read Broker, 32 — Model-routing gate, 33 — Durable approval state, 34 — Semantic history retrieval
 
-**Status:** ready-for-agent
+**Status:** closed
 
 - [ ] Confidence-gated triage: >90% blocks inferred function, ≤90% holds 24h
 - [ ] Adversarial error text cannot escalate authority (treated as untrusted input)

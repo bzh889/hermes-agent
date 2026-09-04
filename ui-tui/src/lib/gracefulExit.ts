@@ -21,6 +21,32 @@ let wired = false
 export const shouldExitForSignal = (signal: GracefulSignal, ignoredSignals: readonly GracefulSignal[] = []) =>
   !ignoredSignals.includes(signal)
 
+export type TerminalStreamErrorKind = 'input' | 'output'
+
+const TERMINAL_STREAM_ERRNOS = new Set(['EBADF', 'EINVAL', 'EIO', 'EPIPE', 'EPERM'])
+
+/** Classify a broken terminal stream without treating unrelated errors as fatal. */
+export const classifyTerminalStreamError = (err: unknown): TerminalStreamErrorKind | null => {
+  const value = err as { code?: unknown; message?: unknown } | null
+  const code = typeof value?.code === 'string' ? value.code : ''
+
+  if (!TERMINAL_STREAM_ERRNOS.has(code)) {
+    return null
+  }
+
+  const message = typeof value?.message === 'string' ? value.message : String(err)
+
+  if (/^read\b/i.test(message)) {
+    return 'input'
+  }
+
+  if (/^write\b/i.test(message)) {
+    return 'output'
+  }
+
+  return null
+}
+
 export function setupGracefulExit({
   cleanups = [],
   failsafeMs = 4000,

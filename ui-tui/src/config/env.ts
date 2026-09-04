@@ -25,6 +25,8 @@ const parseToggle = (v?: string): boolean | null => {
 
 export const TERMUX_TUI_MODE = isTermuxTuiMode()
 
+const WINDOWS_TERMINAL_MODE = process.platform === 'win32' && Boolean(process.env.WT_SESSION)
+
 export const STARTUP_RESUME_ID = (process.env.HERMES_TUI_RESUME ?? '').trim()
 export const STARTUP_QUERY = (process.env.HERMES_TUI_QUERY ?? '').trim()
 export const STARTUP_IMAGE = (process.env.HERMES_TUI_IMAGE ?? '').trim()
@@ -45,7 +47,12 @@ export const STARTUP_IMAGE = (process.env.HERMES_TUI_IMAGE ?? '').trim()
 const mouseTrackingOverride = parseToggle(process.env.HERMES_TUI_MOUSE_TRACKING)
 const mouseTrackingDisabledLegacy = truthy(process.env.HERMES_TUI_DISABLE_MOUSE)
 
-const resolvedBootMouseEnabled = mouseTrackingOverride ?? (TERMUX_TUI_MODE ? false : !mouseTrackingDisabledLegacy)
+// Windows Terminal can preserve extended mouse modes across a crashed child.
+// Keep the TUI's boot default mouse-free there; keyboard/clipboard input does
+// not depend on DEC mouse reporting, and this prevents stale SGR/pixel reports
+// from being delivered to the next PowerShell prompt after an abnormal exit.
+const resolvedBootMouseEnabled =
+  mouseTrackingOverride ?? (TERMUX_TUI_MODE || WINDOWS_TERMINAL_MODE ? false : !mouseTrackingDisabledLegacy)
 
 export const MOUSE_TRACKING: MouseTrackingMode = resolvedBootMouseEnabled ? 'all' : 'off'
 

@@ -4,7 +4,7 @@
 
 **Blocked by:** 27 — Audit chain: HMAC-linked intent/outcome records, 31 — Disposable per-group execution sandbox
 
-**Status:** ready-for-agent
+**Status:** closed
 
 - [ ] Approval request creates a metadata-only Durable Task (fingerprints, no raw content)
 - [ ] First-wins: first owner decision is immutable; second decision rejected

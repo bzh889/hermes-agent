@@ -4,7 +4,7 @@
 
 **Blocked by:** 28 — Wire all emitter paths through the Egress Broker
 
-**Status:** ready-for-agent
+**Status:** closed
 
 - [ ] CQ Read Broker module with seven read-only operations: query, page, export, search, filter, sort, aggregate
 - [ ] Broker authenticates to CQ system using owner credentials — credentials never in model context

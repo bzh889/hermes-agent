@@ -58,6 +58,21 @@ def _ra():
     return run_agent
 
 
+def is_aide_provider_identity(provider: Any, requested_provider: Any = None) -> bool:
+    """Return whether either runtime/provider identity names an AIDE route.
+
+    Named entries under ``providers:`` resolve to the implementation class
+    ``provider="custom"``.  Their original entry key survives as
+    ``requested_provider`` (for example, ``aide-crlogai001-responses``), so
+    policy checks must inspect both fields rather than only the implementation
+    class.
+    """
+    return any(
+        str(value or "").strip().lower().startswith("aide")
+        for value in (provider, requested_provider)
+    )
+
+
 AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
     {"todo", "session_search", "memory", "clarify", "read_terminal", "delegate_task"}
 )
