@@ -66,6 +66,7 @@ The map includes implementation, adversarial E2E, TestGroup rollout, explicit ow
 - [Define non-egress adversarial E2E matrix fixtures](issues/22-define-non-egress-adversarial-e2e-matrix-fixtures.md) — 11 rows across 4 categories (CQ broker write denial ×3, cross-group capability leakage ×3, model-routing gate bypass ×3, descriptor spoofing ×2); fully reuses ticket 18 fixtures with `NON-EGRESS-TEST-{uuid}:` markers.
 - [Restricted Group Policy spec published](issues/23-restricted-group-policy-spec.md) — OpenSpec change `restricted-group-policy` synthesized from 21 resolved decision tickets. Spec at `openspec/changes/restricted-group-policy/`. Labels: `ready-for-agent`. Next: `/to-tickets`.
 - [Restricted Group Policy tickets published](issues/24-origin-binding-module-and-contextvar.md) — 12 tracer-bullet tickets (24-35) across 5 phases. Frontier: ticket 24 (no blockers). Dependency graph and tasks in `openspec/changes/restricted-group-policy/tasks.md`.
+- [Implementation complete — all 12 tickets closed] — Commits: `0a0190a78` (tickets 24-25), `880f6751c` (tickets 26-35 + tests), `432c32ee6` (spec gap fixes: task liveness, content provenance, delegation brokering), `b2d506754` (OpenSpec tasks.md). 295 tests, 0 failed. Code review: 0 hard standards violations, 4 spec gaps fixed. All 35 tickets (01-35) closed.
 
 
 ## Not yet specified
