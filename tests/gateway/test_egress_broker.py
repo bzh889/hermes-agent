@@ -522,3 +522,177 @@ class TestSingleton:
         a = get_egress_broker()
         b = get_egress_broker()
         assert a is b
+
+
+# ---------------------------------------------------------------------------
+# 13. Task liveness check (spec gap fix)
+# ---------------------------------------------------------------------------
+
+class TestTaskLiveness:
+    """Broker denies when Durable Task is not live."""
+
+    def test_no_durable_task_id_allows(self):
+        """No durable_task_id on binding → liveness check skipped."""
+        broker = EgressBroker()
+        binding = _make_binding(durable_task_id="")
+        result = broker.request_permit(
+            operation="reply",
+            destination=binding.conv_id,
+            route="native",
+            payload="text",
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.ALLOW
+
+    def test_task_not_live_denies(self):
+        """When _is_task_live returns False → DENY task_not_live."""
+        broker = EgressBroker()
+        binding = _make_binding(durable_task_id="task-expired")
+        # Patch _is_task_live to return False
+        broker._is_task_live = lambda b: False
+        result = broker.request_permit(
+            operation="reply",
+            destination=binding.conv_id,
+            route="native",
+            payload="text",
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.DENY
+        assert result.reason == DenyReason.TASK_NOT_LIVE.value
+
+    def test_task_live_allows(self):
+        """When _is_task_live returns True → normal ALLOW flow."""
+        broker = EgressBroker()
+        binding = _make_binding(durable_task_id="task-active")
+        broker._is_task_live = lambda b: True
+        result = broker.request_permit(
+            operation="reply",
+            destination=binding.conv_id,
+            route="native",
+            payload="text",
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.ALLOW
+
+
+# ---------------------------------------------------------------------------
+# 14. Content provenance check (spec gap fix)
+# ---------------------------------------------------------------------------
+
+class TestContentProvenance:
+    """Broker verifies provenance tags on provenance-aware media."""
+
+    def test_no_provenance_allows(self):
+        """Plain string payload has no provenance → allow."""
+        broker = EgressBroker()
+        binding = _make_binding()
+        result = broker.request_permit(
+            operation="reply",
+            destination=binding.conv_id,
+            route="native",
+            payload="plain text",
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.ALLOW
+
+    def test_matching_provenance_allows(self):
+        """Provenance with matching conv_id + policy_id → allow."""
+        broker = EgressBroker()
+        binding = _make_binding()
+        payload = {
+            "text": "media output",
+            "_provenance": {
+                "conv_id": binding.conv_id,
+                "policy_id": binding.policy_id,
+            },
+        }
+        result = broker.request_permit(
+            operation="send_message",
+            destination=binding.conv_id,
+            route="native",
+            payload=payload,
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.ALLOW
+
+    def test_mismatched_provenance_conv_id_denies(self):
+        """Provenance with wrong conv_id → deny."""
+        broker = EgressBroker()
+        binding = _make_binding(conv_id="19:group-A@thread.v2")
+        payload = {
+            "text": "media",
+            "_provenance": {
+                "conv_id": "19:group-B@thread.v2",
+                "policy_id": binding.policy_id,
+            },
+        }
+        result = broker.request_permit(
+            operation="send_message",
+            destination=binding.conv_id,
+            route="native",
+            payload=payload,
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.DENY
+        assert result.reason == DenyReason.PROVENANCE_INVALID.value
+
+    def test_mismatched_provenance_policy_id_denies(self):
+        """Provenance with wrong policy_id → deny."""
+        broker = EgressBroker()
+        binding = _make_binding(policy_id="rgp-correct")
+        payload = {
+            "text": "media",
+            "_provenance": {
+                "conv_id": binding.conv_id,
+                "policy_id": "rgp-wrong",
+            },
+        }
+        result = broker.request_permit(
+            operation="send_message",
+            destination=binding.conv_id,
+            route="native",
+            payload=payload,
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.DENY
+        assert result.reason == DenyReason.PROVENANCE_INVALID.value
+
+
+# ---------------------------------------------------------------------------
+# 15. Delegation result brokering (spec gap fix)
+# ---------------------------------------------------------------------------
+
+class TestDelegationBrokering:
+    """Delegation results must return through the Broker."""
+
+    def test_delegation_to_origin_group_allowed(self):
+        broker = EgressBroker()
+        binding = _make_binding()
+        result = broker.broker_delegation_result(
+            delegation_result={"summary": "subagent completed"},
+            destination=binding.conv_id,
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.ALLOW
+        assert result.permit is not None
+        assert result.reason == "delegation_brokered"
+
+    def test_delegation_cross_group_denied(self):
+        broker = EgressBroker()
+        binding = _make_binding(conv_id="19:group-A@thread.v2")
+        result = broker.broker_delegation_result(
+            delegation_result={"summary": "leak attempt"},
+            destination="19:group-B@thread.v2",
+            binding=binding,
+        )
+        assert result.decision == PermitDecision.DENY
+        assert result.reason == DenyReason.ORIGIN_MISMATCH.value
+
+    def test_delegation_unrestricted_passthrough(self):
+        broker = EgressBroker()
+        result = broker.broker_delegation_result(
+            delegation_result={"summary": "ok"},
+            destination="19:any@thread.v2",
+        )
+        assert result.decision == PermitDecision.ALLOW
+        assert result.reason == DenyReason.NOT_RESTRICTED.value

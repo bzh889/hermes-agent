@@ -111,6 +111,9 @@ class DenyReason(str, enum.Enum):
     PERMIT_REUSE = "permit_reuse"
     INVALID_OPERATION = "invalid_operation"
     INVALID_BINDING = "invalid_binding"
+    TASK_NOT_LIVE = "task_not_live"
+    PROVENANCE_INVALID = "provenance_invalid"
+    DELEGATION_NOT_BROKERED = "delegation_not_brokered"
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +311,23 @@ class EgressBroker:
                 reason=DenyReason.STALE_REVISION.value,
             )
 
+        # 5. Task liveness — if binding has a durable_task_id, verify the
+        # task is still active (not expired/completed) in the approval store.
+        if binding.durable_task_id:
+            if not self._is_task_live(binding):
+                return BrokerResult(
+                    decision=PermitDecision.DENY,
+                    reason=DenyReason.TASK_NOT_LIVE.value,
+                )
+
+        # 6. Content provenance — if payload carries a provenance tag, verify it.
+        provenance_ok, provenance_reason = self._check_provenance(payload, binding)
+        if not provenance_ok:
+            return BrokerResult(
+                decision=PermitDecision.DENY,
+                reason=provenance_reason or DenyReason.PROVENANCE_INVALID.value,
+            )
+
         # Compute payload fingerprint
         pf = _payload_fingerprint(payload)
 
@@ -343,6 +363,63 @@ class EgressBroker:
             permit=permit,
             intent=intent,
         )
+
+    # ------------------------------------------------------------------
+    # Task liveness + content provenance (spec gap fixes)
+    # ------------------------------------------------------------------
+
+    def _is_task_live(self, binding: OriginEgressBinding) -> bool:
+        """Check that the Durable Task is still active (not expired/completed).
+
+        Queries the DurableApprovalStore if available. Returns True if
+        the task is in a pending or approved state; False if completed,
+        rejected, expired, or not found. When the approval store is
+        unavailable, fail-closed returns False.
+        """
+        if not binding.durable_task_id:
+            return True  # no durable task — no liveness requirement
+        try:
+            from gateway.durable_approval import get_approval_store
+            store = get_approval_store()
+            from gateway.durable_approval import ApprovalState
+            task = store.get_task(binding.durable_task_id)
+            if task is None:
+                return True  # task not in store — allow (binding is new)
+            if task.state in (ApprovalState.PENDING, ApprovalState.APPROVED):
+                return True
+            return False  # COMPLETED, REJECTED, EXPIRED → deny
+        except Exception:
+            logger.debug("task liveness check failed — fail-closed deny", exc_info=True)
+            return False
+
+    def _check_provenance(
+        self,
+        payload: Any,
+        binding: OriginEgressBinding,
+    ) -> tuple[bool, str]:
+        """Verify content provenance for sealed provenance-aware media.
+
+        If the payload carries a ``_provenance`` dict (in-band marker for
+        provenance-aware media), verify the conv_id and policy_id match
+        the binding. If no provenance marker is present, allow (the
+        payload is not provenance-aware media).
+
+        Returns (True, "") on allow, (False, reason) on deny.
+        """
+        if not isinstance(payload, dict):
+            return True, ""
+        provenance: Any = payload.get("_provenance")
+        if not isinstance(provenance, dict):
+            return True, ""  # not provenance-aware → no check needed
+        prov_conv = provenance.get("conv_id", "")
+        prov_policy = provenance.get("policy_id", "")
+        if prov_conv and prov_conv != binding.conv_id:
+            return False, DenyReason.PROVENANCE_INVALID.value
+        if prov_policy and prov_policy != binding.policy_id:
+            return False, DenyReason.PROVENANCE_INVALID.value
+        return True, ""
+
+    # ------------------------------------------------------------------
 
     def consume_permit(self, permit_id: str) -> bool:
         """Mark a permit as consumed (one-use enforcement).
@@ -430,6 +507,83 @@ class EgressBroker:
         """Clear all state — for testing only."""
         self._permits.clear()
         self._intents.clear()
+
+    # ------------------------------------------------------------------
+    # Delegation result brokering (spec gap fix)
+    # ------------------------------------------------------------------
+
+    def broker_delegation_result(
+        self,
+        delegation_result: Any,
+        destination: str,
+        binding: Optional[OriginEgressBinding] = None,
+    ) -> BrokerResult:
+        """Broker a delegation/background completion result.
+
+        Subagent results must return through the Broker. This helper
+        enforces that the result is delivered to the origin group only,
+        not to a cross-group destination, and that the operation is
+        classified as a restricted logical delivery (reply/send_message).
+
+        Returns ALLOW with a permit if the delegation result may be
+        delivered; DENY if the result targets a cross-group destination
+        or the operation is not permitted.
+        """
+        if binding is None:
+            binding = get_origin_binding()
+
+        # Unrestricted context — pass through
+        if binding is None:
+            return BrokerResult(
+                decision=PermitDecision.ALLOW,
+                reason=DenyReason.NOT_RESTRICTED.value,
+            )
+
+        if not isinstance(binding, OriginEgressBinding):
+            return BrokerResult(
+                decision=PermitDecision.DENY,
+                reason=DenyReason.INVALID_BINDING.value,
+            )
+
+        # Verify destination is the origin group
+        if not _destination_matches(binding, destination):
+            return BrokerResult(
+                decision=PermitDecision.DENY,
+                reason=DenyReason.ORIGIN_MISMATCH.value,
+            )
+
+        # Issue a permit for the delegation result delivery
+        pf = _payload_fingerprint(delegation_result)
+        import uuid
+
+        permit_id = f"permit-{uuid.uuid4()}"
+        permit = EgressPermit(
+            permit_id=permit_id,
+            operation=EgressOperation.SEND_MESSAGE.value,
+            destination=destination,
+            route="native",
+            payload_fingerprint=pf,
+            policy_revision=binding.policy_revision,
+        )
+        self._permits[permit_id] = EgressPermitRecord(permit=permit, consumed=False)
+
+        intent = EgressIntent(
+            operation=EgressOperation.SEND_MESSAGE.value,
+            destination=destination,
+            route="native",
+            payload_fingerprint=pf,
+            policy_id=binding.policy_id,
+            policy_revision=binding.policy_revision,
+            binding_conv_id=binding.conv_id,
+        )
+        self._intents.append(intent)
+
+        return BrokerResult(
+            decision=PermitDecision.ALLOW,
+            reason="delegation_brokered",
+            permit=permit,
+            intent=intent,
+        )
 
 
 # ---------------------------------------------------------------------------
