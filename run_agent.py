@@ -1622,11 +1622,28 @@ class AIAgent:
         assistant_message,
         messages: Optional[list] = None,
     ) -> bool:
-        """Detect conservative stop->length misreports for Ollama-hosted GLM models."""
-        if finish_reason != "stop" or self.api_mode != "chat_completions":
+        """Detect conservative ``stop`` misreports that need continuation.
+
+        Ollama-hosted GLM models are known to misreport truncated output as
+        ``stop``.  The same symptom can occur after a provider failover: a
+        fallback model may stop on an unfinished structured response (for
+        example, immediately after a Markdown table header) even though the
+        turn already contains tool results and the primary provider failed
+        before producing its final answer.  Keep the broader recovery scoped
+        to an actually activated fallback so ordinary provider ``stop``
+        responses retain their normal semantics.
+        """
+        if finish_reason != "stop":
             return False
-        if not self._is_ollama_glm_backend():
+
+        _is_ollama_glm = (
+            self.api_mode == "chat_completions"
+            and self._is_ollama_glm_backend()
+        )
+        _is_fallback_recovery = bool(getattr(self, "_fallback_activated", False))
+        if not _is_ollama_glm and not _is_fallback_recovery:
             return False
+
         if not any(
             isinstance(msg, dict) and msg.get("role") == "tool"
             for msg in (messages or [])

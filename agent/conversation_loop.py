@@ -2405,7 +2405,7 @@ def run_conversation(
                         messages,
                     ):
                         agent._vprint(
-                            f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
+                            f"{agent.log_prefix}⚠️  Treating suspicious stop response as truncated",
                             force=True,
                         )
                         finish_reason = "length"
@@ -3993,10 +3993,13 @@ def run_conversation(
                     # Fall through to normal error handling if compression
                     # is exhausted or didn't help.
 
-                # Eager fallback for rate-limit errors (429 or quota exhaustion)
-                # and transport errors (connection failure / timeout / provider
-                # overloaded).  Rate limits and billing: switch immediately —
-                # the primary provider won't recover within the retry window.
+                # Eager fallback for billing errors and transport errors
+                # (connection failure / timeout / provider overloaded).
+                # Rate limits get their bounded primary retry opportunity
+                # below, respecting Retry-After when the provider supplied it.
+                # A short-lived RPM/TPM window can recover without changing
+                # models; fallback remains the recovery path after that budget
+                # is exhausted.
                 # Transport errors: allow 1 retry first (transient hiccups
                 # recover), then fall back if the provider is truly unreachable.
                 is_rate_limited = classified.reason in {
@@ -4029,7 +4032,7 @@ def run_conversation(
                 if _is_zai_coding_overload or _is_aide_glm502:
                     max_retries = max(max_retries, 3)
                 _should_fallback = (
-                    is_rate_limited
+                    classified.reason == FailoverReason.billing
                     or (_is_transport_failure and retry_count >= 2)
                     or (_is_aide_glm502 and retry_count >= max_retries)
                 )

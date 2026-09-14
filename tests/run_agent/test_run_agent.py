@@ -5554,6 +5554,59 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert result["final_response"] == "Based on the search results, the best next"
 
+    def test_fallback_stop_without_natural_ending_requests_continuation(self, agent):
+        """A fallback provider must not finalize an obviously cut-off answer."""
+        self._setup_agent(agent)
+
+        tool_turn = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call(name="web_search", arguments="{}", call_id="c1")],
+        )
+        partial_stop = _mock_response(
+            content="The completed report starts here:\n|#",
+            finish_reason="stop",
+        )
+        continued = _mock_response(
+            content=" 1 | complete |\n| Done |.",
+            finish_reason="stop",
+        )
+
+        responses = iter([tool_turn, partial_stop, continued])
+
+        def _response_side_effect(*args, **kwargs):
+            response = next(responses)
+            if response is partial_stop:
+                # The real failover path sets this after the primary request
+                # fails.  Mutate at that boundary so run_conversation does not
+                # restore the primary runtime before the test begins.
+                agent._fallback_activated = True
+                agent.provider = "aide"
+                agent.model = "mtk/deepseek-v4-flash"
+                agent.api_mode = "chat_completions"
+            return response
+
+        agent.client.chat.completions.create.side_effect = _response_side_effect
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 3
+        assert result["final_response"] == (
+            "The completed report starts here:\n|# 1 | complete |\n| Done |."
+        )
+        continuation_messages = agent.client.chat.completions.create.call_args_list[2].kwargs[
+            "messages"
+        ]
+        assert continuation_messages[-1]["role"] == "user"
+        assert "truncated by the output length limit" in continuation_messages[-1]["content"]
+
     def test_sglang_glm_stop_without_terminal_boundary_does_not_continue(self, agent):
         """sglang/vLLM-hosted GLM models report finish_reason correctly.
 

@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_mtk_launchers_prefer_dot_venv_with_venv_fallback():
+def test_mtk_launchers_use_canonical_dot_venv():
     for name in ("hermes.sh", "hermes.bat", "hermes-web.bat", "hermes-desktop.bat"):
         text = (ROOT / name).read_text(encoding="utf-8")
         dot_venv = (
@@ -12,15 +12,10 @@ def test_mtk_launchers_prefer_dot_venv_with_venv_fallback():
             if name.endswith(".sh")
             else r"%~dp0.venv\Scripts\python.exe"
         )
-        fallback = (
-            "./venv/Scripts/python.exe"
-            if name.endswith(".sh")
-            else r"%~dp0venv\Scripts\python.exe"
-        )
-
         assert dot_venv in text, f"{name} does not probe .venv"
-        assert fallback in text, f"{name} lost the venv fallback"
-        assert text.index(dot_venv) < text.index(fallback)
+        assert "venv/Scripts/python.exe" not in text.replace(".venv/Scripts/python.exe", "")
+        assert r"venv\Scripts\python.exe" not in text.replace(r".venv\Scripts\python.exe", "")
+
 
 
 def test_mtk_launchers_use_real_git_bash_for_terminal_tools():

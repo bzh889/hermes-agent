@@ -1,14 +1,15 @@
 """Regression test for #32646: fallback_providers not activated when
-HTTP 429 follows a successful primary-transport recovery.
+HTTP 429 retries exhaust after a successful primary-transport recovery.
 
 Reproduces the (timeout x N -> recover -> 429 -> no fallback) sequence
 reported against zai/glm-5.1 -> zai/glm-4.7 on the Telegram gateway.
 
 Scenario:
-  1. ``_try_recover_primary_transport()`` succeeds after 3 timeouts and
+  1. ``_try_recover_primary_transport()`` succeeds after 2 timeouts and
      resets ``retry_count = 0`` so the rebuilt primary client gets one
      more attempt.
-  2. The next attempt hits HTTP 429.
+  2. The next two primary attempts hit HTTP 429 and exhaust the bounded
+     rate-limit retry budget.
   3. Before this fix, an eager-fallback attempt that lost its race with
      a concurrent session mutating the on-disk credential pool could
      leave ``_fallback_index`` advanced past the chain length without
@@ -17,8 +18,8 @@ Scenario:
      len(_fallback_chain)``), so the retry budget burned on the primary
      model with no fallback ever attempted.
   4. The fix resets ``_fallback_index`` / ``_fallback_activated`` /
-     ``TurnRetryState.has_retried_429`` after transport recovery so the post-recovery
-     429 always gets a fresh fallback-chain attempt.
+     ``TurnRetryState.has_retried_429`` after transport recovery so the
+     post-recovery 429 exhaustion always gets a fresh fallback-chain attempt.
 """
 
 from __future__ import annotations
@@ -225,9 +226,9 @@ class TestFallbackChainResetOnTransportRecovery:
         Start the turn with the fallback chain already burned, matching
         the stale state reported in the issue. Two transient timeouts
         exhaust the retry loop and trigger primary transport recovery.
-        The next primary attempt returns 429. The conversation loop must
-        reset the stale fallback-chain state during recovery so that the
-        post-recovery 429 activates the configured fallback provider.
+        The next two primary attempts return 429. The conversation loop must
+        reset the stale fallback-chain state during recovery so that bounded
+        post-recovery 429 retries still activate the configured fallback.
         """
         fb_chain = [
             {
@@ -249,7 +250,7 @@ class TestFallbackChainResetOnTransportRecovery:
                 agent._fallback_activated = False
             if attempt <= 2:
                 raise ReadTimeout("read timed out")
-            if attempt == 3:
+            if attempt in (3, 4):
                 raise RateLimitError()
             return _mock_response("Recovered via fallback")
 
@@ -281,6 +282,7 @@ class TestFallbackChainResetOnTransportRecovery:
         assert result["completed"] is True
         assert result["final_response"] == "Recovered via fallback"
         assert calls == [
+            ("zai", "glm-5.1"),
             ("zai", "glm-5.1"),
             ("zai", "glm-5.1"),
             ("zai", "glm-5.1"),

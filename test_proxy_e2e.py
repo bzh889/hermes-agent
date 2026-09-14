@@ -155,7 +155,7 @@ else:
 # 8. Core pytest
 print("\n[8] Core pytest")
 r = subprocess.run(
-    ["D:/01_Job/Tool/Hermes Agent/venv/Scripts/python.exe", "-m", "pytest",
+    ["D:/01_Job/Tool/Hermes Agent/.venv/Scripts/python.exe", "-m", "pytest",
      "tests/gateway/test_model_switch_persistence.py",
      "tests/gateway/test_48031_model_switch_after_auto_reset.py",
      "tests/hermes_cli/test_runtime_provider_resolution.py",

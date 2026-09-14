@@ -17,10 +17,9 @@ set "REQUESTS_CA_BUNDLE=%MTK_CA%"
 set "NODE_EXTRA_CA_CERTS=%MTK_CA%"
 set "HERMES_GIT_BASH_PATH=%ProgramFiles%\Git\usr\bin\bash.exe"
 set "PYEXE=%~dp0.venv\Scripts\python.exe"
-if not exist "%PYEXE%" set "PYEXE=%~dp0venv\Scripts\python.exe"
 
 if not exist "%PYEXE%" (
-    echo [!] venv not found at "%PYEXE%" - rebuild it. See setup-hermes-mtk.sh / README.
+    echo [!] .venv not found at "%PYEXE%" - rebuild it with setup-hermes-mtk.sh.
     pause
     exit /b 1
 )

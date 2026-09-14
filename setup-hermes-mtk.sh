@@ -72,20 +72,20 @@ echo -e "${GREEN}v  $(uv --version)${NC}"
 # 3. Virtual environment
 # ============================================================================
 echo -e "${CYAN}->  Setting up virtual environment...${NC}"
-if [ -d "venv" ]; then
-    echo -e "${CYAN}->  Removing existing venv...${NC}"
-    rm -rf venv
+if [ -d ".venv" ]; then
+    echo -e "${CYAN}->  Removing existing .venv...${NC}"
+    rm -rf .venv
 fi
-uv venv venv --python 3.12
-echo -e "${GREEN}v  venv created (Python 3.12)${NC}"
+uv venv .venv --python 3.12
+echo -e "${GREEN}v  .venv created (Python 3.12)${NC}"
 
-# Activate and ensure pip is available inside venv
-source venv/Scripts/activate
+# Activate and ensure pip is available inside .venv
+source .venv/Scripts/activate
 uv pip install \
     --index-url "$MTK_PIP_INDEX" \
     --native-tls \
     pip setuptools wheel -q
-echo -e "${GREEN}v  pip installed in venv${NC}"
+echo -e "${GREEN}v  pip installed in .venv${NC}"
 
 # ============================================================================
 # 4. MTK CA cert injection into certifi
@@ -315,20 +315,20 @@ add_if_missing "PYTHONIOENCODING" 'export PYTHONIOENCODING=utf-8'
 add_if_missing "SSL_CERT_FILE" "export SSL_CERT_FILE=\"$MTK_CA\""
 add_if_missing "REQUESTS_CA_BUNDLE" "export REQUESTS_CA_BUNDLE=\"$MTK_CA\""
 add_if_missing "NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=\"$MTK_CA\""
-add_if_missing "alias hermes=" "alias hermes='source \"$SCRIPT_DIR/venv/Scripts/activate\" && PYTHONIOENCODING=utf-8 hermes'"
+add_if_missing "alias hermes=" "alias hermes='source \"$SCRIPT_DIR/.venv/Scripts/activate\" && PYTHONIOENCODING=utf-8 hermes'"
 
 # ============================================================================
 # 11. PATH setup — symlink hermes into ~/.local/bin
 # ============================================================================
 echo -e "${CYAN}->  Setting up hermes command in PATH...${NC}"
-HERMES_BIN="$SCRIPT_DIR/venv/Scripts/hermes.exe"
+HERMES_BIN="$SCRIPT_DIR/.venv/Scripts/hermes.exe"
 LOCAL_BIN="$HOME/.local/bin"
 mkdir -p "$LOCAL_BIN"
 
 # On Windows/Git Bash, create a wrapper script instead of a symlink
 cat > "$LOCAL_BIN/hermes" << WRAPEOF
 #!/bin/bash
-source "$SCRIPT_DIR/venv/Scripts/activate"
+source "$SCRIPT_DIR/.venv/Scripts/activate"
 PYTHONIOENCODING=utf-8 hermes "\$@"
 WRAPEOF
 chmod +x "$LOCAL_BIN/hermes"

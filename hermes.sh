@@ -24,10 +24,7 @@ export HERMES_GIT_BASH_PATH="${PROGRAMFILES:-C:\Program Files}\Git\usr\bin\bash.
 
 PYEXE="./.venv/Scripts/python.exe"
 if [ ! -x "$PYEXE" ]; then
-    PYEXE="./venv/Scripts/python.exe"
-fi
-if [ ! -x "$PYEXE" ]; then
-    echo "[!] venv not found at $PYEXE — rebuild it (see setup-hermes-mtk.sh)."
+    echo "[!] .venv not found at $PYEXE — rebuild it with setup-hermes-mtk.sh."
     exit 1
 fi
 
