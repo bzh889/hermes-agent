@@ -38,6 +38,8 @@ Example config::
         headers:
           Authorization: "Bearer sk-..."
         timeout: 180
+        auto_start: true       # opt-in local recovery on connection refusal
+        start_command: ["mydc", "mcp-start"]
         skip_preflight: true  # bypass the content-type probe for a valid
                               # Streamable HTTP endpoint that answers HEAD/GET
                               # with a non-MCP content type but serves real
@@ -4467,16 +4469,21 @@ def _load_mcp_config() -> Dict[str, dict]:
 async def _connect_server(name: str, config: dict) -> MCPServerTask:
     """Create an MCPServerTask, start it, and return when ready.
 
-    The server Task keeps the connection alive in the background.
-    Call ``server.shutdown()`` (on the same event loop) to tear it down.
-
-    Raises:
-        ValueError: if required config keys are missing.
-        ImportError: if HTTP transport is needed but not available.
-        Exception: on connection or initialization failure.
+    For explicitly configured local HTTP servers, a connection refusal may
+    trigger one bounded start command before the normal discovery retry.
     """
     server = MCPServerTask(name)
-    await server.start(config)
+    try:
+        await server.start(config)
+    except Exception as exc:
+        if config.get("auto_start") and "url" in config:
+            from tools.mcp_autostart_watchdog import should_autostart, start_mcp_server_if_needed
+            if should_autostart(config, exc):
+                if start_mcp_server_if_needed(config) is not None:
+                    server = MCPServerTask(name)
+                    await server.start(config)
+                    return server
+        raise
     return server
 
 

@@ -8,12 +8,12 @@ A deterministic local harness and remote-simulation client can operate the same 
 
 **Status:** ready-for-agent
 
-- [ ] Local input produces a known response marker.
-- [ ] Remote-simulation input produces a different known response marker from the same child.
-- [ ] Local → remote → local handoff preserves the child identity.
-- [ ] The harness proves no restart occurred during mode transitions.
-- [ ] Output ordering is preserved.
-- [ ] Output contains no duplicate or missing markers.
-- [ ] The handoff does not create an unrelated foreground window.
-- [ ] The harness emits a clear PASS/FAIL verdict with diagnostic evidence.
-- [ ] The result is explicitly labelled local harness evidence, not Teams E2E evidence.
+- [x] Local input produces a known response marker.
+- [x] Remote-simulation input produces a different known response marker from the same child.
+- [x] Local → remote → local handoff preserves the child identity.
+- [x] The harness proves no restart occurred during mode transitions.
+- [x] Output ordering is preserved.
+- [x] Output contains no duplicate or missing markers.
+- [x] The handoff does not create an unrelated foreground window.
+- [x] The harness emits a clear PASS/FAIL verdict with diagnostic evidence.
+- [x] The result is explicitly labelled local harness evidence, not Teams E2E evidence.
