@@ -6,12 +6,12 @@ An independent probe determines whether an arbitrary Windows Terminal tab that w
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The probe distinguishes process discovery, visible text capture, stdout access, and stdin injection.
-- [ ] It evaluates documented Windows Terminal CLI, console, PTY, process, and UI Automation capabilities without relying on unsupported injection.
-- [ ] If supported, the probe demonstrates bidirectional I/O on the same existing session without restart.
-- [ ] If unsupported, it returns `unsupported` with evidence rather than using screenshot/OCR as a substitute for text I/O.
-- [ ] `indeterminate` is reported separately and is not counted as a pass.
-- [ ] The probe does not extract credentials, bypass authorization, or damage the existing terminal.
-- [ ] The result is independent of and does not block the broker-owned POC.
+- [x] The probe distinguishes process discovery, visible text capture, stdout access, and stdin injection.
+- [x] It evaluates documented Windows Terminal CLI, console, PTY, process, and UI Automation capabilities without relying on unsupported injection.
+- [x] If supported, the probe demonstrates bidirectional I/O on the same existing session without restart.
+- [x] If unsupported, it returns `unsupported` with evidence rather than using screenshot/OCR as a substitute for text I/O.
+- [x] `indeterminate` is reported separately and is not counted as a pass.
+- [x] The probe does not extract credentials, bypass authorization, or damage the existing terminal.
+- [x] The result is independent of and does not block the broker-owned POC.
