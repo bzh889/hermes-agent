@@ -79,6 +79,11 @@ class SessionState:
     """Snapshot of a session's lifecycle state (spec Decision 5).
 
     Fields are intentionally narrow — no raw credentials or secrets.
+
+    Ticket 02 additions (backward-compatible defaults):
+      * ``control_mode`` — ``"local"`` or ``"remote"`` (default ``"local"``).
+      * ``uptime`` — seconds since session creation (default ``0.0``).
+      * ``last_output`` — a short tail of the most recent output (default ``""``).
     """
 
     def __init__(
@@ -91,6 +96,9 @@ class SessionState:
         rows: int,
         cwd: str,
         output_cursor: int,
+        control_mode: str = "local",
+        uptime: float = 0.0,
+        last_output: str = "",
     ) -> None:
         self.session_id = session_id
         self.pid = pid
@@ -99,6 +107,9 @@ class SessionState:
         self.rows = rows
         self.cwd = cwd
         self.output_cursor = output_cursor
+        self.control_mode = control_mode
+        self.uptime = uptime
+        self.last_output = last_output
 
     def to_dict(self) -> dict:
         return {
@@ -109,13 +120,18 @@ class SessionState:
             "rows": self.rows,
             "cwd": self.cwd,
             "output_cursor": self.output_cursor,
+            "control_mode": self.control_mode,
+            "uptime": self.uptime,
+            "last_output": self.last_output,
         }
 
     def __repr__(self) -> str:
         return (
             f"SessionState(session_id={self.session_id!r}, pid={self.pid}, "
             f"running={self.running}, cols={self.cols}, rows={self.rows}, "
-            f"cwd={self.cwd!r}, output_cursor={self.output_cursor})"
+            f"cwd={self.cwd!r}, output_cursor={self.output_cursor}, "
+            f"control_mode={self.control_mode!r}, uptime={self.uptime:.1f}, "
+            f"last_output={self.last_output!r})"
         )
 
 
@@ -141,6 +157,8 @@ class PtyBridgePOC:
         self._output_cursor = 0
         self._write_lock = threading.Lock()
         self._start_time = time.monotonic()
+        self._control_mode = "local"
+        self._last_output = ""
 
     # -- lifecycle --------------------------------------------------------
 
@@ -244,6 +262,7 @@ class PtyBridgePOC:
             chunk = data.encode("utf-8", errors="replace")
 
         self._output_cursor += 1
+        self._last_output = chunk.decode("utf-8", errors="replace")[-512:]
         return chunk
 
     def write(self, data: bytes) -> None:
@@ -289,6 +308,9 @@ class PtyBridgePOC:
             rows=self._rows,
             cwd=self._cwd,
             output_cursor=self._output_cursor,
+            control_mode=getattr(self, "_control_mode", "local"),
+            uptime=self.uptime(),
+            last_output=getattr(self, "_last_output", ""),
         )
 
     @property
