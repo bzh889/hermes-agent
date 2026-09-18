@@ -6,13 +6,13 @@ The owner can operate a broker-owned terminal session from the exact Teams contr
 
 **Blocked by:** 02 — Terminal Session Broker with Explicit Handoff; 03 — Local/Remote Handoff Acceptance Harness.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Remote commands target an explicit session ID.
-- [ ] Status, output, input write, local/remote mode switch, and stop are supported.
-- [ ] A request from any other conversation is denied.
-- [ ] A request from any other sender OID is denied.
-- [ ] Display name, message text, prior turns, and cached Agent identity cannot grant authorization.
-- [ ] Denied requests cause no terminal input or state mutation.
-- [ ] The existing Teams MTK authentication and transport are reused.
-- [ ] Production gateway integration is attempted only after broker and handoff evidence passes.
+- [x] Remote commands target an explicit session ID.
+- [x] Status, output, input write, local/remote mode switch, and stop are supported.
+- [x] A request from any other conversation is denied.
+- [x] A request from any other sender OID is denied.
+- [x] Display name, message text, prior turns, and cached Agent identity cannot grant authorization.
+- [x] Denied requests cause no terminal input or state mutation.
+- [x] The existing Teams MTK authentication and transport are reused.
+- [x] Production gateway integration is attempted only after broker and handoff evidence passes.

@@ -265,6 +265,33 @@ class PtyBridgePOC:
         self._last_output = chunk.decode("utf-8", errors="replace")[-512:]
         return chunk
 
+    def try_read(self) -> Optional[bytes]:
+        """Non-blocking read — returns immediately if no data is available.
+
+        Like :meth:`read` but never blocks waiting for data. Uses
+        ``select.select`` on the PTY socket to check readability first.
+
+        Returns:
+          * bytes — child output that was already buffered
+          * empty bytes — no data available right now
+          * None — child has exited and the PTY is at EOF
+        """
+        if self._closed:
+            return None
+        import select as _select
+        try:
+            readable, _, _ = _select.select(
+                [self._proc.fd], [], [], 0.0,
+            )
+        except (OSError, ValueError, AttributeError):
+            # fd not available or closed
+            return None
+        if not readable:
+            return b""
+        # Data is available — delegate to the blocking read (which returns
+        # immediately because data is buffered)
+        return self.read(timeout=0.0)
+
     def write(self, data: bytes) -> None:
         """Write raw bytes to the child's stdin. Serialized (spec Decision 7).
 

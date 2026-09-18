@@ -184,6 +184,17 @@ class SessionBroker:
             return b"", new_cursor
         return chunk, new_cursor
 
+    def try_read_output(self, session_id: str) -> Optional[bytes]:
+        """Non-blocking read — returns immediately if no data is available.
+
+        Like :meth:`read_output` but never blocks.  Returns:
+          * bytes — zero or more bytes of child output
+          * empty bytes — no data available right now
+          * None — child has exited and the PTY is at EOF
+        """
+        sess = self._require(session_id)
+        return sess.bridge.try_read()
+
     def write_input(self, session_id: str, data: bytes, *, source: str = "local") -> None:
         """Write input to the named session.
 
