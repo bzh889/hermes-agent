@@ -8,15 +8,16 @@ Usage:
     wt.exe python -u poc/terminal_broker/claude_bridge.py
 """
 
-from __future__ import annotations
-
 import datetime
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import requests
+from pathlib import Path
+from urllib3.util.ssl_ import create_urllib3_context
 
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -68,42 +69,48 @@ class TeamsBridge:
         self.display_msg_id = None
         self.accumulated = ""
         self.seen_msg_ids: set[str] = set()
+        self._ca_path = str(Path.home() / ".hermes" / "certs" / "mtk-combined-ca.pem")
+        if not Path(self._ca_path).exists():
+            self._ca_path = None
 
-    def _ensure_ca_bundle(self):
-        """Restore the CA bundle environment variable — Claude Code may have overwritten it."""
-        import os
-        from pathlib import Path
-        ca = Path.home() / ".hermes" / "certs" / "mtk-combined-ca.pem"
-        if ca.exists():
-            os.environ["REQUESTS_CA_BUNDLE"] = str(ca)
-            os.environ["SSL_CERT_FILE"] = str(ca)
-            return str(ca)
-        return None
+    def _make_session(self):
+        """Build a fresh requests.Session with a per-request SSL context.
+
+        This bypasses urllib3's cached SSL context so that Claude Code's
+        env changes don't corrupt our TLS. Includes 1 retry on SSL EOF.
+        """
+        s = requests.Session()
+        if self._ca_path:
+            # Force a fresh SSL context each time, not the module-cached one
+            ctx = create_urllib3_context()
+            ctx.load_verify_locations(self._ca_path)
+            s.verify = self._ca_path
+            # Also restore env vars for good measure
+            os.environ["REQUESTS_CA_BUNDLE"] = self._ca_path
+            os.environ["SSL_CERT_FILE"] = self._ca_path
+        return s
+
+    def _request_with_retry(self, method, url, **kwargs):
+        """Execute an HTTP request with 1 retry on SSL EOF."""
+        for attempt in range(2):
+            session = self._make_session()
+            try:
+                resp = session.request(method, url, timeout=15, **kwargs)
+                session.close()
+                return resp
+            except requests.exceptions.SSLError:
+                session.close()
+                if attempt == 0:
+                    time.sleep(1)  # Brief pause before retry
+                    continue
+                raise
+        # Shouldn't reach here
+        raise requests.exceptions.SSLError("Max retries exceeded")
 
     def send(self, text):
         url = f"{self.msg_base}/conversations/{self.conv_id}/messages"
-        ca = self._ensure_ca_bundle()
-        session = requests.Session()
-        session.verify = ca if ca else True
-        resp = session.post(url, json={
-            "content": text,
-            "messagetype": "Text",
-            "contenttype": "text",
-            "properties": {"hermes_sender": "bot"},
-        }, headers={
-            "Authentication": f"skypetoken={self.skype_token}",
-            "Content-Type": "application/json",
-        }, timeout=15)
-        loc = resp.headers.get("Location", "")
-        return loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
-
-    def edit(self, msg_id, text):
-        url = f"{self.msg_base}/conversations/{self.conv_id}/messages/{msg_id}"
-        ca = self._ensure_ca_bundle()
-        session = requests.Session()
-        session.verify = ca if ca else True
         try:
-            resp = session.put(url, json={
+            resp = self._request_with_retry("POST", url, json={
                 "content": text,
                 "messagetype": "Text",
                 "contenttype": "text",
@@ -111,7 +118,24 @@ class TeamsBridge:
             }, headers={
                 "Authentication": f"skypetoken={self.skype_token}",
                 "Content-Type": "application/json",
-            }, timeout=15)
+            })
+            loc = resp.headers.get("Location", "")
+            return loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
+        except Exception:
+            return ""
+
+    def edit(self, msg_id, text):
+        url = f"{self.msg_base}/conversations/{self.conv_id}/messages/{msg_id}"
+        try:
+            resp = self._request_with_retry("PUT", url, json={
+                "content": text,
+                "messagetype": "Text",
+                "contenttype": "text",
+                "properties": {"hermes_sender": "bot"},
+            }, headers={
+                "Authentication": f"skypetoken={self.skype_token}",
+                "Content-Type": "application/json",
+            })
             return resp.status_code in (200, 201)
         except Exception:
             return False
@@ -131,14 +155,11 @@ class TeamsBridge:
 
     def poll_input(self, since_ts):
         url = f"{self.msg_base}/conversations/{self.conv_id}/messages"
-        ca = self._ensure_ca_bundle()
-        session = requests.Session()
-        session.verify = ca if ca else True
         try:
-            resp = session.get(f"{url}?pageSize=50", headers={
+            resp = self._request_with_retry("GET", f"{url}?pageSize=50", headers={
                 "Authentication": f"skypetoken={self.skype_token}",
                 "Content-Type": "application/json",
-            }, timeout=15)
+            })
             if resp.status_code != 200:
                 return []
             msgs = resp.json().get("messages", [])

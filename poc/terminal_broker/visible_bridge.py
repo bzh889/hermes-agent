@@ -29,8 +29,9 @@ import os
 import re
 import sys
 import time
-import threading
 import requests
+from pathlib import Path
+from urllib3.util.ssl_ import create_urllib3_context
 
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -45,7 +46,6 @@ POC_PREFIX = "[POC]"
 def _load_config():
     """Load the owner OID from config.yaml (the conversation ID is fixed)."""
     import yaml
-    from pathlib import Path
     config_path = Path.home() / ".hermes" / "config.yaml"
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
@@ -54,16 +54,12 @@ def _load_config():
     cc = tm.get("control_conversations", {})
     if not cc:
         raise RuntimeError("No control_conversations configured")
-    # Get owner OID from the control conversation config
     conv_id = next(iter(cc))
     owner_oid = cc[conv_id].get("owner_user_ids", [""])[0]
     return owner_oid
 
 
 def _init_transport():
-    # Ensure the CA bundle is set BEFORE importing requests-heavy Teams auth.
-    import os
-    from pathlib import Path
     ca = Path.home() / ".hermes" / "certs" / "mtk-combined-ca.pem"
     if ca.exists():
         os.environ["REQUESTS_CA_BUNDLE"] = str(ca)
@@ -86,33 +82,62 @@ class TeamsBridge:
         self.display_msg_id = None
         self.accumulated = ""
         self.seen_msg_ids: set[str] = set()
+        self._ca_path = str(Path.home() / ".hermes" / "certs" / "mtk-combined-ca.pem")
+        if not Path(self._ca_path).exists():
+            self._ca_path = None
+
+    def _make_session(self):
+        """Build a fresh requests.Session with a per-request SSL context."""
+        s = requests.Session()
+        if self._ca_path:
+            ctx = create_urllib3_context()
+            ctx.load_verify_locations(self._ca_path)
+            s.verify = self._ca_path
+            os.environ["REQUESTS_CA_BUNDLE"] = self._ca_path
+            os.environ["SSL_CERT_FILE"] = self._ca_path
+        return s
+
+    def _request_with_retry(self, method, url, **kwargs):
+        """Execute an HTTP request with 1 retry on SSL EOF."""
+        for attempt in range(2):
+            session = self._make_session()
+            try:
+                resp = session.request(method, url, timeout=15, **kwargs)
+                session.close()
+                return resp
+            except requests.exceptions.SSLError:
+                session.close()
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                raise
+        raise requests.exceptions.SSLError("Max retries exceeded")
 
     def send(self, text):
         url = f"{self.msg_base}/conversations/{self.conv_id}/messages"
-        resp = requests.post(url, json={
-            "content": text,
-            "messagetype": "Text",
-            "contenttype": "text",
-            "properties": {"hermes_sender": "bot"},
-        }, headers={
-            "Authentication": f"skypetoken={self.skype_token}",
-            "Content-Type": "application/json",
-        }, timeout=20)
-        loc = resp.headers.get("Location", "")
-        return loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
-
-    def edit(self, msg_id, text):
-        url = f"{self.msg_base}/conversations/{self.conv_id}/messages/{msg_id}"
         try:
-            resp = requests.put(url, json={
-                "content": text,
-                "messagetype": "Text",
-                "contenttype": "text",
+            resp = self._request_with_retry("POST", url, json={
+                "content": text, "messagetype": "Text", "contenttype": "text",
                 "properties": {"hermes_sender": "bot"},
             }, headers={
                 "Authentication": f"skypetoken={self.skype_token}",
                 "Content-Type": "application/json",
-            }, timeout=20)
+            })
+            loc = resp.headers.get("Location", "")
+            return loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
+        except Exception:
+            return ""
+
+    def edit(self, msg_id, text):
+        url = f"{self.msg_base}/conversations/{self.conv_id}/messages/{msg_id}"
+        try:
+            resp = self._request_with_retry("PUT", url, json={
+                "content": text, "messagetype": "Text", "contenttype": "text",
+                "properties": {"hermes_sender": "bot"},
+            }, headers={
+                "Authentication": f"skypetoken={self.skype_token}",
+                "Content-Type": "application/json",
+            })
             return resp.status_code in (200, 201)
         except Exception:
             return False
@@ -130,20 +155,18 @@ class TeamsBridge:
         """Poll Teams for new messages starting with [POC] from the owner."""
         url = f"{self.msg_base}/conversations/{self.conv_id}/messages"
         try:
-            resp = requests.get(f"{url}?pageSize=50", headers={
+            resp = self._request_with_retry("GET", f"{url}?pageSize=50", headers={
                 "Authentication": f"skypetoken={self.skype_token}",
                 "Content-Type": "application/json",
-            }, timeout=20)
+            })
             if resp.status_code != 200:
                 return []
             msgs = resp.json().get("messages", [])
             result = []
             for m in msgs:
                 msg_id = m.get("id", "")
-                # Dedup: skip messages we've already processed
                 if msg_id in self.seen_msg_ids:
                     continue
-                # Skip bot messages
                 props = m.get("properties", {})
                 if isinstance(props, str):
                     try:
@@ -152,12 +175,10 @@ class TeamsBridge:
                         props = {}
                 if isinstance(props, dict) and props.get("hermes_sender") in ("agent", "bot"):
                     continue
-                # Only owner
                 from_url = m.get("from", "")
                 sender_oid = from_url.rsplit("8:orgid:", 1)[-1].rstrip("/") if "8:orgid:" in from_url else ""
                 if sender_oid != self.owner_oid:
                     continue
-                # Time filter
                 ct = m.get("composetime", "").replace("Z", "+00:00")
                 try:
                     ts = datetime.datetime.fromisoformat(ct).timestamp()
@@ -165,16 +186,12 @@ class TeamsBridge:
                         continue
                 except:
                     continue
-                # Get text
                 text = re.sub(r"<[^>]+>", "", m.get("content", "")).strip()
                 if not text:
                     continue
-                # POC prefix filter: only process [POC] messages
                 if not text.startswith(POC_PREFIX):
                     continue
-                # Strip the prefix to get the actual expression
                 expr = text[len(POC_PREFIX):].strip()
-                # Mark as seen
                 self.seen_msg_ids.add(msg_id)
                 result.append(expr)
             return result
@@ -186,7 +203,6 @@ class TeamsBridge:
 # ─── Main ───────────────────────────────────────────────────────────────
 
 def main():
-    # Show on PC terminal first — everything Teams sees, PC sees too
     print("=" * 60)
     print("  Terminal ↔ Teams Bridge (TEST_ONLY group)")
     print("=" * 60)
@@ -203,7 +219,6 @@ def main():
 
     bridge = TeamsBridge(skype_token, msg_base, conv_id, owner_oid)
 
-    # The prompt goes to BOTH PC terminal AND Teams — same content
     prompt_msg = (
         "📱 [POC] 終端橋接已啟動 (TEST_ONLY 群組)。\n"
         "在這裡打 [POC] 加上 Python 運算式（例如 [POC] 2+3），\n"
@@ -217,11 +232,10 @@ def main():
     print("  >>> Waiting for input from phone or keyboard...")
     print(">>> ", end="", flush=True)
 
-    poll_ts = time.time() - 3600  # Start polling 1 hour ago to catch recent messages
-    deadline = time.time() + 600  # 10 minutes
+    poll_ts = time.time() - 3600
+    deadline = time.time() + 600
 
     while time.time() < deadline:
-        # 1. Check for user input from Teams
         try:
             inputs = bridge.poll_input(poll_ts)
         except Exception as e:
@@ -235,23 +249,16 @@ def main():
                 bridge.send("📱 [POC] 終端已關閉。")
                 return
 
-            # Show on PC terminal
             print(f"\n[Teams] [POC] {text}")
 
-            # Evaluate
             try:
                 result = eval(text, {"__builtins__": __builtins__}, {"os": os, "sys": sys})
                 output = f">>> {text}\n{result}\n"
             except Exception as e:
                 output = f">>> {text}\n{type(e).__name__}: {e}\n"
 
-            # Show on PC terminal
             print(output, end="")
-
-            # Send to Teams (edit display message)
             bridge.update_display(output)
-
-            # Print prompt
             print(">>> ", end="", flush=True)
 
         time.sleep(1)
