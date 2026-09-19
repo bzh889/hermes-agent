@@ -265,9 +265,9 @@ def main():
 
     # Keep a display message that gets edited as Claude responds
     poll_ts = time.time() - 60  # Catch messages from last minute
-    deadline = time.time() + 900  # 15 minutes
+    # No deadline — run until user types [POC] quit
 
-    while time.time() < deadline:
+    while True:  # Run forever until [POC] quit
         # 1. Poll Teams for user input
         try:
             inputs = bridge.poll_input(poll_ts)
@@ -326,10 +326,7 @@ def main():
 
         time.sleep(1)
 
-    print("\nTime's up.")
-    bridge.send("⏱ [POC] 時間到，Claude Code session 已關閉。")
-    broker.close(sid)
-    broker.shutdown()
+    # No timeout — bridge runs until [POC] quit
 
 
 if __name__ == "__main__":
