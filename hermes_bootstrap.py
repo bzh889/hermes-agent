@@ -237,3 +237,61 @@ suppress_platform_ver_console()
 # packages installed into the data volume on a previous run are importable
 # this run, before any backend module imports its SDK. No-op when unset.
 activate_durable_lazy_target()
+
+
+def enforce_windowless_subprocess() -> None:
+    """Windows: make every subprocess spawn console-less by default.
+
+    Root-cause fix for desktop-focus theft. When a windowless parent
+    (pythonw.exe gateway, TUI backend, slash/kanban worker) spawns a
+    console app, Win32 gives the child a NEW VISIBLE console window unless
+    ``CREATE_NO_WINDOW`` is passed -- flashing/stealing the user's desktop
+    focus (#54220/#56747, plus the 2026-10-02 git-show orphan storm where a
+    killed scanner parent left hundreds of visible ``git.exe`` windows).
+
+    Per-call-site CREATE_NO_WINDOW sweeps do not scale (1838 call sites
+    when last counted) and miss third-party SDK spawns. This patch layers
+    the default INSIDE subprocess.Popen itself:
+
+    - ``CREATE_NO_WINDOW`` is added whenever the caller passed no explicit
+      window-intent flags (``CREATE_NEW_CONSOLE``/``DETACHED_PROCESS``) and
+      did not already set ``creationflags``. A shell (``shell=True``) child
+      gets it too, so ``cmd /c`` shims don't flash.
+    - Escape hatch: set ``HERMES_ALLOW_CONSOLE_WINDOWS=1`` to disable the
+      patch (debugging a child's own console behaviour).
+    - POSIX and non-entry processes are no-ops.
+
+    Mutexed: applying twice (entry point + ``hermes_cli.main``) is
+    idempotent; a wrapped class with ``_hermes_windowless`` is skipped.
+    """
+    if not _IS_WINDOWS:
+        return
+    if os.environ.get("HERMES_ALLOW_CONSOLE_WINDOWS", "").strip() == "1":
+        return
+    import subprocess as _sp
+
+    original_init = _sp.Popen.__init__
+    if getattr(_sp.Popen, "_hermes_windowless", False):
+        return
+
+    _CREATE_NO_WINDOW = 0x08000000
+    _EXPLICIT_CONSOLE = 0x00000010 | 0x00000008  # CREATE_NEW_CONSOLE | DETACHED_PROCESS
+
+    def _windowless_init(self, *args, **kwargs):
+        try:
+            flags = int(kwargs.get("creationflags") or 0)
+            if not (flags & (_CREATE_NO_WINDOW | _EXPLICIT_CONSOLE)):
+                # The Windows launcher also consults the STARTUPINFO
+                # wShowWindow field when the child gets a console; keep any
+                # caller-provided startupinfo untouched and only add the flag.
+                kwargs["creationflags"] = flags | _CREATE_NO_WINDOW
+        except Exception:
+            pass  # never break a spawn over flag bookkeeping
+        return original_init(self, *args, **kwargs)
+
+    _sp.Popen.__init__ = _windowless_init
+    _sp.Popen._hermes_windowless = True
+
+
+# Windowless default applies at import alongside the other entry-point fixes.
+enforce_windowless_subprocess()
