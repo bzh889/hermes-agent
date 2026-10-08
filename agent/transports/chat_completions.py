@@ -39,10 +39,15 @@ def _reasoning_config_for_model(
     - ``max`` is not a valid level ("Supported values are: 'none', 'low',
       'medium', 'high', and 'xhigh'"), so ``max``/``ultra`` clamp to ``xhigh``.
 
-    Both quirks are scoped to the Azure deployment prefix, which is where they
-    were observed. Older families on the same gateway (gpt-5.5, gpt-5.4,
-    gpt-5.2) and its non-OpenAI models accept tools together with ``max``, and
-    OpenAI's own gpt-5.6 route takes ``max`` (hence the unprefixed
+    Both quirks are scoped to the Azure deployment prefix, where they were
+    observed on gpt-5.6 and (re-verified 2026-10-05) on the gpt-6-luna and
+    gpt-6-sol deployments ("Function tools with reasoning_effort are not
+    supported ..."). The gpt-6.1-sol deployment has a different contract:
+    chat completions rejects tools even when the effort field is omitted, and
+    also rejects ``none``; it must use the Responses transport for tool calls.
+    Older families on the same gateway (gpt-5.5,
+    gpt-5.4, gpt-5.2) and its non-OpenAI models accept tools together with
+    ``max``, and OpenAI's own direct route takes ``max`` (hence the unprefixed
     ``ultra`` → ``max`` mapping below). The native Codex/Responses transport
     has its own path and is unaffected.
     """
@@ -50,14 +55,43 @@ def _reasoning_config_for_model(
         return reasoning_config
 
     model_lower = (model or "").lower()
-    if "gpt-5.6" not in model_lower:
+    is_gpt56 = "gpt-5.6" in model_lower
+    # Only these gpt-6 deployments have been live-verified to accept tools
+    # with an explicit ``reasoning_effort: none``. Do not widen this to every
+    # future ``gpt-6*`` model: gpt-6.1-sol rejects both omitted and explicit
+    # ``none`` on chat completions.
+    is_gpt6_tools_none = any(
+        name in model_lower for name in ("gpt-6-luna", "gpt-6-sol")
+    )
+    is_gpt6 = "gpt-6" in model_lower
+    if not (is_gpt56 or is_gpt6):
         return reasoning_config
 
     effort = str(reasoning_config.get("effort") or "").strip().lower()
 
     if model_lower.startswith("azure/"):
-        # Tool-using requests: only "none" survives. An explicit "none" is
-        # kept — the user asked for reasoning off.
+        if is_gpt6_tools_none:
+            # gpt-6 defaults reasoning ON on this deployment, so a tools-
+            # bearing request is rejected even when the field is omitted
+            # ("Function tools with reasoning_effort are not supported for
+            # gpt-6-luna ... set reasoning_effort to 'none'"). The only
+            # wire-valid tool-path shape is an explicit 'none', which the
+            # endpoint accepts and answers with tool_calls (verified
+            # 2026-10-03). Non-tool requests clamp max/ultra -> xhigh.
+            if has_tools:
+                normalized = dict(reasoning_config)
+                if effort != "none":
+                    normalized["effort"] = "none"
+                return normalized
+            if effort in {"max", "ultra"}:
+                normalized = dict(reasoning_config)
+                normalized["effort"] = "xhigh"
+                return normalized
+            return reasoning_config
+
+        # gpt-5.6 Tool-using requests: only "none" survives. An explicit "none" is
+        # kept — the user asked for reasoning off. Dropping the field lets the
+        # endpoint apply its own (tools-compatible) default.
         if has_tools and effort and effort != "none":
             normalized = dict(reasoning_config)
             normalized.pop("effort", None)
@@ -528,6 +562,21 @@ class ChatCompletionsTransport(ProviderTransport):
                     _effort = reasoning_config.get("effort", "medium") or "medium"
                 extra_body["reasoning"] = {"enabled": True, "effort": _effort}
 
+        # MTK AIDE's Azure gpt-6-luna/gpt-6-sol deployments inspect the
+        # OpenAI-compatible top-level field, not Hermes' generic
+        # extra_body.reasoning field. With tools they require the explicit
+        # top-level ``reasoning_effort: none``; omitting it still leaves the
+        # gateway's default reasoning enabled and produces HTTP 400. This
+        # branch is model/endpoint based rather than provider-slug based so it
+        # applies equally to all AIDE accounts and both AIDE gateway hosts.
+        if (
+            model_lower.startswith("azure/")
+            and any(name in model_lower for name in ("gpt-6-luna", "gpt-6-sol"))
+            and tools
+        ):
+            api_kwargs["reasoning_effort"] = "none"
+            extra_body.pop("reasoning", None)
+
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
             if _is_gemini_openai_compat_base_url(base_url):
@@ -553,6 +602,21 @@ class ChatCompletionsTransport(ProviderTransport):
         overrides = params.get("request_overrides")
         if overrides:
             api_kwargs.update(overrides)
+
+        # Final guard: request_overrides is applied after the normal reasoning
+        # normalization and may re-introduce reasoning_effort=max or an
+        # extra_body.reasoning block from a stale session/config override.
+        # AIDE validates the final merged payload, so sanitize at the last
+        # possible point before returning it.
+        if (
+            str(model or "").lower().startswith("azure/")
+            and any(name in str(model or "").lower() for name in ("gpt-6-luna", "gpt-6-sol"))
+            and tools
+        ):
+            api_kwargs["reasoning_effort"] = "none"
+            final_extra = api_kwargs.get("extra_body")
+            if isinstance(final_extra, dict):
+                final_extra.pop("reasoning", None)
 
         return api_kwargs
 
@@ -641,6 +705,15 @@ class ChatCompletionsTransport(ProviderTransport):
         )
         api_kwargs.update(top_level_from_profile)
 
+        # Same AIDE Azure gpt-6 tool contract as the legacy path above. Named
+        # config providers normally use this profile path when registered.
+        if (
+            _model_lower.startswith("azure/")
+            and any(name in _model_lower for name in ("gpt-6-luna", "gpt-6-sol"))
+            and tools
+        ):
+            api_kwargs["reasoning_effort"] = "none"
+
         # extra_body assembly
         extra_body: dict[str, Any] = {}
 
@@ -660,6 +733,15 @@ class ChatCompletionsTransport(ProviderTransport):
         if extra_body_from_profile:
             extra_body.update(extra_body_from_profile)
 
+        if (
+            _model_lower.startswith("azure/")
+            and any(name in _model_lower for name in ("gpt-6-luna", "gpt-6-sol"))
+            and tools
+        ):
+            # Do not leave a second, conflicting generic reasoning payload in
+            # the profile path; AIDE validates the top-level field.
+            extra_body.pop("reasoning", None)
+
         # Merge any pre-built extra_body additions from the caller
         additions = params.get("extra_body_additions")
         if additions:
@@ -673,6 +755,16 @@ class ChatCompletionsTransport(ProviderTransport):
                     extra_body.update(v)
                 else:
                     api_kwargs[k] = v
+
+        # Final guard after request_overrides: a stale in-session override can
+        # otherwise re-add reasoning_effort=max after the earlier model guard.
+        if (
+            _model_lower.startswith("azure/")
+            and any(name in _model_lower for name in ("gpt-6-luna", "gpt-6-sol"))
+            and tools
+        ):
+            api_kwargs["reasoning_effort"] = "none"
+            extra_body.pop("reasoning", None)
 
         if extra_body:
             # Native Gemini (generativelanguage.googleapis.com, non-/openai)

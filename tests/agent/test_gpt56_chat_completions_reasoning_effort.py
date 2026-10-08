@@ -125,3 +125,65 @@ def test_other_models_keep_tools_plus_max():
             f"{model} must keep its configured effort — the gpt-5.6 clamp "
             "must not widen to models that accept max"
         )
+
+
+def test_gpt6_tools_force_explicit_none():
+    """AIDE gpt-6 requires explicit reasoning_effort=none with tools."""
+    for effort in ("max", "ultra", "xhigh", "high", "medium", "low"):
+        kwargs = _build("azure/gpt-6-luna", tools=True, effort=effort)
+        assert kwargs.get("reasoning_effort") == "none"
+        assert "reasoning" not in kwargs.get("extra_body", {})
+
+
+def test_gpt6_profile_path_emits_top_level_none():
+    """The named-provider/profile path must emit the same wire contract."""
+    from providers.base import ProviderProfile
+
+    kwargs = ChatCompletionsTransport().build_kwargs(
+        "azure/gpt-6-luna",
+        [{"role": "user", "content": "hi"}],
+        _TOOLS,
+        provider_profile=ProviderProfile(name="aide"),
+        reasoning_config={"enabled": True, "effort": "max"},
+        supports_reasoning=True,
+        max_tokens_param_fn=lambda n: {"max_completion_tokens": n},
+        max_tokens=100,
+    )
+    assert kwargs["reasoning_effort"] == "none"
+    assert "reasoning" not in kwargs.get("extra_body", {})
+
+
+def test_gpt6_final_guard_overrides_stale_request_override():
+    """A stale session override must not leak max back onto the wire."""
+    kwargs = ChatCompletionsTransport().build_kwargs(
+        "azure/gpt-6-luna",
+        [{"role": "user", "content": "hi"}],
+        _TOOLS,
+        reasoning_config={"enabled": True, "effort": "max"},
+        supports_reasoning=True,
+        max_tokens_param_fn=lambda n: {"max_completion_tokens": n},
+        max_tokens=100,
+        request_overrides={
+            "reasoning_effort": "max",
+            "extra_body": {"reasoning": {"enabled": True, "effort": "max"}},
+        },
+    )
+    assert kwargs["reasoning_effort"] == "none"
+    assert "reasoning" not in kwargs.get("extra_body", {})
+
+
+def test_gpt6_toolless_clamps_max_to_xhigh():
+    for effort in ("max", "ultra"):
+        kwargs = _build("azure/gpt-6-luna", tools=False, effort=effort)
+        assert kwargs.get("reasoning_effort") == "xhigh"
+
+
+def test_gpt61_is_not_given_gpt6_tools_none_workaround():
+    """gpt-6.1 has a different chat-completions contract.
+
+    The live endpoint rejects tools for this deployment regardless of whether
+    effort is omitted or set to ``none``. Do not misclassify it as the
+    gpt-6-luna/gpt-6-sol contract; it needs the Responses transport.
+    """
+    kwargs = _build("azure/gpt-6.1-sol", tools=True, effort="max")
+    assert "reasoning_effort" not in kwargs

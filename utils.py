@@ -554,6 +554,7 @@ def model_forces_max_completion_tokens(model: str) -> bool:
     - ``gpt-4o`` / ``gpt-4o-mini`` / ``gpt-4o-*``
     - ``gpt-4.1`` / ``gpt-4.1-*``
     - ``gpt-5`` / ``gpt-5.x`` / ``gpt-5-*``
+    - ``gpt-6`` / ``gpt-6-*``
     - ``o1`` / ``o1-*``
     - ``o3`` / ``o3-*``
     - ``o4`` / ``o4-*``
@@ -573,6 +574,7 @@ def model_forces_max_completion_tokens(model: str) -> bool:
         m.startswith("gpt-4o")
         or m.startswith("gpt-4.1")
         or m.startswith("gpt-5")
+        or m.startswith("gpt-6")
         or m.startswith("o1")
         or m.startswith("o3")
         or m.startswith("o4")

@@ -275,6 +275,20 @@ DEFAULT_CONTEXT_LENGTHS = {
     "deepseek-chat": 1_000_000,
     "deepseek-reasoner": 1_000_000,
     "deepseek": 128000,
+    # MTK AIDE WFM in-house deployments — live-verified 2026-10-08 against
+    # mlop-azure-gateway-io via literal overflow-400 messages ("maximum
+    # context length is N tokens"). AIDE V3 metadata has no entries for the
+    # wfm/* short names, so the generic 256K fallback previously
+    # misreported these. wfm-pro-glm5-2-744b shares wfm-pro's 524_284
+    # ceiling (both serve the glm5-2 744B deployment; the 202_752 value was
+    # the older glm5-1 deployment and is now wrong for glm5-2).
+    "wfm-plus": 1_048_576,
+    "wfm-flash": 262_144,
+    "wfm-pro": 524_284,
+    "wfm-pro-glm5-2-744b": 524_284,
+    "wfm-reasoning-oa": 1_048_576,
+    "wfm-plus-deepseek-v4-flash": 1_048_576,
+    "other/auto": 1_048_572,
     # Meta
     "llama": 131072,
     # Qwen — specific model families before the catch-all.
@@ -2507,6 +2521,22 @@ def get_model_context_length(
                         return ctx
         except Exception:
             logger.debug("AIDE context length lookup failed", exc_info=True)
+
+        # AIDE's V3 catalog currently omits the Azure GPT-5.6/GPT-6 entries,
+        # so the generic model-name fallback below would incorrectly apply the
+        # direct-OpenAI 1.05M value to an AIDE deployment.  Live AIDE length
+        # validation has established a gateway-enforced 922K input ceiling for
+        # these deployments (the endpoint returns context_length_exceeded at
+        # 922,000).  Keep this provider-specific cap instead of falling through
+        # to DEFAULT_CONTEXT_LENGTHS, which is for other providers.
+        model_lower = model.lower()
+        if any(f"gpt-{family}" in model_lower for family in ("5.6", "6")):
+            logger.info(
+                "Using live AIDE GPT context ceiling 922000 for %r; "
+                "V3 metadata has no entry",
+                model,
+            )
+            return 922_000
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (
