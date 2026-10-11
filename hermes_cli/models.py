@@ -3952,8 +3952,25 @@ def probe_api_models(
         try:
             with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
+                model_ids = [m.get("id", "") for m in data.get("data", [])]
+                if (api_mode or "").strip().lower() == "codex_responses":
+                    # Responses-API deployments serve TWO catalogs from the same
+                    # /v1/models payload: `data[]` (chat/completions ids) and
+                    # `models[]` (the Codex/Responses catalog — slug +
+                    # display_name, e.g. AIDE's databricks/* entries, which are
+                    # /v1/responses-ONLY and 400 on /v1/chat/completions).
+                    # A Responses-transport model can never appear in data[],
+                    # so membership-checking only data[] reports every
+                    # Responses model as "not found". Merge both catalogs.
+                    seen = set()
+                    for m in data.get("models", []) or []:
+                        for key in ("slug", "display_name"):
+                            mid = (m.get(key) or "").strip() if isinstance(m, dict) else ""
+                            if mid and mid not in seen:
+                                seen.add(mid)
+                                model_ids.append(mid)
                 return {
-                    "models": [m.get("id", "") for m in data.get("data", [])],
+                    "models": model_ids,
                     "probed_url": url,
                     "resolved_base_url": candidate_base.rstrip("/"),
                     "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
@@ -4450,7 +4467,7 @@ def validate_requested_model(
 
     if normalized == "custom" or normalized.startswith("custom:"):
         # Try probing with correct auth for the api_mode.
-        if api_mode == "anthropic_messages":
+        if api_mode in ("anthropic_messages", "codex_responses"):
             probe = probe_api_models(api_key, base_url, api_mode=api_mode, extra_headers=extra_headers)
         else:
             probe = probe_api_models(api_key, base_url, extra_headers=extra_headers)
@@ -4716,8 +4733,14 @@ def validate_requested_model(
             ),
         }
 
-    # Probe the live API to check if the model actually exists
-    api_models = fetch_api_models(api_key, base_url, extra_headers=extra_headers)
+    # Probe the live API to check if the model actually exists. Forward
+    # api_mode so Responses-transport endpoints validate against BOTH catalogs
+    # of /v1/models (data[] plus the Codex/Responses models[] slugs) instead
+    # of membership-checking the chat-only catalog and warning on every
+    # Responses-only model (e.g. AIDE databricks/*).
+    api_models = fetch_api_models(
+        api_key, base_url, api_mode=api_mode, extra_headers=extra_headers
+    )
 
     if api_models is not None:
         # Gemini's OpenAI-compat /v1beta/openai/models endpoint returns IDs

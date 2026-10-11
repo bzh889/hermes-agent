@@ -2535,10 +2535,41 @@ def list_authenticated_providers(
                     entry_models.append(model_id)
 
             if group_key not in ep_groups:
-                # Strip per-model suffix so "Palantir Claude 4.7 Opus" becomes
-                # "Palantir Claude". Em dash and " - " are the separators
-                # Hermes's own writer uses (mirrors section-4 grouping).
-                grp_display = display_name
+                # Folded-row display trimming is deferred to the post-loop pass:
+                # at first-member time we cannot yet know whether the group will
+                # actually fold (raw_names > 1). Single-member groups NEVER trim —
+                # the heuristic (strip at the first digit-bearing token, meant to
+                # drop per-version suffixes like "Palantir Claude 4.7 Opus" →
+                # "Palantir Claude") would also mangle account names that carry
+                # digits ("AIDE Responses ds901472 (primary)" → "AIDE Responses"),
+                # collapsing five distinct user-configured provider rows into
+                # indistinguishable picker labels.
+                grp_slug = ep_name  # primary slug is the first ep_name encountered
+                ep_groups[group_key] = {
+                    "slug": grp_slug,
+                    "name": display_name,
+                    "api_url": api_url,
+                    "models": [],
+                    "ep_cfg": ep_cfg,  # used below for discover_models / api_key
+                    "raw_names": [],
+                }
+            # Aggregate models across all members of the group (preserve order).
+            for _m in entry_models:
+                if _m and _m not in ep_groups[group_key]["models"]:
+                    ep_groups[group_key]["models"].append(_m)
+            ep_groups[group_key]["raw_names"].append(display_name)
+
+        for grp in ep_groups.values():
+            ep_cfg = grp["ep_cfg"]
+            ep_name = grp["slug"]
+            raw_names = grp.get("raw_names") or []
+            if len(raw_names) > 1:
+                # The group genuinely folded — apply the per-model suffix trim so
+                # "Palantir Claude 4.6 Opus" + "Palantir Claude 4.7 Opus" render
+                # as one "Palantir Claude" row. Em dash and " - " are the
+                # separators Hermes's own writer uses (mirrors section-4
+                # grouping).
+                grp_display = raw_names[0]
                 for sep in ("—", " - "):
                     if sep in grp_display:
                         grp_display = grp_display.split(sep)[0].strip()
@@ -2558,25 +2589,10 @@ def list_authenticated_providers(
                         break
                 if _cut_at is not None and _cut_at >= 2:
                     grp_display = " ".join(_toks[:_cut_at]).strip()
-                grp_slug = ep_name  # primary slug is the first ep_name encountered
-                ep_groups[group_key] = {
-                    "slug": grp_slug,
-                    "name": grp_display or display_name,
-                    "api_url": api_url,
-                    "models": [],
-                    "ep_cfg": ep_cfg,  # used below for discover_models / api_key
-                    "raw_names": [],
-                }
-            # Aggregate models across all members of the group (preserve order).
-            for _m in entry_models:
-                if _m and _m not in ep_groups[group_key]["models"]:
-                    ep_groups[group_key]["models"].append(_m)
-            ep_groups[group_key]["raw_names"].append(display_name)
-
-        for grp in ep_groups.values():
-            ep_cfg = grp["ep_cfg"]
-            ep_name = grp["slug"]
-            display_name = grp["name"]
+                display_name = grp_display or raw_names[0]
+            else:
+                # Single member: the configured name IS the row's identity.
+                display_name = raw_names[0] if raw_names else ep_name
             api_url = grp["api_url"]
             models_list = list(grp["models"])
             model_context_lengths: dict[str, int] = {}
