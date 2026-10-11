@@ -3920,6 +3920,47 @@ def _refresh_provider_credentials(provider: str) -> bool:
                 return False
             _evict_cached_clients(normalized)
             return True
+        if normalized.startswith("aide"):
+            # All AIDE-family routes use short-lived or rotatable credentials.
+            # The default ``aide`` route is helper-minted; named service
+            # accounts use their configured key_env. Re-resolve the matching
+            # config entry and evict the cached client after a 401 so auxiliary
+            # tasks can recover without restarting Hermes.
+            from hermes_cli.config import load_config
+            from hermes_cli.runtime_provider import (
+                invalidate_api_key_helper_cache,
+                run_api_key_helper,
+            )
+
+            cfg = load_config()
+            providers = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+            entry = providers.get(normalized, {}) if isinstance(providers, dict) else {}
+            helper = str(entry.get("api_key_helper") or "").strip()
+            if helper:
+                invalidate_api_key_helper_cache(helper)
+                token = run_api_key_helper(helper)
+            else:
+                key_env = str(
+                    entry.get("key_env")
+                    or entry.get("api_key_env")
+                    or entry.get("api_key_env_var")
+                    or ""
+                ).strip()
+                token = os.environ.get(key_env, "").strip() if key_env else ""
+            if not str(token or "").strip():
+                # Named service-account entries may be loaded from .env rather
+                # than the process environment. Reuse the normal auth resolver
+                # before declaring recovery impossible.
+                try:
+                    from hermes_cli.auth import resolve_api_key_provider_credentials
+
+                    token = resolve_api_key_provider_credentials(normalized).get("api_key", "")
+                except Exception:
+                    token = ""
+            if not str(token or "").strip():
+                return False
+            _evict_cached_clients(normalized)
+            return True
     except Exception as exc:
         logger.debug("Auxiliary provider credential refresh failed for %s: %s", normalized, exc)
         return False

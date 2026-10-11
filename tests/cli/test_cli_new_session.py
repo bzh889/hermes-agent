@@ -298,6 +298,43 @@ def test_clear_command_starts_new_session_before_redrawing(tmp_path):
     assert cli.conversation_history == []
 
 
+def test_new_command_notifies_reset_before_first_agent_turn():
+    """A fresh /new must run lifecycle checks even before an agent exists."""
+    cli = _make_cli()
+    cli._confirm_destructive_slash = lambda *_a, **_kw: "once"
+    events = []
+    cli._notify_session_boundary = lambda event: events.append(
+        (event, cli.session_id)
+    )
+
+    cli.process_command("/new")
+
+    assert events == [("on_session_reset", cli.session_id)]
+
+
+def test_clear_renders_reset_reminder_after_screen_is_cleared(tmp_path):
+    """The reset reminder must survive /clear's terminal erase and redraw."""
+    cli = _prepare_cli_with_active_session(tmp_path)
+    events = []
+    cli._notify_session_boundary = lambda event: events.append(
+        ("reset-reminder", event)
+    )
+    cli.console = MagicMock()
+    cli.console.clear.side_effect = lambda: events.append(("screen", "clear"))
+    cli.show_banner = MagicMock(
+        side_effect=lambda: events.append(("screen", "banner"))
+    )
+
+    cli.process_command("/clear")
+
+    assert events.index(("reset-reminder", "on_session_reset")) > events.index(
+        ("screen", "clear")
+    )
+    assert events.index(("reset-reminder", "on_session_reset")) > events.index(
+        ("screen", "banner")
+    )
+
+
 def test_new_session_resets_token_counters(tmp_path):
     """Regression test for #2099: /new must zero all token counters."""
     cli = _prepare_cli_with_active_session(tmp_path)

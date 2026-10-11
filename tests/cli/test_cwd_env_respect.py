@@ -1,10 +1,13 @@
 """Tests for CLI/TUI CWD resolution in load_cli_config().
 
 Rules:
-- Local backend CLI/TUI: always os.getcwd(), ignoring config and inherited env.
+- Local backend CLI/TUI: use the launcher-captured project directory when
+  available, otherwise fall back to os.getcwd().
 - Non-local with placeholder: pop cwd for backend default.
 - Non-local with explicit path: keep as-is.
 """
+
+from pathlib import Path
 
 
 _CWD_PLACEHOLDERS = (".", "auto", "cwd")
@@ -15,7 +18,12 @@ def _resolve_cwd(terminal_config: dict, defaults: dict, env: dict):
     effective_backend = terminal_config.get("env_type", "local")
 
     if effective_backend == "local":
-        terminal_config["cwd"] = "/fake/getcwd"
+        launch_cwd = env.get("HERMES_LAUNCH_CWD", "").strip()
+        if launch_cwd and Path(launch_cwd).is_dir():
+            terminal_cwd = str(Path(launch_cwd).resolve())
+        else:
+            terminal_cwd = "/fake/getcwd"
+        terminal_config["cwd"] = terminal_cwd
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
@@ -32,7 +40,19 @@ def _resolve_cwd(terminal_config: dict, defaults: dict, env: dict):
 
 
 class TestLocalBackendCli:
-    """Local backend always uses os.getcwd()."""
+    """Local backend resolves the project that launched Hermes."""
+
+    def test_launcher_cwd_wins_over_hermes_process_cwd(self, tmp_path):
+        project = tmp_path / "caller-project"
+        project.mkdir()
+        env = {
+            "HERMES_LAUNCH_CWD": str(project),
+            "TERMINAL_CWD": str(tmp_path / "hermes-install"),
+        }
+        tc = {"cwd": str(tmp_path / "hermes-install"), "env_type": "local"}
+        d = {"terminal": {"cwd": tc["cwd"]}}
+
+        assert _resolve_cwd(tc, d, env) == str(project.resolve())
 
     def test_explicit_config_ignored(self):
         env = {}

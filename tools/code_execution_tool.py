@@ -57,6 +57,34 @@ logger = logging.getLogger(__name__)
 
 SANDBOX_AVAILABLE = True
 
+# Self-contained windowless preamble prepended to every sandbox script.py on
+# Windows. The sandbox child is a fresh Python process whose env is scrubbed
+# and which never imports hermes_bootstrap — so without this, every
+# subprocess the user script spawns pops a visible console window from the
+# windowless parent chain (pythonw TUI/gateway), stealing desktop focus.
+# Mirrors enforce_windowless_subprocess() in hermes_bootstrap.py: inject
+# CREATE_NO_WINDOW into subprocess.Popen unless the caller explicitly asked
+# for a console (CREATE_NEW_CONSOLE | DETACHED_PROCESS).
+_SANDBOX_WINDOWLESS_PREAMBLE = '''\
+# --- hermes windowless preamble (auto-generated; keep first) ---
+import os as _os, subprocess as _sp
+if _os.name == "nt":
+    _WINDOWLESS, _EXPLICIT_CONSOLE = 0x08000000, 0x00000010 | 0x00000008
+    _orig_popen_init = _sp.Popen.__init__
+    if not getattr(_sp.Popen, "_hermes_windowless", False):
+        def _windowless_init(self, *a, **kw):
+            try:
+                fl = int(kw.get("creationflags") or 0)
+                if not fl & (_WINDOWLESS | _EXPLICIT_CONSOLE):
+                    kw["creationflags"] = fl | _WINDOWLESS
+            except Exception:
+                pass
+            return _orig_popen_init(self, *a, **kw)
+        _sp.Popen.__init__ = _windowless_init
+        _sp.Popen._hermes_windowless = True
+# --- end preamble ---
+'''
+
 # The 7 tools allowed inside the sandbox. The intersection of this list
 # and the session's enabled tools determines which stubs are generated.
 SANDBOX_ALLOWED_TOOLS = frozenset([
@@ -1312,8 +1340,18 @@ def execute_code(
         with open(os.path.join(tmpdir, "hermes_tools.py"), "w", encoding="utf-8") as f:
             f.write(tools_src)
 
-        # Write the user's script
+        # Write the user's script. On Windows, prepend a self-contained
+        # windowless preamble: the sandbox child is a *fresh* Python process
+        # that never imports hermes_bootstrap (its env is scrubbed and the
+        # repo may not even be on sys.path in project mode), so the bootstrap
+        # Popen patch does NOT exist inside it. Any subprocess the user script
+        # spawns would then flash a visible console window and steal desktop
+        # focus from the windowless parent chain (watchdog evidence
+        # 2026-10-11: python.exe PseudoConsoleWindow <- pythonw sandbox chain).
+        # The preamble re-arms the same patch inline — independent of the repo.
         with open(os.path.join(tmpdir, "script.py"), "w", encoding="utf-8") as f:
+            if _IS_WINDOWS:
+                f.write(_SANDBOX_WINDOWLESS_PREAMBLE)
             f.write(code)
 
         # --- Start RPC server ---

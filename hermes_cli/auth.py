@@ -596,6 +596,25 @@ def _resolve_api_key_provider_secret(
     provider_id: str, pconfig: ProviderConfig
 ) -> tuple[str, str]:
     """Resolve an API-key provider's token and indicate where it came from."""
+    # AIDE uses a short-lived JWT minted by the configured helper.  Auxiliary
+    # clients must use this same fresh-token path as the main runtime instead
+    # of falling through to a stale/empty AIDE_API_KEY.
+    if provider_id in {"aide", "aide-io"}:
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.runtime_provider import run_api_key_helper
+
+            cfg = load_config()
+            providers = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+            entry = providers.get(provider_id, {}) if isinstance(providers, dict) else {}
+            helper = str(entry.get("api_key_helper") or "").strip()
+            if helper:
+                token = run_api_key_helper(helper)
+                if has_usable_secret(token):
+                    return token, "api_key_helper"
+        except Exception as exc:
+            logger.debug("AIDE api_key_helper resolution failed for %s: %s", provider_id, exc)
+
     if provider_id == "copilot":
         # Use the dedicated copilot auth module for proper token validation
         try:

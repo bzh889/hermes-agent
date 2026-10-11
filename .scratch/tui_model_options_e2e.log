@@ -1,0 +1,8 @@
+model.options via REAL tui_gateway: 54 providers, 6 with databricks (14.4s)
+  aide-responses: MTK AIDE Responses (Codex-style) -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+  aide-responses-crlogai001: AIDE Responses -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+  aide-responses-ds901472: AIDE Responses -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+  aide-responses-molycrgpt001: AIDE Responses -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+  aide-responses-io: AIDE Responses -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+  aide-responses-io-ds901472: AIDE Responses -> ['databricks/glm-5-3', 'databricks/glm-5-3-flash', 'databricks/glm-5-2', 'databricks/deepseek-v4-1-flash', 'databricks/kimi-k3']
+E2E RESULT: PASS

@@ -1,0 +1,9 @@
+[1] model.options: 54 providers, 6 with databricks -> PASS
+[2] config.set: {"key": "model", "value": "databricks/glm-5-3", "warning": "Model `databricks/glm-5-3` was not found in this provider's model listing.\n  Similar models: `mtk/glm-5-3`", "confirm_required": false, "confirm_message": "", 
+[3] prompt.submit sentinel: FAIL — no sentinel in 240s
+    last gateway lines:
+      {"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready", "payload": {"skin": {"name": "default", "colors": {"banner_border": "#CD7F32", "banner_title": "#FFD700", "banner_accent": "#FFBF00", "banner_dim": "#B8860B", "banner_text": "#FFF8DC", "ui_accent": "#FFBF00", "ui_label": "#DAA
+      {"jsonrpc": "2.0", "id": "s1", "result": {"providers": [{"slug": "nous", "name": "Nous Portal", "is_current": false, "is_user_defined": false, "models": ["anthropic/claude-fable-5.1", "anthropic/claude-fable-5", "anthropic/claude-opus-5.5", "anthropic/claude-opus-5", "anthropic/claude-opus-4.8", "an
+      {"jsonrpc": "2.0", "id": "s2", "result": {"key": "model", "value": "databricks/glm-5-3", "warning": "Model `databricks/glm-5-3` was not found in this provider's model listing.\n  Similar models: `mtk/glm-5-3`", "confirm_required": false, "confirm_message": "", "scope": "session"}}
+      {"jsonrpc": "2.0", "id": "s3", "error": {"code": 4001, "message": "session not found"}}
+OVERALL: FAIL

@@ -18,6 +18,20 @@ _api_key_helper_cache: Dict[str, tuple[float, str]] = {}
 _api_key_helper_locks: Dict[str, threading.Lock] = {}
 _api_key_helper_state_lock = threading.Lock()
 
+
+def invalidate_api_key_helper_cache(command: str | None = None) -> None:
+    """Forget cached helper output so the next call mints a fresh token."""
+    with _api_key_helper_state_lock:
+        if command is None:
+            _api_key_helper_cache.clear()
+            return
+        if isinstance(command, str) and not command.startswith("["):
+            import shlex
+            args = shlex.split(command, posix=False)
+        else:
+            args = command
+        _api_key_helper_cache.pop(repr(args), None)
+
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import (
     CredentialPool,
@@ -114,7 +128,7 @@ def run_api_key_helper(command: str) -> str:
     and concurrent callers for the same command share one helper process.
     Retries once on timeout since CCH can be slow under concurrent calls.
     """
-    import subprocess, shlex
+    import subprocess, shlex, sys
     if isinstance(command, str) and not command.startswith("["):
         args = shlex.split(command, posix=False)
     else:
@@ -160,6 +174,13 @@ def run_api_key_helper(command: str) -> str:
                     text=True,
                     timeout=30,
                     stdin=subprocess.DEVNULL,
+                    # Windowless on Windows: helpers like coding-cli-helper.exe
+                    # are console binaries; without this flag every key refresh
+                    # from a windowless parent (pythonw gateway, TUI backend)
+                    # pops a PseudoConsoleWindow and steals desktop focus.
+                    # (2026-10-11 watchdog evidence: coding-cli-helper.exe
+                    # PseudoConsoleWindow <- pythonw <- TUI python 29816.)
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )
                 key = result.stdout.strip()
                 if key:

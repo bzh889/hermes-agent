@@ -644,14 +644,27 @@ def load_cli_config() -> Dict[str, Any]:
     
     # CWD resolution for CLI/TUI. The gateway has its own config bridge in
     # gateway/run.py but may lazily import cli.py (triggering this code).
-    # Local backend: always os.getcwd(). Use `cd /dir && hermes` to control it.
+    # Local backend: prefer the directory captured by hermes.bat before it
+    # changes into the Hermes installation tree. Direct Python launches still
+    # fall back to os.getcwd().
     # Non-local with placeholder: pop so terminal_tool uses its per-backend default.
     # Non-local with explicit path: keep as-is.
     _CWD_PLACEHOLDERS = (".", "auto", "cwd")
     effective_backend = terminal_config.get("env_type", "local")
 
     if effective_backend == "local":
-        terminal_config["cwd"] = os.getcwd()
+        _launch_cwd = os.environ.get("HERMES_LAUNCH_CWD", "").strip()
+        _launch_path = None
+        if _launch_cwd:
+            try:
+                _candidate = Path(_launch_cwd).expanduser().resolve()
+                if _candidate.is_dir():
+                    _launch_path = _candidate
+            except (OSError, RuntimeError):
+                _launch_path = None
+        terminal_config["cwd"] = (
+            str(_launch_path) if _launch_path is not None else os.getcwd()
+        )
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
@@ -7580,7 +7593,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             return None
         return history_snapshot
 
-    def new_session(self, silent=False, title=None):
+    def new_session(self, silent=False, title=None, notify_reset=True):
         """Start a fresh session with a new session ID and cleared agent state."""
         old_session_id = self.session_id
         _boundary_snapshot = None
@@ -7777,6 +7790,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         )
             except Exception:
                 pass
+        if notify_reset:
             self._notify_session_boundary("on_session_reset")
 
         if not silent:
@@ -9268,7 +9282,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 cmd_original=cmd_original,
             ) is None:
                 return True  # confirmation cancelled — command handled, keep REPL alive
-            self.new_session(silent=True)
+            self.new_session(silent=True, notify_reset=False)
             _clear_output_history()
             # Clear terminal screen.  Inside the TUI, Rich's console.clear()
             # goes through patch_stdout's StdoutProxy which swallows the
@@ -9334,6 +9348,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     self._console_print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
                 except Exception:
                     pass
+            self._notify_session_boundary("on_session_reset")
         elif canonical == "history":
             self.show_history()
         elif canonical == "title":

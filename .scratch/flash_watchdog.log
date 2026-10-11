@@ -1,0 +1,325 @@
+=== watchdog armed 2026-10-11 16:56:53.800567 ===
+16:57:02.396|hwnd=58089e|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+16:57:02.485|hwnd=9c0b30|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+16:57:02.750|hwnd=1a15fa|pid=43160|cmd.exe|class=PseudoConsoleWindow|title=|chain=cmd.exe(43160) <- pythonw.exe(47156) <- pythonw.exe(36868) <- svchost.exe(2628) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+16:58:27.210|hwnd=1320e02|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+16:58:37.299|hwnd=1350e02|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+16:58:37.378|hwnd=43153a|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+16:58:37.571|hwnd=c40d10|pid=9468|coding-cli-helper.exe|class=PseudoConsoleWindow|title=|chain=coding-cli-helper.exe(9468) <- pythonw.exe(50000) <- pythonw.exe(36500) <- python.exe(29816) <- python.exe(31548) <- node.exe(21604) <- cmd.exe(46828) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+16:59:16.864|hwnd=bc166c|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+16:59:16.954|hwnd=a10b30|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+16:59:17.197|hwnd=31652|pid=20616|coding-cli-helper.exe|class=PseudoConsoleWindow|title=|chain=coding-cli-helper.exe(20616) <- pythonw.exe(10792) <- pythonw.exe(42228) <- python.exe(29816) <- python.exe(31548) <- node.exe(21604) <- cmd.exe(46828) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+16:59:36.150|hwnd=60dea|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+16:59:36.240|hwnd=bf166c|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+16:59:36.496|hwnd=e1588|pid=13192|bash.exe|class=PseudoConsoleWindow|title=|chain=bash.exe(13192) <- pythonw.exe(48172) <- pythonw.exe(33700) <- python.exe(29816) <- python.exe(31548) <- node.exe(21604) <- cmd.exe(46828) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:02:39.279|hwnd=21824|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:02:47.555|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+17:02:51.861|hwnd=9500ea|pid=24120|?|class=tooltips_class32|title=
+17:02:51.862|hwnd=31660|pid=24120|?|class=SysShadow|title=
+17:02:52.178|hwnd=9500ea|pid=24120|?|class=tooltips_class32|title=
+17:02:52.178|hwnd=41660|pid=24120|?|class=SysShadow|title=
+17:02:53.032|hwnd=9500ea|pid=24120|?|class=tooltips_class32|title=
+17:02:53.037|hwnd=51660|pid=24120|?|class=SysShadow|title=
+17:02:53.936|hwnd=19023a|pid=24120|?|class=ATL:BrowserListView|title=Right pane settings
+17:02:53.967|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:02:56.049|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:02:58.088|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:01.729|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:03.039|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:06.785|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:09.359|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:11.463|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:13.226|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:03:14.341|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:50.854|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:53.051|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:53.814|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:54.835|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:57.335|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:04:58.960|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:05:00.003|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:05:04.694|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:05:21.693|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+17:05:23.124|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+17:10:06.594|hwnd=105d8|pid=10320|msedgewebview2.exe|class=Chrome_WidgetWin_1|title=小工具
+17:10:06.605|hwnd=105dc|pid=10320|msedgewebview2.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:11:15.239|hwnd=161770|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:11:36.944|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:11:36.948|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:18:35.683|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+17:20:27.043|hwnd=2a1770|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:25:38.109|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+17:27:17.735|hwnd=451770|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:29:49.669|hwnd=461770|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:29:50.824|hwnd=471770|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:30:32.846|hwnd=19165e|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:33:40.591|hwnd=671770|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:33:40.718|hwnd=22165e|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:33:40.908|hwnd=191824|pid=39744|OpenConsole.exe|class=PseudoConsoleWindow|title=|chain=OpenConsole.exe(39744) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:33:49.152|hwnd=a161c|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:36:27.642|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:36:27.647|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:38:42.588|hwnd=511822|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:38:42.667|hwnd=771770|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:38:42.873|hwnd=d161e|pid=5712|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(5712) <- pythonw.exe(47436) <- pythonw.exe(48856) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:38:48.226|hwnd=1b1824|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:39:03.643|hwnd=1e1824|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:39:03.735|hwnd=521822|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:39:03.965|hwnd=c161c|pid=31316|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(31316) <- pythonw.exe(21440) <- pythonw.exe(27976) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:39:50.604|hwnd=330690|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:39:50.683|hwnd=4209ea|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:39:50.909|hwnd=27165e|pid=25304|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(25304) <- pythonw.exe(32928) <- pythonw.exe(42724) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:39:59.670|hwnd=340690|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:40:11.546|hwnd=7a1770|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:40:11.629|hwnd=4509ea|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:40:11.856|hwnd=28165e|pid=14208|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(14208) <- pythonw.exe(33284) <- pythonw.exe(51792) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:40:47.289|hwnd=3c0690|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:42:29.160|hwnd=591822|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:42:41.695|hwnd=5a1822|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:42:53.255|hwnd=5b1822|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:43:08.782|hwnd=2a1824|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:44:08.840|hwnd=d180a|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:44:08.917|hwnd=916f0|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:44:09.144|hwnd=a50b30|pid=20900|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(20900) <- pythonw.exe(32396) <- pythonw.exe(46228) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:44:40.191|hwnd=8e0f14|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:44:46.505|hwnd=3116fe|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:44:49.036|hwnd=3216fe|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:45:02.142|hwnd=19179a|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:45:02.225|hwnd=e30db0|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:45:02.428|hwnd=a1694|pid=23156|python.exe|class=PseudoConsoleWindow|title=|chain=python.exe(23156) <- pythonw.exe(33448) <- pythonw.exe(16916) <- python.exe(44588) <- python.exe(39072) <- node.exe(21432) <- cmd.exe(33432) <- pwsh.exe(12692) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:45:09.110|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:45:17.863|hwnd=1c06f4|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:45:19.473|hwnd=c0876|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:45:58.786|hwnd=2b152c|pid=12168|WindowsTerminal.exe|class=CASCADIA_HOSTING_WINDOW_CLASS|title=Windows Terminal
+17:45:58.871|hwnd=131792|pid=12168|WindowsTerminal.exe|class=DRAG_BAR_WINDOW_CLASS|title=
+17:45:59.091|hwnd=320ce8|pid=40228|cmd.exe|class=PseudoConsoleWindow|title=|chain=cmd.exe(40228) <- pythonw.exe(33464) <- pythonw.exe(37164) <- python.exe(34788) <- python.exe(11492) <- bash.exe(40376) <- bash.exe(46356) <- python.exe(50660) <- python.exe(51344) <- node.exe(49316) <- cmd.exe(29148) <- pwsh.exe(52176) <- WindowsTerminal.exe(12168) <- svchost.exe(1864) <- services.exe(1656) <- wininit.exe(1544) <- ?(1284)
+17:46:32.162|hwnd=2d0c42|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:48:32.343|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:48:32.362|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:48:38.982|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+17:48:44.810|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:48:44.814|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:48:46.591|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:48:46.591|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:49:36.101|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:49:36.105|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:49:50.133|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:49:50.133|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:50:07.440|hwnd=440c42|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:50:09.808|hwnd=450c42|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:50:14.505|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:50:14.505|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:50:16.436|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:50:16.441|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:51:50.739|hwnd=2906f4|pid=12784|explorer.exe|class=CtrlNotifySink|title=
+17:51:50.805|hwnd=e40db0|pid=12784|explorer.exe|class=CtrlNotifySink|title=
+17:52:34.062|hwnd=540c42|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+17:55:40.427|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:55:40.429|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+17:56:58.842|hwnd=320684|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:57:00.304|hwnd=481824|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:57:01.228|hwnd=10934|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:57:01.299|hwnd=2b06f4|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:57:03.345|hwnd=1f170c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:57:45.899|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+17:57:55.232|hwnd=1f170c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:58:05.070|hwnd=5b0c42|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+17:58:05.077|hwnd=1760dc0|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+17:58:06.674|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+17:58:56.361|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+17:58:56.424|hwnd=1f170c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+17:58:58.256|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:00:27.998|hwnd=3906f4|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:00:36.966|hwnd=91814|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:00:45.670|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:00:54.285|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:00:54.288|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:01:04.929|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:01:04.931|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:01:15.214|hwnd=bd0fbe|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:01:19.842|hwnd=be0fbe|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:01:22.361|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:01:22.363|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:01:42.806|hwnd=2038e|pid=17104|TextInputHost.exe|class=Windows.UI.Core.CoreWindow|title=Windows 輸入體驗
+18:02:01.602|hwnd=1f170c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:03.914|hwnd=f700fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:06.450|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:06.470|hwnd=121808|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+18:02:09.521|hwnd=541824|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:10.776|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:11.361|hwnd=f800fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:12.403|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:14.566|hwnd=8a08d2|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:16.528|hwnd=34152c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:17.735|hwnd=8b08d2|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:19.460|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:20.005|hwnd=35152c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:20.556|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:20.927|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:21.207|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:21.613|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:21.944|hwnd=8c08d2|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:22.460|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:23.064|hwnd=11e1018|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:23.681|hwnd=6f147c|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:25.331|hwnd=8d08d2|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:02:25.346|hwnd=370dbe|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+18:02:35.045|hwnd=341772|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:39.344|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:02:39.347|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:02:45.170|hwnd=c617fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:45.215|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:02:45.217|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:02:47.008|hwnd=341772|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:47.918|hwnd=c617fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:02:49.251|hwnd=70147c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:03:06.840|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:03:06.845|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:03:10.274|hwnd=341772|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:03:11.771|hwnd=c717fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:05:08.657|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:05:08.666|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:05:30.415|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:05:30.415|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:02.093|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:02.097|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:03.688|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:03.699|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:26.774|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:26.782|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:08:37.024|hwnd=c717fc|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:08:39.481|hwnd=615ce|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:08:46.973|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:08:47.383|hwnd=1516e8|pid=12784|explorer.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:08:49.403|hwnd=20056|pid=14040|SearchHost.exe|class=Windows.UI.Core.CoreComponentInputSource|title=CoreInput
+18:08:49.416|hwnd=2009c|pid=16184|msedgewebview2.exe|class=Chrome_WidgetWin_1|title=搜尋
+18:08:49.512|hwnd=300ae|pid=16184|msedgewebview2.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:08:54.827|hwnd=1201018|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=新索引標籤 - 設定檔 1 - Microsoft​ Edge
+18:08:55.058|hwnd=361772|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:08:55.081|hwnd=180b84|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:08:55.392|hwnd=1e161e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:08:55.401|hwnd=651822|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:03.233|hwnd=96116a|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:09:03.448|hwnd=71658|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=是否要翻譯英文頁面？
+18:09:03.567|hwnd=2d165e|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:04.477|hwnd=1e161e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:06.940|hwnd=960d9a|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:06.959|hwnd=2e165e|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:09.323|hwnd=91658|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:09:10.351|hwnd=1e161e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:10.713|hwnd=970d9a|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:09:11.319|hwnd=1e161e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:12.878|hwnd=1e161e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:16.639|hwnd=b180e|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:16.717|hwnd=9e04ac|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:19.841|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:09:20.129|hwnd=20504|pid=44168|notepad++.exe|class=SysTabControl32|title=Tab
+18:09:20.535|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:09:20.535|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:09:22.674|hwnd=fa00fc|pid=44168|notepad++.exe|class=#32768|title=
+18:09:23.013|hwnd=37152c|pid=44168|notepad++.exe|class=#32768|title=
+18:09:29.520|hwnd=38152c|pid=44168|notepad++.exe|class=#32768|title=
+18:09:33.218|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:09:33.282|hwnd=970d9a|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:09:34.342|hwnd=671822|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:34.354|hwnd=5f0c42|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:36.162|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:09:37.511|hwnd=40540|pid=44168|notepad++.exe|class=#32770|title=Find
+18:09:39.279|hwnd=607ea|pid=44168|notepad++.exe|class=#32770|title=Search results - (28 hits)
+18:09:44.933|hwnd=161710|pid=44168|notepad++.exe|class=NppGripperOverlay|title=
+18:09:45.480|hwnd=a17da|pid=12784|explorer.exe|class=EdgeUiInputWndClass|title=
+18:09:45.486|hwnd=b0884|pid=12784|explorer.exe|class=EdgeUiInputTopWndClass|title=
+18:09:56.839|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:09:56.916|hwnd=970d9a|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:09:57.403|hwnd=ca17fc|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:57.413|hwnd=f1592|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:09:58.086|hwnd=4406f4|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:09:58.102|hwnd=cb17fc|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:10:01.269|hwnd=121592|pid=17440|msedge.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:10:01.512|hwnd=4506f4|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=更新您的密碼?
+18:10:01.542|hwnd=3816fe|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:10:04.222|hwnd=cd17fc|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:10:04.232|hwnd=3916fe|pid=45772|msedge.exe|class=Intermediate D3D Window|title=
+18:10:06.786|hwnd=cd17fc|pid=17440|msedge.exe|class=Chrome_WidgetWin_1|title=
+18:10:08.031|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:10:08.437|hwnd=150878|pid=12784|explorer.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:10:11.649|hwnd=615ce|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:10:13.873|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:10:16.791|hwnd=105d8|pid=10320|msedgewebview2.exe|class=Chrome_WidgetWin_1|title=小工具
+18:10:16.799|hwnd=105dc|pid=10320|msedgewebview2.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:12:01.275|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:12:01.279|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:12:27.601|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:12:27.603|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:12:39.203|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:12:39.206|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:13:08.830|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:13:08.832|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:14:40.382|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:14:40.384|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:24:50.778|hwnd=c00f14|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:24:54.435|hwnd=615ce|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:24:58.026|hwnd=570ce8|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:24:58.250|hwnd=715ce|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:24:58.265|hwnd=101658|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+18:25:05.080|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:25:26.730|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:25:26.733|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:25:29.178|hwnd=121828|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:25:44.516|hwnd=570ce8|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:25:46.277|hwnd=1f170c|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:25:47.103|hwnd=10934|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:25:47.489|hwnd=4e0808|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+18:25:47.506|hwnd=915ce|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+18:25:48.779|hwnd=191826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:26:14.878|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:26:14.881|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:27:08.919|hwnd=309da|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=
+18:27:32.375|hwnd=191826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:27:34.536|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:27:47.313|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:27:47.362|hwnd=191826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:27:48.534|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:28:05.157|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:28:05.160|hwnd=4010c|pid=24120|?|class=SysHeader32|title=
+18:28:26.859|hwnd=1d1658|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:30:07.962|hwnd=105d8|pid=10320|msedgewebview2.exe|class=Chrome_WidgetWin_1|title=小工具
+18:30:08.029|hwnd=105dc|pid=10320|msedgewebview2.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:31:16.294|hwnd=10800fc|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:31:22.944|hwnd=10900fc|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:31:46.052|hwnd=191826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:31:48.444|hwnd=10b0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:31:50.364|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:31:52.384|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:31:52.436|hwnd=10b0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:31:59.184|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:31:59.243|hwnd=10b0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:00.242|hwnd=10934|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:02.027|hwnd=251550|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:05.206|hwnd=10c0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:29.697|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:32:32.433|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:32:32.486|hwnd=10c0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:40.046|hwnd=10c0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:42.547|hwnd=1d1826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:42.735|hwnd=49161e|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:32:46.543|hwnd=201826|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:33:03.728|hwnd=b10b30|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:33:17.272|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換
+18:33:17.335|hwnd=b10b30|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+18:34:20.312|hwnd=7f1822|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:34:26.873|hwnd=d1666|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+18:34:32.558|hwnd=e1666|pid=12168|WindowsTerminal.exe|class=Xaml_WindowedPopupClass|title=快顯主機
+19:30:18.045|hwnd=105d8|pid=10320|msedgewebview2.exe|class=Chrome_WidgetWin_1|title=小工具
+19:30:18.079|hwnd=105dc|pid=10320|msedgewebview2.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:35:09.776|hwnd=b10b30|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:35:10.273|hwnd=14053e|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+19:35:10.282|hwnd=ca0fca|pid=21996|chrome.exe|class=Intermediate D3D Window|title=
+19:35:10.386|hwnd=14053e|pid=22908|chrome.exe|class=Chrome_WidgetWin_1|title=
+19:35:12.563|hwnd=10c0c82|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:35:13.404|hwnd=10934|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:35:14.837|hwnd=781750|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:36:58.160|hwnd=781750|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:36:59.691|hwnd=570ce8|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:37:01.119|hwnd=1b1810|pid=22908|chrome.exe|class=Chrome_RenderWidgetHostHWND|title=Chrome Legacy Window
+19:37:04.178|hwnd=3017c|pid=12784|explorer.exe|class=XamlExplorerHostIslandWindow|title=工作切換

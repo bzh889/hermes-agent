@@ -9,6 +9,7 @@ See: https://github.com/NousResearch/hermes-agent/issues/1264
 """
 
 import os
+import platform
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -320,7 +321,18 @@ class TestActiveVenvMarkerStripping:
         with patch.dict(os.environ, poison, clear=True):
             result = _make_run_env({})
 
-        assert result["PYTHONPATH"] == sep.join(["/project", "/shared/python"])
+        # Windows also injects the windowless sitecustomize dir (see
+        # _inject_windowless_sitecustomize); the venv-stripping contract is
+        # that ONLY /project and /shared/python survive from the input.
+        if platform.system() == "Windows":
+            expected_tail = sep.join(["/project", "/shared/python"])
+            assert result["PYTHONPATH"].endswith(expected_tail)
+            head = result["PYTHONPATH"][: -len(expected_tail)].rstrip(sep)
+            assert all("windowless-site" in e for e in head.split(sep) if e), (
+                f"unexpected PYTHONPATH head: {result['PYTHONPATH']}"
+            )
+        else:
+            assert result["PYTHONPATH"] == sep.join(["/project", "/shared/python"])
 
     def test_sanitize_subprocess_env_preserves_unrelated_pythonpath_entries(self):
         from tools.environments.local import _sanitize_subprocess_env
@@ -334,7 +346,14 @@ class TestActiveVenvMarkerStripping:
             ]),
         }
         result = _sanitize_subprocess_env(base)
-        assert result["PYTHONPATH"] == "/project/src"
+        if platform.system() == "Windows":
+            # venv entry stripped; Hermes prepends its windowless sitecustomize
+            # dir so spawned Pythons arm the windowless Popen patch.
+            assert result["PYTHONPATH"].endswith("/project/src")
+            assert "windowless-site" in result["PYTHONPATH"]
+            assert "/hermes/.venv/Lib/site-packages" not in result["PYTHONPATH"]
+        else:
+            assert result["PYTHONPATH"] == "/project/src"
 
     def test_markers_constant_contents(self):
         from tools.environments.local import _ACTIVE_VENV_MARKER_VARS

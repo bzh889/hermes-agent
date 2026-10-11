@@ -1,0 +1,330 @@
+aide aws/anthropic.claude-haiku-4-5-20251001-v1:0 e2e: 200 OK | max_effort: None
+aide aws/anthropic.claude-opus-4-6-v1 e2e: 200 OK | max_effort: high
+aide aws/anthropic.claude-opus-4-7 e2e: 200 OK | max_effort: high
+aide aws/anthropic.claude-opus-4-8 e2e: 200 OK | max_effort: high
+aide aws/anthropic.claude-opus-5 e2e: 200 OK | max_effort: xhigh
+aide aws/anthropic.claude-opus-5-5 e2e: 200 OK | max_effort: xhigh
+aide aws/anthropic.claude-sonnet-4-5-20250929-v1:0 e2e: 200 OK | max_effort: None
+aide aws/anthropic.claude-sonnet-4-6 e2e: 200 OK | max_effort: high
+aide aws/anthropic.claude-sonnet-5 e2e: 200 OK | max_effort: high
+aide aws/anthropic.claude-sonnet-5-5 e2e: 200 OK | max_effort: xhigh
+aide azure/aide-gpt-4-turbo e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4.1 e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4.1-mini e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4.1-nano e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4o e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4o-mini e2e: 200 OK | max_effort: None
+aide azure/aide-gpt-4o-realtime-preview e2e: 400 {
+  "error": {
+    "type": "invalid_request_error",
+    "cod | max_effort: None
+aide azure/aide-gpt-5 e2e: 200 OK | max_effort: xhigh
+aide azure/aide-gpt-5-chat e2e: 200 OK | max_effort: medium
+aide azure/aide-gpt-5-mini e2e: 200 OK | max_effort: xhigh
+aide azure/aide-gpt-5-nano e2e: 200 OK | max_effort: xhigh
+aide azure/aide-o3 e2e: 200 OK | max_effort: xhigh
+aide azure/aide-o3-mini e2e: 200 OK | max_effort: xhigh
+aide azure/aide-o3-pro e2e: 400 {
+  "error": {
+    "message": "The requested operation is un | max_effort: None
+aide azure/aide-o4-mini e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5 e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.1 e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.1-chat e2e: 200 OK | max_effort: medium
+aide azure/gpt-5.2 e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.2-chat e2e: 200 OK | max_effort: medium
+aide azure/gpt-5.4 e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.5 e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.6-luna e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.6-sol e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-5.6-terra e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-6-luna e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-6-sol e2e: 200 OK | max_effort: xhigh
+aide azure/gpt-6.1-sol e2e: 200 OK | max_effort: xhigh
+aide google/gemini-2.5-flash e2e: 200 OK | max_effort: high
+aide google/gemini-2.5-pro e2e: 200 OK | max_effort: high
+aide google/gemini-3-flash-preview e2e: 200 OK | max_effort: high
+aide google/gemini-3.1-flash-lite e2e: 200 OK | max_effort: high
+aide google/gemini-3.1-pro-preview e2e: 200 OK | max_effort: high
+aide google/gemini-3.5-flash e2e: 200 OK | max_effort: high
+aide google/gemini-3.5-flash-lite e2e: 200 OK | max_effort: high
+aide google/gemini-3.6-flash e2e: 200 OK | max_effort: high
+aide google/gemini-3.7-flash e2e: 200 OK | max_effort: high
+aide google/gemini-3.8-flash e2e: 200 OK | max_effort: high
+aide mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: high
+aide mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide mtk/wfm-doc-oa e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-doc-o | max_effort: None
+aide mtk/wfm-doc-oa-merged e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-doc-o | max_effort: None
+aide mtk/wfm-flash e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-flash-gemma4-31b e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide mtk/wfm-plus e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-plus-deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-pro e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-pro-glm5-1-744b e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-pro-g | max_effort: None
+aide mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-reasoning-oa e2e: 200 OK | max_effort: xhigh
+aide mtk/wfm-reasoning-oa-qwen3-thinking-235b e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-reaso | max_effort: None
+aide mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide other/auto e2e: 200 OK | max_effort: xhigh
+aide-io aws/anthropic.claude-haiku-4-5-20251001-v1:0 e2e: 200 OK | max_effort: None
+aide-io aws/anthropic.claude-opus-4-6-v1 e2e: 200 OK | max_effort: high
+aide-io aws/anthropic.claude-opus-4-7 e2e: 200 OK | max_effort: high
+aide-io aws/anthropic.claude-opus-4-8 e2e: 200 OK | max_effort: high
+aide-io aws/anthropic.claude-opus-5 e2e: 200 OK | max_effort: xhigh
+aide-io aws/anthropic.claude-opus-5-5 e2e: 200 OK | max_effort: xhigh
+aide-io aws/anthropic.claude-sonnet-4-5-20250929-v1:0 e2e: 200 OK | max_effort: None
+aide-io aws/anthropic.claude-sonnet-4-6 e2e: 200 OK | max_effort: high
+aide-io aws/anthropic.claude-sonnet-5 e2e: 200 OK | max_effort: high
+aide-io aws/anthropic.claude-sonnet-5-5 e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-gpt-4-turbo e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4.1 e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4.1-mini e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4.1-nano e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4o e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4o-mini e2e: 200 OK | max_effort: None
+aide-io azure/aide-gpt-4o-realtime-preview e2e: 400 {
+  "error": {
+    "type": "invalid_request_error",
+    "cod | max_effort: None
+aide-io azure/aide-gpt-5 e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-gpt-5-chat e2e: 200 OK | max_effort: medium
+aide-io azure/aide-gpt-5-mini e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-gpt-5-nano e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-o3 e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-o3-mini e2e: 200 OK | max_effort: xhigh
+aide-io azure/aide-o3-pro e2e: 400 {
+  "error": {
+    "message": "The requested operation is un | max_effort: None
+aide-io azure/aide-o4-mini e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5 e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.1 e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.1-chat e2e: 200 OK | max_effort: medium
+aide-io azure/gpt-5.2 e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.2-chat e2e: 200 OK | max_effort: medium
+aide-io azure/gpt-5.4 e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.5 e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.6-luna e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.6-sol e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-5.6-terra e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-6-luna e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-6-sol e2e: 200 OK | max_effort: xhigh
+aide-io azure/gpt-6.1-sol e2e: 200 OK | max_effort: xhigh
+aide-io google/gemini-2.5-flash e2e: 200 OK | max_effort: high
+aide-io google/gemini-2.5-pro e2e: 200 OK | max_effort: high
+aide-io google/gemini-3-flash-preview e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.1-flash-lite e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.1-pro-preview e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.5-flash e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.5-flash-lite e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.6-flash e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.7-flash e2e: 200 OK | max_effort: high
+aide-io google/gemini-3.8-flash e2e: 200 OK | max_effort: high
+aide-io mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide-io mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide-io mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-io mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide-io mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide-io mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide-io mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide-io mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide-io mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide-io mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide-io mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-io mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-io mtk/wfm-doc-oa e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-doc-o | max_effort: None
+aide-io mtk/wfm-doc-oa-merged e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-doc-o | max_effort: None
+aide-io mtk/wfm-flash e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-flash-gemma4-31b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io mtk/wfm-plus e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-plus-deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-pro e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-pro-glm5-1-744b e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-pro-g | max_effort: None
+aide-io mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-reasoning-oa e2e: 200 OK | max_effort: xhigh
+aide-io mtk/wfm-reasoning-oa-qwen3-thinking-235b e2e: 404 {"object":"error", "message":"Rpc error: the model wfm-reaso | max_effort: None
+aide-io mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-io mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-io other/auto e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 aws/anthropic.claude-haiku-4-5-20251001-v1:0 e2e: 200 OK | max_effort: None
+aide-io-ds901472 aws/anthropic.claude-opus-4-6-v1 e2e: 200 OK | max_effort: high
+aide-io-ds901472 aws/anthropic.claude-opus-4-7 e2e: 200 OK | max_effort: high
+aide-io-ds901472 aws/anthropic.claude-opus-4-8 e2e: 200 OK | max_effort: high
+aide-io-ds901472 aws/anthropic.claude-opus-5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 aws/anthropic.claude-opus-5-5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 aws/anthropic.claude-sonnet-4-5-20250929-v1:0 e2e: 200 OK | max_effort: None
+aide-io-ds901472 aws/anthropic.claude-sonnet-4-6 e2e: 200 OK | max_effort: medium
+aide-io-ds901472 aws/anthropic.claude-sonnet-5 e2e: 200 OK | max_effort: high
+aide-io-ds901472 aws/anthropic.claude-sonnet-5-5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-gpt-4-turbo e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4.1 e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4.1-mini e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4.1-nano e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4o e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4o-mini e2e: 200 OK | max_effort: None
+aide-io-ds901472 azure/aide-gpt-4o-realtime-preview e2e: 400 {
+  "error": {
+    "type": "invalid_request_error",
+    "cod | max_effort: None
+aide-io-ds901472 azure/aide-gpt-5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-gpt-5-chat e2e: 200 OK | max_effort: medium
+aide-io-ds901472 azure/aide-gpt-5-mini e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-gpt-5-nano e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-o3 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-o3-mini e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/aide-o3-pro e2e: 400 {
+  "error": {
+    "message": "The requested operation is un | max_effort: None
+aide-io-ds901472 azure/aide-o4-mini e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.1 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.1-chat e2e: 200 OK | max_effort: medium
+aide-io-ds901472 azure/gpt-5.2 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.2-chat e2e: 200 OK | max_effort: medium
+aide-io-ds901472 azure/gpt-5.4 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.5 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.6-luna e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.6-sol e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-5.6-terra e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-6-luna e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 azure/gpt-6-sol e2e: 200 OK | max_effort: high
+aide-io-ds901472 azure/gpt-6.1-sol e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 google/gemini-2.5-flash e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-2.5-pro e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3-flash-preview e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.1-flash-lite e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.1-pro-preview e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.5-flash e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.5-flash-lite e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.6-flash e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.7-flash e2e: 200 OK | max_effort: high
+aide-io-ds901472 google/gemini-3.8-flash e2e: 200 OK | max_effort: high
+aide-io-ds901472 mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide-io-ds901472 mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide-io-ds901472 mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide-io-ds901472 mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide-io-ds901472 mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io-ds901472 mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-io-ds901472 mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-io-ds901472 mtk/wfm-flash-gemma4-31b e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io-ds901472 mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io-ds901472 mtk/wfm-plus-deepseek-v4-flash e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-io-ds901472 mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide-io-ds901472 mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-io-ds901472 mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-io-ds901472 other/auto e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide-ds901472 mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide-ds901472 mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide-ds901472 mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide-ds901472 mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-ds901472 mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-ds901472 mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-ds901472 mtk/wfm-flash-gemma4-31b e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-ds901472 mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-ds901472 mtk/wfm-plus-deepseek-v4-flash e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-ds901472 mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide-ds901472 mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-ds901472 mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-molycrgpt001 mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide-molycrgpt001 mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide-molycrgpt001 mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide-molycrgpt001 mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide-molycrgpt001 mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-molycrgpt001 mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-molycrgpt001 mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-molycrgpt001 mtk/wfm-flash-gemma4-31b e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-molycrgpt001 mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-molycrgpt001 mtk/wfm-plus-deepseek-v4-flash e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-molycrgpt001 mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide-molycrgpt001 mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-molycrgpt001 mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-crlogai001 mtk/autoglm-phone-9b-multilingual e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/deepseek-coder-v2-lite-instruct e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/deepseek-v4-flash e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/gb10-qwen3-8-27b e2e: 404 {"object":"error", "message":"Rpc error: the model gb10-qwen | max_effort: None
+aide-crlogai001 mtk/gemma4-31b-it e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/glm-5-3 e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/gpt-oss-120b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/isd-aim-qwen3-32b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-aim-q | max_effort: None
+aide-crlogai001 mtk/isd-code-review-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model isd-code- | max_effort: None
+aide-crlogai001 mtk/llama4-scout-17b-16e-instruct e2e: 200 OK | max_effort: high
+aide-crlogai001 mtk/mtk-art-generic e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-crlogai001 mtk/qwen2-5-coder-32b-instruct e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-5-122b-a10b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-5-397b-a17b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-6-35b-a3b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-8-27b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-8-flash-next e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/qwen3-reranker-4b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-crlogai001 mtk/qwen3-vl-embedding-2b e2e: 404 {"object":"error", "message":"Method ChatCompletion not impl | max_effort: None
+aide-crlogai001 mtk/wfm-flash-gemma4-31b e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-crlogai001 mtk/wfm-icc-ds-v2 e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-crlogai001 mtk/wfm-plus-deepseek-v4-flash e2e: 403 you are not allowed to use the model in this domain | max_effort: None
+aide-crlogai001 mtk/wfm-pro-glm5-2-744b e2e: 200 OK | max_effort: xhigh
+aide-crlogai001 mtk/wsd-cr-handler-stability-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+aide-crlogai001 mtk/wsd-cr-handler-usb-qwen3-14b e2e: 404 {"object":"error", "message":"Rpc error: the model wsd-cr-ha | max_effort: None
+saved aide_e2e_efforts_20261008_124247.json
+EXIT=0

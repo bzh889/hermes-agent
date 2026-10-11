@@ -9,6 +9,11 @@ import model_tools
 import tools.mcp_tool
 
 
+def test_format_context_length_rounds_near_million_to_1m():
+    assert banner._format_context_length(922_000) == "1M"
+    assert banner._format_context_length(1_048_576) == "1M"
+
+
 def test_display_toolset_name_strips_legacy_suffix():
     assert banner._display_toolset_name("homeassistant_tools") == "homeassistant"
     assert banner._display_toolset_name("honcho_tools") == "honcho"

@@ -1,0 +1,9 @@
+mtk-ai-api	SKILL=mtk-ai-api	AIDE 回 500 quota is exhausted,fallback 沒有生效,怎麼查?
+mtk-ai-api	SKILL=hermes-model-routing	gpt-6-luna 切過去就 400,reasoning_effort 怎麼回事
+mtk-ai-api	SKILL=hermes-model-routing	TUI footer 的 context 顯示對不對?model list 少了 databricks
+mtk-auth	SKILL=teams	怎麼拿 Graph token 發 Teams 訊息
+mtk-people-org	SKILL=mtk-people-org	幫我查某位同事的主管和組織圖
+video-to-pkb	SKILL=video-to-pkb	把 E:\Video\PSA\x.mp4 inject 進 PKB
+webex	SKILL=webex	更新我的會議影片到 E:\Video,把新的 Webex 錄影下載下來
+pkb-ingest	SKILL=pkb-ingest	這份 .md 會議記錄幫我入庫
+done

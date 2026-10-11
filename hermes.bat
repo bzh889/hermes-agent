@@ -6,6 +6,10 @@ REM                   console; the plain double-click conhost can't drive the
 REM                   prompt_toolkit TUI, so we relaunch in wt.exe).
 REM  From a shell  -> hermes.bat model | doctor | -z "hi"  (runs in place)
 REM ============================================================================
+REM Preserve the caller's project before this launcher moves to the Hermes tree.
+REM Hermes lifecycle plugins and the CLI use this explicit launch marker.
+set "HERMES_LAUNCH_CWD=%CD%"
+set "TERMINAL_CWD=%HERMES_LAUNCH_CWD%"
 cd /d "%~dp0"
 
 REM --- MTK environment (a double-click does NOT inherit ~/.bashrc) ---

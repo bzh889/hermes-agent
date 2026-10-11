@@ -1,0 +1,12 @@
+[1] picker: 54 providers, 6 with databricks -> PASS
+[2] session.new -> sid='' keys=[]
+[3] config.set switch -> {"key": "model", "value": "databricks/glm-5-3", "warning": "Model `databricks/glm-5-3` was not found in this provider's model listing.\n  Similar models: `mtk/glm-5-3`", "confirm_required": false, "co | PASS
+[4] sentinel turn -> FAIL
+    last gateway lines:
+      {"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready", "payload": {"skin": {"name": "default", "colors": {"banner_border": "#CD7F32", "banner_title": "#FFD700", "banner_accent": "#F
+      {"jsonrpc": "2.0", "id": "s1", "result": {"providers": [{"slug": "nous", "name": "Nous Portal", "is_current": false, "is_user_defined": false, "models": ["anthropic/claude-fable-5.1", "anthropic/claud
+      {"jsonrpc": "2.0", "id": "s0", "error": {"code": -32601, "message": "unknown method: session.new"}}
+      {"jsonrpc": "2.0", "id": "s2", "result": {"key": "model", "value": "databricks/glm-5-3", "warning": "Model `databricks/glm-5-3` was not found in this provider's model listing.\n  Similar models: `mtk/
+      {"jsonrpc": "2.0", "id": "s3", "error": {"code": 4001, "message": "session not found"}}
+OVERALL: FAIL
+EXIT=124

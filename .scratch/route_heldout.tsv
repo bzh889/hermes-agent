@@ -1,0 +1,6 @@
+mtk-ai-api	SKILL=mtk-ai-api	gateway 回 429 了,是 AIDE 的 daily quota 用完嗎?要等到幾點才會重置
+mtk-ai-api	SKILL=hermes-model-routing	wfm-pro 實測的 context window 上限是多少 token
+mtk-ai-api	<none>	AIDE 上有沒有可以直接呼叫的 TTS 或 gpt-image 端點
+jira	SKILL=jira	幫我登入 JIRA 查某張 ticket 現在的狀態
+video-to-pkb	SKILL=video-to-pkb	把這個 mp4 會議錄影轉成 PKB 頁面
+done

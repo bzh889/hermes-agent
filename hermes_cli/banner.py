@@ -528,13 +528,14 @@ def get_update_result(timeout: float = 0.5) -> Optional[int]:
 # =========================================================================
 
 def _format_context_length(tokens: int) -> str:
-    """Format a token count for display (e.g. 128000 → '128K', 1048576 → '1M')."""
-    if tokens >= 1_000_000:
-        val = tokens / 1_000_000
-        rounded = round(val)
-        if abs(val - rounded) < 0.05:
-            return f"{rounded}M"
-        return f"{val:.1f}M"
+    """Format context compactly for the TUI/banner display.
+
+    Near-million provider ceilings such as AIDE's 922K are displayed as
+    ``1M``.  The resolver still retains the exact value for compression and
+    request validation; this is display rounding only.
+    """
+    if tokens >= 900_000:
+        return "1M"
     elif tokens >= 1_000:
         val = tokens / 1_000
         rounded = round(val)
