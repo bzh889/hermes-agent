@@ -139,6 +139,15 @@ def _model_metadata_disk_cache_age_seconds() -> Optional[float]:
             return None
         age = time.time() - cache_path.stat().st_mtime
         if age < 0:
+            # Filesystem mtime can land a few ms ahead of a subsequent wall
+            # clock read (second-granular timestamps, clock jitter under CPU
+            # throttling). Treating that as "unknown freshness" makes a
+            # just-written cache look stale and needlessly refetches from the
+            # network (flaky test_fresh_disk_cache_skips_network, and a real
+            # quota-wasting probe in production). A small negative age is
+            # measurement noise, not staleness — clamp to 0.
+            if age > -5:
+                return 0.0
             return None
         return age
     except Exception:
@@ -289,6 +298,17 @@ DEFAULT_CONTEXT_LENGTHS = {
     "wfm-reasoning-oa": 1_048_576,
     "wfm-plus-deepseek-v4-flash": 1_048_576,
     "other/auto": 1_048_572,
+    # AIDE databricks/* deployments (Outside Cloud) — served exclusively via
+    # /v1/responses; all five live-proven at 1,048,576 via literal overflow-400
+    # on the IO gateway (2026-10-11: "The input (1,133,358 tokens) is longer
+    # than the model's context length (1,048,576 tokens)"). Without these the
+    # generic substring fallback misreported glm-5-3 family as 202,752 (the
+    # old glm-5-1 in-house value) and deepseek-v4-1-flash as 128,000.
+    "databricks/glm-5-3": 1_048_576,
+    "databricks/glm-5-3-flash": 1_048_576,
+    "databricks/glm-5-2": 1_048_576,
+    "databricks/deepseek-v4-1-flash": 1_048_576,
+    "databricks/kimi-k3": 1_048_576,
     # Meta
     "llama": 131072,
     # Qwen — specific model families before the catch-all.
