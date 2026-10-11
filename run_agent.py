@@ -1478,6 +1478,15 @@ class AIAgent:
         # Strip vendor prefix (e.g. "openai/gpt-5.4" → "gpt-5.4")
         if "/" in m:
             m = m.rsplit("/", 1)[-1]
+        # gpt-6.1-sol (live-verified 2026-10-11 on the AIDE gateway): on
+        # /v1/chat/completions it rejects tools under EVERY reasoning_effort
+        # (omitted effort, "none" as an illegal value, any real effort as
+        # "Function tools with reasoning_effort"). Tools are mandatory for an
+        # agent turn, so this model is only usable via /v1/responses — unlike
+        # gpt-6-luna/gpt-6-sol, which keep working on chat_completions through
+        # the top-level reasoning_effort:"none" workaround.
+        if m.startswith("gpt-6.1"):
+            return True
         return m.startswith("gpt-5")
 
     @staticmethod
@@ -1496,6 +1505,15 @@ class AIAgent:
             # Generic custom endpoints are conservative by default. They may
             # relay GPT-5 models without full Responses semantics, so only
             # direct OpenAI/xAI URL detection should auto-upgrade them.
+            # EXCEPTION — AIDE gateways (mlop-azure-gateway*): the gpt-6.1-sol
+            # deployment CANNOT take tools on /v1/chat/completions under any
+            # reasoning_effort (live-verified 2026-10-11), so for that model
+            # the Responses upgrade is the only usable path on this gateway.
+            m = model.lower()
+            if "/" in m:
+                m = m.rsplit("/", 1)[-1]
+            if m.startswith("gpt-6.1"):
+                return True
             return False
         if normalized_provider == "copilot":
             try:

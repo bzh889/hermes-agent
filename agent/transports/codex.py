@@ -298,8 +298,20 @@ class ResponsesApiTransport(ProviderTransport):
         # request is issued (openai==2.24.0).  Reported for the
         # ``openai-codex`` / ``gpt-5.5`` combo on chatgpt.com/backend-api/codex
         # (#32892) when the agent runs without external tools registered.
+        request_model = model
+        base_url_l = str(params.get("base_url") or "").lower()
+        if "mlop-azure-gateway" in base_url_l and "/" in str(model or ""):
+            # AIDE gateway /v1/responses takes the BARE model id for GPT
+            # deployments: 'azure/gpt-6.1-sol' → 400 "unsupported model",
+            # 'gpt-6.1-sol' → 200 (live 2026-10-11). Non-GPT ids that already
+            # carry a prefix the responses side accepts (e.g. databricks/*)
+            # are untouched — scope the strip to gpt-* ids.
+            _m = str(model)
+            _prefix, _, _bare = _m.rpartition("/")
+            if _prefix and _bare.lower().startswith("gpt-"):
+                request_model = _bare
         kwargs = {
-            "model": model,
+            "model": request_model,
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(
                 payload_messages,

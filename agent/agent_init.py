@@ -697,8 +697,23 @@ def init_agent(
     # Exception: Azure OpenAI serves gpt-5.x on /chat/completions and
     # does NOT support the Responses API — skip the upgrade for Azure
     # (openai.azure.com), even though it looks OpenAI-compatible.
+    # Second exception (2026-10-11, live-verified on the AIDE gateway):
+    # an EXPLICIT chat_completions mode sourced from a named provider's
+    # default transport is wrong for models that can only serve tool
+    # turns via /v1/responses. gpt-6.1-sol rejects tools on
+    # /v1/chat/completions under every reasoning_effort, so a /model
+    # selection of `azure/gpt-6.1-sol` via `aide-io` (transport
+    # chat_completions) 400s and falls back. Upgrade those provider/model
+    # pairs too — scoped to AIDE gateway hosts so no other custom
+    # endpoint's explicit choice is overridden.
+    _aide_responses_model_pair = (
+        "mlop-azure-gateway" in str(agent.base_url or "").lower()
+        and agent._provider_model_requires_responses_api(
+            agent.model, provider=agent.provider
+        )
+    )
     if (
-        api_mode is None
+        (api_mode is None or _aide_responses_model_pair)
         and agent.api_mode == "chat_completions"
         and agent.provider != "copilot-acp"
         and not str(agent.base_url or "").lower().startswith("acp://copilot")
@@ -706,6 +721,7 @@ def init_agent(
         and not agent._is_azure_openai_url()
         and (
             agent._is_direct_openai_url()
+            or _aide_responses_model_pair
             or agent._provider_model_requires_responses_api(
                 agent.model,
                 provider=agent.provider,
