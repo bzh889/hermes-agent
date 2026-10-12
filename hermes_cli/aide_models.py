@@ -58,11 +58,13 @@ def merge_aide_models(
             v3_by_short[alias] = entry
 
     models = []
+    seen_ids = set()
     for entry in v1_response.get("data", []):
         if entry.get("type") != "chat":
             continue
 
         model_id = entry["id"]
+        seen_ids.add(model_id)
         owned_by = entry.get("owned_by", "")
 
         short_name = model_id.split("/", 1)[1] if "/" in model_id else model_id
@@ -77,6 +79,33 @@ def merge_aide_models(
             aliases=v3_meta.get("aliases", []),
             private=v3_meta.get("private", False),
             backend_type=v3_meta.get("backend_type"),
+        ))
+
+    # The AIDE /v1/models response carries a SECOND catalog: ``models[]``,
+    # the Codex/Responses-API model list (slug + display_name). Some slugs
+    # there have NO chat-side ``data[]`` entry — notably the databricks/*
+    # ("Outside Cloud") deployments, which /v1/chat/completions rejects with
+    # 400 "Invalid model type" and which are served exclusively by
+    # /v1/responses (live-verified 2026-10-08). Without folding them in here,
+    # the /model picker never lists them under the plain AIDE providers and
+    # they could only be reached via hand-written shadow provider entries.
+    # Hermes auto-upgrades these models to the Responses transport per
+    # ``AIAgent._provider_model_requires_responses_api``, so listing them
+    # under the regular AIDE providers is sufficient to make them usable.
+    for entry in v1_response.get("models", []) or []:
+        slug = entry.get("slug") or entry.get("id") or ""
+        if not slug or slug in seen_ids:
+            continue
+        seen_ids.add(slug)
+        models.append(AideModel(
+            id=slug,
+            owned_by=entry.get("owned_by", ""),
+            model_type="chat",
+            max_model_len=entry.get("max_model_len"),
+            available=entry.get("available"),
+            aliases=[],
+            private=entry.get("private", False),
+            backend_type=entry.get("backend_type"),
         ))
 
     return models

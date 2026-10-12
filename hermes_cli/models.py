@@ -3953,7 +3953,8 @@ def probe_api_models(
             with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
                 model_ids = [m.get("id", "") for m in data.get("data", [])]
-                if (api_mode or "").strip().lower() == "codex_responses":
+                _is_aide = "mlop-azure-gateway" in candidate_base.lower()
+                if (api_mode or "").strip().lower() == "codex_responses" or _is_aide:
                     # Responses-API deployments serve TWO catalogs from the same
                     # /v1/models payload: `data[]` (chat/completions ids) and
                     # `models[]` (the Codex/Responses catalog — slug +
@@ -3962,6 +3963,12 @@ def probe_api_models(
                     # A Responses-transport model can never appear in data[],
                     # so membership-checking only data[] reports every
                     # Responses model as "not found". Merge both catalogs.
+                    # AIDE gateways list these models under their plain chat
+                    # providers too (Hermes auto-upgrades those models to the
+                    # Responses transport per
+                    # AIAgent._provider_model_requires_responses_api), so the
+                    # merge must fire there as well — not only when the
+                    # provider itself is responses-transport.
                     seen = set()
                     for m in data.get("models", []) or []:
                         for key in ("slug", "display_name"):

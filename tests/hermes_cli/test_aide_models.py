@@ -157,3 +157,41 @@ def test_detect_aide_with_cch(mock_dns, mock_which):
     result = detect_aide_environment()
     assert result["cch_path"] == "/usr/bin/coding-cli-helper.exe"
     assert result["gateway_reachable"] is True
+
+
+def test_merge_folds_responses_catalog_slugs():
+    """models[] (the Codex/Responses catalog) entries without a data[] twin —
+    the databricks/* "Outside Cloud" deployments — must be folded into the
+    merged list so the /model picker lists them under the plain AIDE
+    providers (live-verified: /v1/chat/completions 400s for them, Hermes
+    auto-upgrades them to the Responses transport)."""
+    v1 = dict(V1_MODELS_RESPONSE)
+    v1["models"] = [
+        {"slug": "databricks/glm-5-3", "display_name": "GLM 5.3 (Databricks, Outside Cloud)"},
+        {"slug": "databricks/kimi-k3", "display_name": "Kimi K3 (Databricks, Outside Cloud)"},
+        # a slug that ALSO exists in data[] must not duplicate
+        {"slug": "mtk/deepseek-v32", "display_name": "DeepSeek-V4"},
+    ]
+    models = merge_aide_models(v1, V3_MODELS_RESPONSE)
+    ids = [m.id for m in models]
+    assert "databricks/glm-5-3" in ids
+    assert "databricks/kimi-k3" in ids
+    assert ids.count("mtk/deepseek-v32") == 1
+    assert len(ids) == len(set(ids))
+
+
+def test_databricks_models_require_responses_transport():
+    """/v1/chat/completions rejects databricks/* with 400 "Invalid model type"
+    (live-verified 2026-10-08) — the Responses auto-upgrade must claim them
+    BEFORE vendor-prefix stripping (the databricks/ prefix is part of the
+    responses-side id), and must not swallow chat-side gpt-6 models."""
+    from run_agent import AIAgent
+
+    assert AIAgent._model_requires_responses_api("databricks/glm-5-3") is True
+    assert AIAgent._model_requires_responses_api("azure/gpt-6-luna") is False
+    assert AIAgent._provider_model_requires_responses_api(
+        "databricks/glm-5-3", provider="custom"
+    ) is True
+    assert AIAgent._provider_model_requires_responses_api(
+        "azure/gpt-6-luna", provider="custom"
+    ) is False

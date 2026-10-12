@@ -1475,6 +1475,15 @@ class AIAgent:
         which provider is serving the model.
         """
         m = model.lower()
+        # AIDE databricks/* deployments (Outside Cloud) are served
+        # exclusively via /v1/responses — live-verified 2026-10-08:
+        # /v1/chat/completions returns 400 "Invalid model type" for every
+        # databricks/* id. Checked BEFORE vendor-prefix stripping: unlike
+        # "openai/gpt-5", the "databricks/" prefix is part of the
+        # responses-side model id, and stripping it would collide with
+        # unrelated bare model names.
+        if m.startswith("databricks/"):
+            return True
         # Strip vendor prefix (e.g. "openai/gpt-5.4" → "gpt-5.4")
         if "/" in m:
             m = m.rsplit("/", 1)[-1]
@@ -1507,9 +1516,14 @@ class AIAgent:
             # direct OpenAI/xAI URL detection should auto-upgrade them.
             # EXCEPTION — AIDE gateways (mlop-azure-gateway*): the gpt-6.1-sol
             # deployment CANNOT take tools on /v1/chat/completions under any
-            # reasoning_effort (live-verified 2026-10-11), so for that model
-            # the Responses upgrade is the only usable path on this gateway.
+            # reasoning_effort (live-verified 2026-10-11), and the
+            # databricks/* deployments are rejected outright by
+            # /v1/chat/completions (live-verified 2026-10-08, 400 "Invalid
+            # model type"). For those models the Responses upgrade is the
+            # only usable path on this gateway.
             m = model.lower()
+            if m.startswith("databricks/"):
+                return True
             if "/" in m:
                 m = m.rsplit("/", 1)[-1]
             if m.startswith("gpt-6.1"):

@@ -21,7 +21,10 @@ def test_gpt6_luna_sol_stay_on_chat_completions():
 def test_custom_provider_upgrade_gpt61_but_not_generic_custom():
     assert AIAgent._provider_model_requires_responses_api("azure/gpt-6.1-sol", provider="custom") is True
     assert AIAgent._provider_model_requires_responses_api("azure/gpt-6-luna", provider="custom") is False
-    assert AIAgent._provider_model_requires_responses_api("databricks/glm-5-3", provider="custom") is False
+    # databricks/* requires the Responses API on this gateway (chat/completions
+    # 400s with "Invalid model type" — live 2026-10-08), mirroring gpt-6.1-sol:
+    # they are now listed under the plain AIDE providers and must auto-upgrade.
+    assert AIAgent._provider_model_requires_responses_api("databricks/glm-5-3", provider="custom") is True
 
 
 def test_codex_transport_strips_azure_prefix_on_aide_for_gpt_only():
