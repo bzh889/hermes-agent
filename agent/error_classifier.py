@@ -977,6 +977,15 @@ def _classify_by_status(
                 should_rotate_credential=True,
                 should_fallback=True,
             )
+        # MTK AIDE gateways intermittently reject cross-site-proxy model calls
+        # with "invalid cross-site proxy attestation" while the SAME credential
+        # succeeds seconds later (live-observed 2026-10-14: 403 at 20:09:20 then
+        # a successful call at 20:09:36, 43 successes vs 3 rejections same day).
+        # Treating it as terminal auth kills a healthy provider choice and
+        # permanently falls the conversation over to a weaker fallback model.
+        # Retry in place instead: unknown reason is retryable with no fallback.
+        if "cross-site proxy attestation" in error_msg:
+            return result_fn(FailoverReason.unknown, retryable=True, should_fallback=False)
         return result_fn(
             FailoverReason.auth,
             retryable=False,

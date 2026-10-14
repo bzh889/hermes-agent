@@ -197,3 +197,28 @@ syslog.txt
 # MTK AIDE gateway JWT token file — contains a live credential.
 config.ini
 native/fts5_cjk/*.so
+
+# --- 2026-10-14: local workspace artifacts (user investigation / session deliverables with PII) ---
+# AI Grand Rounds deck session dir: quotes contain colleague names — never enters repo
+sessions/
+# AIDE / model-comparison investigation artifacts (emp-id paths inside)
+aide_*.json
+three_model_pk_30q*.json
+gpt6_*_benchmark_raw.json
+test_durations.json
+hermes-routing-review.html
+# skill-lessons local state
+.ai-lessons-choice.json
+.ai-lessons-pending.guard.json
+.ai-lessons-pending.snapshot.jsonl
+# local impeccable hook config
+.github/hooks/
+# accidental console-paste artifact files
+/({src
+/({t
+/d.removeAttribute*
+/h.textContent*
+/x.innerText*
+/C\357\200\272*
+# scratch workspace was deliberately untracked in 3ad5f2489 — keep it out
+.scratch/
